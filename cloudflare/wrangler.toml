@@ -2,6 +2,11 @@ name = "nwflash-rom"
 main = "src/index.ts"
 compatibility_date = "2026-08-13"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "nwflash-db"
+database_id = "a35d1ea1-620f-436c-9eb5-7f58312c1cf6"
+
 # 变量(非机密)。机密 VOTA_API_TOKEN 用 `wrangler secret put VOTA_API_TOKEN` 设置。
 [vars]
 VOTA_BASE_URL = "https://api.otau.cc.cd"

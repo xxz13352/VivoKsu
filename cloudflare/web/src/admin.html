@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nwflash.cc.cd · 后台管理</title>
+<style>
+  :root{
+    --teal:#0a8c86; --teal-d:#08766e; --teal-l:#eaf7f5;
+    --ink:#22313a; --muted:#6b7a83; --line:#e3ecea;
+    --bg:#f4f8f7; --card:#ffffff; --danger:#c63b33; --ok:#0a8c86;
+    --mono:"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);min-height:100vh}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px}
+  h1{font-size:20px;font-weight:700;letter-spacing:.3px}
+  h1 .sub{color:var(--muted);font-weight:400;font-size:13px;margin-left:10px;font-family:var(--mono)}
+  /* 登录 */
+  .login-card{max-width:380px;margin:12vh auto;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:34px 30px;box-shadow:0 10px 30px rgba(10,140,134,.08)}
+  .login-card .logo{width:46px;height:46px;border-radius:12px;background:var(--teal);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;margin-bottom:18px}
+  .login-card h2{font-size:17px;margin-bottom:4px}
+  .login-card p{color:var(--muted);font-size:12px;margin-bottom:20px}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 5px}
+  input,select{width:100%;height:36px;border:1px solid var(--line);border-radius:8px;padding:0 11px;font-size:13px;outline:none;background:#fff;color:var(--ink)}
+  input:focus,select:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(10,140,134,.12)}
+  button{height:36px;border:none;border-radius:8px;background:var(--teal);color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:0 16px}
+  button:hover{background:var(--teal-d)}
+  button.ghost{background:#fff;color:var(--teal);border:1px solid var(--teal)}
+  button.ghost:hover{background:var(--teal-l)}
+  button.danger{background:var(--danger)}
+  button.small{height:28px;padding:0 10px;font-size:12px}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .err{color:var(--danger);font-size:12px;min-height:16px;margin-top:10px}
+  /* 顶部栏 */
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px;flex-wrap:wrap;gap:10px}
+  .topbar .right{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}
+  /* tabs */
+  .tabs{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:4px;margin-bottom:18px;width:fit-content}
+  .tab{padding:8px 18px;border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer;font-weight:600}
+  .tab.active{background:var(--teal);color:#fff}
+  .panel{display:none}
+  .panel.active{display:block}
+  /* 卡片 */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
+  .card h3{font-size:14px;margin-bottom:14px;font-weight:700}
+  .form-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+  .form-row .field{flex:1;min-width:150px}
+  .form-row .field input{height:34px}
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--muted);font-weight:600;font-size:12px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tr:hover td{background:#fafdfc}
+  .mono{font-family:var(--mono);font-size:12px}
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
+  .pill.on{background:var(--teal-l);color:var(--teal-d)}
+  .pill.off{background:#fdeceb;color:var(--danger)}
+  .muted{color:var(--muted);font-size:12px}
+  .url-cell{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11px}
+  .token-banner{margin-top:10px;padding:10px 12px;border:1px dashed var(--teal);border-radius:8px;background:var(--teal-l);font-family:var(--mono);font-size:12px;color:var(--teal-d);word-break:break-all;display:none}
+  .pager{display:flex;gap:8px;align-items:center;margin-top:12px}
+  .empty{color:var(--muted);font-size:13px;padding:24px;text-align:center}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#22313a;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
+  .toast.show{opacity:1}
+  code{background:var(--teal-l);color:var(--teal-d);padding:1px 6px;border-radius:5px;font-family:var(--mono);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- 登录 -->
+  <div id="loginView" class="login-card">
+    <div class="logo">NW</div>
+    <h2>nwflash 后台管理</h2>
+    <p>api.nwflash.cc.cd · ROM 服务控制台</p>
+    <label>管理员账号</label>
+    <input id="loginUser" autocomplete="username" placeholder="admin">
+    <label>密码</label>
+    <input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••">
+    <div class="err" id="loginErr"></div>
+    <button id="loginBtn" style="width:100%;margin-top:16px">登 录</button>
+  </div>
+
+  <!-- 后台 -->
+  <div id="appView" style="display:none">
+    <div class="topbar">
+      <h1>nwflash.cc.cd <span class="sub">ROM 服务后台</span></h1>
+      <div class="right">
+        <span id="meLabel"></span>
+        <button class="ghost small" id="logoutBtn">退出</button>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="versions">版本号控制</div>
+      <div class="tab" data-tab="users">用户管理</div>
+      <div class="tab" data-tab="logs">用户日志</div>
+      <div class="tab" data-tab="account">账号</div>
+    </div>
+
+    <!-- 版本号控制 -->
+    <div class="panel active" id="tab-versions">
+      <div class="card">
+        <h3>添加允许的版本</h3>
+        <div class="form-row">
+          <div class="field"><label>PD</label><input id="vPd" placeholder="PD2417"></div>
+          <div class="field" style="flex:2"><label>版本号</label><input id="vVer" placeholder="16.2.12.0.W10.V000L1"></div>
+          <button id="vAdd">添加</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>版本列表 <span class="muted">(API 只允许解析此处启用版本的 OTA 链接)</span></h3>
+        <table><thead><tr><th>PD</th><th>版本</th><th>状态</th><th>添加时间</th><th style="width:140px">操作</th></tr></thead>
+        <tbody id="versionBody"></tbody></table>
+        <div class="empty" id="versionEmpty" style="display:none">暂无版本记录</div>
+      </div>
+    </div>
+
+    <!-- 用户管理 -->
+    <div class="panel" id="tab-users">
+      <div class="card">
+        <h3>添加 API 用户</h3>
+        <div class="form-row">
+          <div class="field"><label>名称</label><input id="uName" placeholder="桌面端-张三"></div>
+          <div class="field" style="flex:2"><label>备注</label><input id="uNote" placeholder="可选"></div>
+          <button id="uAdd">创建用户</button>
+        </div>
+        <div class="token-banner" id="uTokenBanner"></div>
+      </div>
+      <div class="card">
+        <h3>用户列表</h3>
+        <table><thead><tr><th>ID</th><th>名称</th><th>状态</th><th>备注</th><th>创建</th><th style="width:230px">操作</th></tr></thead>
+        <tbody id="userBody"></tbody></table>
+        <div class="empty" id="userEmpty" style="display:none">暂无用户</div>
+      </div>
+    </div>
+
+    <!-- 日志 -->
+    <div class="panel" id="tab-logs">
+      <div class="card">
+        <div class="form-row">
+          <div class="field"><label>按用户过滤</label><select id="logUser"><option value="">全部用户</option></select></div>
+          <div class="field"><label>按 PD 过滤</label><input id="logPd" placeholder="PD2417"></div>
+          <button id="logRefresh">刷新</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>访问日志 <span class="muted">(每次 API 查询)</span></h3>
+        <table><thead><tr><th>时间</th><th>用户</th><th>PD</th><th>版本</th><th>状态</th><th>OTA 链接</th></tr></thead>
+        <tbody id="logBody"></tbody></table>
+        <div class="empty" id="logEmpty" style="display:none">暂无日志</div>
+        <div class="pager">
+          <button class="ghost small" id="logPrev">上一页</button>
+          <span class="muted" id="logInfo"></span>
+          <button class="ghost small" id="logNext">下一页</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 账号 -->
+    <div class="panel" id="tab-account">
+      <div class="card">
+        <h3>修改密码</h3>
+        <div class="form-row">
+          <div class="field"><label>新密码(至少 8 位)</label><input id="pwNew" type="password"></div>
+          <button id="pwSave">保存</button>
+        </div>
+        <div class="err" id="pwErr"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let admin = null;
+
+/* ---- 通用 ---- */
+async function api(path, method = "GET", body) {
+  const r = await fetch(path, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && !path.includes("/login")) {
+    showLogin();
+    throw new Error(data.error || "未登录");
+  }
+  if (!r.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+let toastTimer;
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2200); }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+/* ---- 视图切换 ---- */
+function showLogin() {
+  admin = null;
+  $("loginView").style.display = "block";
+  $("appView").style.display = "none";
+}
+function showApp() {
+  $("loginView").style.display = "none";
+  $("appView").style.display = "block";
+  $("meLabel").textContent = admin ? "管理员 · " + admin : "";
+  loadVersions(); loadUsers(); loadLogs();
+}
+
+/* ---- 登录 / 登出 / 改密 ---- */
+async function doLogin() {
+  const err = $("loginErr"); err.textContent = "";
+  try {
+    const data = await api("/api/login", "POST", { username: $("loginUser").value, password: $("loginPass").value });
+    admin = data.username;
+    showApp();
+    toast("登录成功");
+  } catch (e) { err.textContent = e.message; }
+}
+$("loginBtn").onclick = doLogin;
+$("loginPass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+$("logoutBtn").onclick = async () => { await api("/api/logout", "POST"); showLogin(); };
+$("pwSave").onclick = async () => {
+  $("pwErr").textContent = "";
+  try { await api("/api/change-password", "POST", { newPassword: $("pwNew").value }); $("pwNew").value = ""; toast("密码已修改,请重新登录"); setTimeout(() => { showLogin(); }, 600); }
+  catch (e) { $("pwErr").textContent = e.message; }
+};
+
+/* ---- tabs ---- */
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));
+  document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + t.dataset.tab));
+  if (t.dataset.tab === "logs") loadLogs();
+  if (t.dataset.tab === "users") loadUsers();
+  if (t.dataset.tab === "versions") loadVersions();
+});
+
+/* ---- 版本号控制 ---- */
+async function loadVersions() {
+  try {
+    const data = await api("/api/versions");
+    const rows = data.versions || [];
+    $("versionEmpty").style.display = rows.length ? "none" : "block";
+    $("versionBody").innerHTML = rows.map(v => `
+      <tr>
+        <td><b>${esc(v.pd)}</b></td>
+        <td class="mono">${esc(v.version)}</td>
+        <td><span class="pill ${v.enabled ? "on" : "off"}">${v.enabled ? "启用" : "停用"}</span></td>
+        <td class="muted">${esc(v.created_at)}</td>
+        <td>
+          <button class="ghost small" onclick="toggleVersion(${v.id}, ${!v.enabled})">${v.enabled ? "停用" : "启用"}</button>
+          <button class="danger small" onclick="delVersion(${v.id})">删除</button>
+        </td>
+      </tr>`).join("");
+  } catch (e) { toast(e.message); }
+}
+$("vAdd").onclick = async () => {
+  try {
+    await api("/api/versions", "POST", { pd: $("vPd").value, version: $("vVer").value });
+    $("vPd").value = ""; $("vVer").value = ""; toast("已添加"); loadVersions();
+  } catch (e) { toast(e.message); }
+};
+async function toggleVersion(id, enabled) { try { await api("/api/versions/" + id, "PUT", { enabled }); loadVersions(); } catch (e) { toast(e.message); } }
+async function delVersion(id) { if (!confirm("确认删除该版本?")) return; try { await api("/api/versions/" + id, "DELETE"); loadVersions(); } catch (e) { toast(e.message); } }
+
+/* ---- 用户管理 ---- */
+async function loadUsers() {
+  try {
+    const data = await api("/api/users");
+    const rows = data.users || [];
+    $("userEmpty").style.display = rows.length ? "none" : "block";
+    $("userBody").innerHTML = rows.map(u => `
+      <tr>
+        <td class="mono">${u.id}</td>
+        <td><b>${esc(u.name)}</b></td>
+        <td><span class="pill ${u.enabled ? "on" : "off"}">${u.enabled ? "启用" : "停用"}</span></td>
+        <td class="muted">${esc(u.note)}</td>
+        <td class="muted">${esc(u.created_at)}</td>
+        <td>
+          <button class="ghost small" onclick="rotateToken(${u.id})">换 token</button>
+          <button class="ghost small" onclick="toggleUser(${u.id}, ${!u.enabled})">${u.enabled ? "停用" : "启用"}</button>
+          <button class="danger small" onclick="delUser(${u.id})">删除</button>
+        </td>
+      </tr>`).join("");
+  } catch (e) { toast(e.message); }
+}
+$("uAdd").onclick = async () => {
+  try {
+    const data = await api("/api/users", "POST", { name: $("uName").value, note: $("uNote").value });
+    const b = $("uTokenBanner");
+    b.style.display = "block";
+    b.innerHTML = `用户已创建,API token(仅显示一次,请复制保存):<br><b>${data.token}</b>`;
+    $("uName").value = ""; $("uNote").value = ""; loadUsers();
+  } catch (e) { toast(e.message); }
+};
+async function rotateToken(id) {
+  try {
+    const data = await api("/api/users/" + id + "/rotate-token", "POST");
+    const b = $("uTokenBanner");
+    b.style.display = "block";
+    b.innerHTML = `新 token(仅显示一次):<br><b>${data.token}</b>`;
+  } catch (e) { toast(e.message); }
+}
+async function toggleUser(id, enabled) { try { await api("/api/users/" + id, "PUT", { enabled }); loadUsers(); } catch (e) { toast(e.message); } }
+async function delUser(id) { if (!confirm("确认删除该用户?")) return; try { await api("/api/users/" + id, "DELETE"); loadUsers(); } catch (e) { toast(e.message); } }
+
+/* ---- 日志 ---- */
+let logPage = 0;
+const LOG_PAGE_SIZE = 50;
+async function loadLogs() {
+  try {
+    const users = await api("/api/users");
+    $("logUser").innerHTML = '<option value="">全部用户</option>' + users.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
+    const q = new URLSearchParams({ limit: String(LOG_PAGE_SIZE), offset: String(logPage * LOG_PAGE_SIZE) });
+    if ($("logUser").value) q.set("userId", $("logUser").value);
+    if ($("logPd").value) q.set("pd", $("logPd").value);
+    const data = await api("/api/logs?" + q.toString());
+    const rows = data.logs || [];
+    $("logEmpty").style.display = rows.length ? "none" : "block";
+    $("logBody").innerHTML = rows.map(l => `
+      <tr>
+        <td class="mono muted">${esc(l.created_at)}</td>
+        <td>${esc(l.api_user_name || "匿名")}</td>
+        <td><b>${esc(l.pd)}</b></td>
+        <td class="mono">${esc(l.version)}</td>
+        <td><span class="pill ${l.status < 400 ? "on" : "off"}">${l.status}</span></td>
+        <td class="url-cell" title="${esc(l.url || "")}">${esc(l.url || "—")}</td>
+      </tr>`).join("");
+    $("logInfo").textContent = `第 ${logPage + 1} 页`;
+  } catch (e) { toast(e.message); }
+}
+$("logPrev").onclick = () => { if (logPage > 0) { logPage--; loadLogs(); } };
+$("logNext").onclick = () => { logPage++; loadLogs(); };
+$("logRefresh").onclick = () => { logPage = 0; loadLogs(); };
+$("logUser").onchange = () => { logPage = 0; loadLogs(); };
+$("logPd").addEventListener("keydown", e => { if (e.key === "Enter") { logPage = 0; loadLogs(); } });
+
+/* ---- 启动:检测会话 ---- */
+(async () => {
+  try {
+    const me = await api("/api/me");
+    if (me.loggedIn) { admin = me.username; showApp(); }
+    else showLogin();
+  } catch { showLogin(); }
+})();
+</script>
+</body>
+</html>

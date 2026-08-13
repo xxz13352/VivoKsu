@@ -1,11 +1,14 @@
 # api.nwflash.cc.cd —— API 文档
 
-`api.nwflash.cc.cd` 是 VivoKsu 的 ROM OTA 链接代理服务(Cloudflare Worker `nwflash-rom`)。它唯一持有 VOTA API Token,接收客户端的 **PD + 版本号**,转发到 VOTA 取回 OTA 下载链接。客户端无需任何鉴权/凭据。
+`api.nwflash.cc.cd` 是 VivoKsu 的 ROM OTA 链接代理服务(Cloudflare Worker `nwflash-rom`)。它唯一持有 VOTA API Token,接收客户端的 **PD + 版本号**,转发到 VOTA 取回 OTA 下载链接。
 
 - **Base URL**: `https://api.nwflash.cc.cd`
 - **上游**: `https://api.otau.cc.cd`(VOTA,不对外暴露,不改动)
-- **协议**: HTTPS + JSON
-- **CORS**: 已允许跨域(`Access-Control-Allow-Origin: *`),浏览器 / 桌面 / 脚本均可直连
+- **协议**: HTTPS + JSON(Cloudflare 边缘 TLS 1.3)
+- **CORS**: 已允许跨域(`Access-Control-Allow-Origin: *`)
+- **鉴权**: 可选 `Authorization: Bearer <API token>`(token 由后台「用户管理」生成;不带则记为匿名)
+- **版本控制**: 只有后台「版本号控制」里启用的 PD+版本才返回链接,否则 404
+- **日志**: 每次查询记入 D1(按用户),可在 `web.nwflash.cc.cd` 查看
 
 ## 端点
 
@@ -27,14 +30,20 @@
 
 ### `GET /api/rom?pd=<PD>&version=<版本>`
 
-按 **PD 码 + 版本号** 解析 OTA 下载链接。
+按 **PD 码 + 版本号** 解析 OTA 下载链接。**只有后台「版本号控制」里启用**的 PD+版本才会返回链接。
+
+**请求头**(可选)
+
+| 头 | 说明 |
+| --- | --- |
+| `Authorization: Bearer <token>` | API 用户 token(后台「用户管理」生成)。携带则日志按该用户记录;不带记为匿名;无效/停用 → 401 |
 
 **参数**
 
 | 参数 | 必填 | 说明 | 示例 |
 | --- | --- | --- | --- |
 | `pd` | ✅ | 设备 PD 码(`ro.product.device`) | `PD2417` |
-| `version` | ✅ | 固件版本号(VOTA 平台记录的值,通常来自设备 `ro.build.version.bbk` 最后一段) | `16.2.12.0.W10.V000L1` |
+| `version` | ✅ | 固件版本号(需在后台启用) | `16.2.12.0.W10.V000L1` |
 
 **成功响应 200**
 ```json
@@ -64,10 +73,12 @@
 | HTTP | `error` 示例 | 含义 |
 | --- | --- | --- |
 | `400` | `缺少 pd 或 version 查询参数。` | 缺参数 |
+| `401` | `API token 无效或已停用。` | 携带了无效 / 停用的 API token |
 | `401` | `AUTH_FAIL` 文本 | VOTA 认证失败(worker 的 token 无效 / 被吊销) |
 | `402` | `INSUFFICIENT_CREDITS` 文本 | 账户信用点不足(每次成功查询扣信用点) |
 | `403` | `FORBIDDEN` 文本 | VOTA 拒绝(VOTA_VER 不在白名单等) |
-| `404` | `record not found` | **该 PD + 版本在平台无记录**(最常见) |
+| `404` | `该版本未授权或不存在。` | **该 PD+版本未在后台「版本号控制」启用**(最常见) |
+| `404` | `record not found` | 版本已启用但 VOTA 平台无记录 |
 | `429` | `RATE_LIMITED` 文本 | 请求过于频繁 |
 | `500` | `服务端未配置 VOTA 凭据。` / `内部错误。` | worker 缺 token / 未捕获异常 |
 | `502` | `无法连接上游 ROM API。` / `上游返回异常。` | 连不上 VOTA 或上游响应异常 |
@@ -117,7 +128,13 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | 日期 | 变更 |
 | --- | --- |
 | 2026-08-13 | 初始部署:worker `nwflash-rom`,自定义域 `api.nwflash.cc.cd`;`/health` + `/api/rom` 代理 VOTA `resolve_url`;token 存 worker 机密;错误映射 400/401/402/403/404/429/500/502 |
-| (规划) | 登录系统、后台系统等将加在此 API 上 |
+| 2026-08-13 | **接入后台系统**:共用 D1(`nwflash-db`);`/api/rom` 增加 版本号控制(未启用版本→404)、API 用户 token 认证(可选,无效→401)、按用户记访问日志。后台管理见 `web.nwflash.cc.cd`(登录 / 版本 / 用户 / 日志) |
+| (规划) | 登录系统完善、更细粒度的权限、配额限制等 |
+
+## 管理后台
+
+- 地址:`https://web.nwflash.cc.cd`(详见 `web/README.md`)。
+- 功能:管理员登录、版本号控制、API 用户管理(token 生成/轮换/停用)、访问日志查看。
 
 ## 代码结构
 
