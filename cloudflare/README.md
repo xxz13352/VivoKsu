@@ -1,5 +1,7 @@
 # VivoKsu Cloudflare Worker(ROM OTA 代理)
 
+> **接口契约见 [API.md](API.md)** —— 端点、参数、响应、错误码、计费、功能记录。
+
 把 VivoKsu 的服务端搬到 Cloudflare Workers,部署在 **`api.nwflash.cc.cd`**。
 桌面应用把 `OtaApiClient` 的 `DefaultBaseUrl` 指到 `https://api.nwflash.cc.cd` 即可,无需本地起 .NET 服务端。
 

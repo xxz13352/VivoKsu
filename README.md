@@ -173,4 +173,5 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 ## 相关文档
 
 - [docs/safeflash-ota.md](docs/safeflash-ota.md) —— 安全刷写流程、OTA 格式、下载/刷写内部细节与踩坑。
+- [cloudflare/API.md](cloudflare/API.md) —— **api.nwflash.cc.cd 接口契约**(端点、参数、响应、错误码、计费、功能记录)。
 - [cloudflare/README.md](cloudflare/README.md) —— Cloudflare Worker(api.nwflash.cc.cd)部署说明。
