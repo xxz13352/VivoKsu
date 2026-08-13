@@ -257,7 +257,7 @@ async function deleteVersion(path: string, env: Env): Promise<Response> {
 
 async function listUsers(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
-    "SELECT id, username, name, enabled, note, created_at FROM api_users ORDER BY id"
+    "SELECT id, username, name, enabled, banned, note, created_at FROM api_users ORDER BY id"
   ).all<UserRow>(); // token / password 不回显
   return json({ users: rows.results }, 200);
 }
@@ -293,6 +293,11 @@ async function updateUser(request: Request, path: string, env: Env): Promise<Res
   if (typeof body?.enabled === "boolean") {
     await env.DB.prepare("UPDATE api_users SET enabled = ? WHERE id = ?")
       .bind(body.enabled ? 1 : 0, id)
+      .run();
+  }
+  if (typeof body?.banned === "boolean") {
+    await env.DB.prepare("UPDATE api_users SET banned = ? WHERE id = ?")
+      .bind(body.banned ? 1 : 0, id)
       .run();
   }
   if (typeof body?.note === "string") {
@@ -413,6 +418,7 @@ interface UserRow {
   username: string;
   name: string;
   enabled: number;
+  banned: number;
   note: string;
   created_at: string;
 }

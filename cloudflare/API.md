@@ -42,7 +42,7 @@
 { "ok": true, "token": "<64位hex>", "username": "demo", "name": "演示用户" }
 ```
 
-**失败**:`401 { "error": "用户名或密码错误。" }`(账号不存在 / 密码错 / 已停用);`400` 缺参数。
+**失败**:`401` —— `用户名或密码错误` / `账号已被封禁,请联系管理员。` / `账号已被停用。`;`400` 缺参数。
 
 ---
 
@@ -60,13 +60,13 @@
 
 ### `GET /api/rom?pd=<PD>&version=<版本>`
 
-按 **PD 码 + 版本号** 解析 OTA 下载链接。**只有后台「版本号控制」里启用**的 PD+版本才会返回链接。
+按 **PD 码 + 版本号** 解析 OTA 下载链接。**必须携带登录 token**,且版本需在后台启用。
 
-**请求头**(可选)
+**请求头**
 
 | 头 | 说明 |
 | --- | --- |
-| `Authorization: Bearer <token>` | API 用户 token(后台「用户管理」生成)。携带则日志按该用户记录;不带记为匿名;无效/停用 → 401 |
+| `Authorization: Bearer <token>` | **必填**。API 用户 token(登录或后台「用户管理」获取)。无 / 无效 → 401;封禁 → 403 |
 
 **参数**
 
@@ -103,7 +103,9 @@
 | HTTP | `error` 示例 | 含义 |
 | --- | --- | --- |
 | `400` | `缺少 pd 或 version 查询参数。` | 缺参数 |
-| `401` | `API token 无效或已停用。` | 携带了无效 / 停用的 API token |
+| `401` | `请先登录。` | 未携带 `Authorization: Bearer` token |
+| `401` | `API token 无效或已停用。` | token 无效 / 账号被停用 |
+| `403` | `账号已被封禁。` | 账号被封禁(后台操作) |
 | `401` | `AUTH_FAIL` 文本 | VOTA 认证失败(worker 的 token 无效 / 被吊销) |
 | `402` | `INSUFFICIENT_CREDITS` 文本 | 账户信用点不足(每次成功查询扣信用点) |
 | `403` | `FORBIDDEN` 文本 | VOTA 拒绝(VOTA_VER 不在白名单等) |
@@ -160,6 +162,7 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | 2026-08-13 | 初始部署:worker `nwflash-rom`,自定义域 `api.nwflash.cc.cd`;`/health` + `/api/rom` 代理 VOTA `resolve_url`;token 存 worker 机密;错误映射 400/401/402/403/404/429/500/502 |
 | 2026-08-13 | **接入后台系统**:共用 D1(`nwflash-db`);`/api/rom` 增加 版本号控制(未启用版本→404)、API 用户 token 认证(可选,无效→401)、按用户记访问日志。后台管理见 `web.nwflash.cc.cd`(登录 / 版本 / 用户 / 日志) |
 | 2026-08-13 | **桌面端登录(商业工具)**:api_users 加 username/password(PBKDF2);新增 `POST /api/login`(账号密码→token)与 `GET /api/me`(校验 token);VivoKsu 桌面端启动强制登录 |
+| 2026-08-13 | **强制登录 + 封禁**:`/api/rom` 必须携带 token(无→401 请先登录);api_users 加 `banned`,封禁用户禁止登录与查询(登录 401 / 查询 403);后台支持封禁/解封 |
 | (规划) | 配额限制、订阅计费等 |
 
 ## 管理后台

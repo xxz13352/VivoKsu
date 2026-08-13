@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS api_users (
   password TEXT,                          -- PBKDF2 密码哈希(hex)
   salt TEXT,                              -- PBKDF2 随机盐(hex)
   enabled INTEGER NOT NULL DEFAULT 1,
+  banned INTEGER NOT NULL DEFAULT 0,      -- 封禁:禁止登录与查询
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

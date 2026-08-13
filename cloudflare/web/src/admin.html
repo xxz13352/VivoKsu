@@ -344,20 +344,27 @@ async function loadUsers() {
     const data = await api("/api/users");
     const rows = data.users || [];
     $("userEmpty").style.display = rows.length ? "none" : "block";
-    $("userBody").innerHTML = rows.map(u => `
+    $("userBody").innerHTML = rows.map(u => {
+      const status = u.banned ? '<span class="pill off">已封禁</span>'
+        : `<span class="pill ${u.enabled ? "on" : "off"}">${u.enabled ? "启用" : "停用"}</span>`;
+      return `
       <tr>
         <td class="mono">${esc(u.username)}</td>
         <td><span class="cell-title">${esc(u.name)}</span></td>
-        <td><span class="pill ${u.enabled ? "on" : "off"}">${u.enabled ? "启用" : "停用"}</span></td>
+        <td>${status}</td>
         <td class="muted" style="color:var(--muted)">${esc(u.note)}</td>
         <td class="mono" style="color:var(--faint)">${esc(time(u.created_at))}</td>
         <td><div class="ops">
           <button class="btn btn-ghost btn-xs" onclick="resetPw(${u.id})">重置密码</button>
           <button class="btn btn-ghost btn-xs" onclick="rotateToken(${u.id})">换 token</button>
+          ${u.banned
+            ? `<button class="btn btn-ghost btn-xs" onclick="toggleBan(${u.id}, false)">解封</button>`
+            : `<button class="btn btn-danger btn-xs" onclick="toggleBan(${u.id}, true)">封禁</button>`}
           <button class="btn btn-ghost btn-xs" onclick="toggleUser(${u.id}, ${!u.enabled})">${u.enabled ? "停用" : "启用"}</button>
           <button class="btn btn-danger btn-xs" onclick="delUser(${u.id})">删除</button>
         </div></td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
   } catch (e) { toast(e.message); }
 }
 $("uAdd").onclick = async () => {
@@ -380,6 +387,11 @@ async function rotateToken(id) {
   } catch (e) { toast(e.message); }
 }
 async function toggleUser(id, enabled) { try { await api("/api/users/" + id, "PUT", { enabled }); loadUsers(); } catch (e) { toast(e.message); } }
+async function toggleBan(id, banned) {
+  const msg = banned ? "封禁后该用户无法登录与查询,确认?" : "确认解封该用户?";
+  if (!confirm(msg)) return;
+  try { await api("/api/users/" + id, "PUT", { banned }); loadUsers(); toast(banned ? "已封禁" : "已解封"); } catch (e) { toast(e.message); }
+}
 async function delUser(id) { if (!confirm("删除该用户后,其 token 立即失效。确认?")) return; try { await api("/api/users/" + id, "DELETE"); loadUsers(); } catch (e) { toast(e.message); } }
 
 /* ---- 日志(终端) ---- */

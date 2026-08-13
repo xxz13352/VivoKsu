@@ -74,11 +74,13 @@ export default {
 };
 
 async function resolveRom(env: Env, pd: string, version: string, request: Request): Promise<Response> {
-  // 1. 客户端认证(可选 API token):携带有效 token 记到对应用户;无效 token → 401;不带 → 匿名。
+  // 1. 强制登录:无 token / 无效 token → 401;封禁 → 403。
   const auth = await authenticateUser(env, request);
   if (auth instanceof Response) return auth;
-  const userId = auth?.id ?? null;
-  const userName = auth?.name ?? "匿名";
+  if (auth === null) return json({ error: "请先登录。" }, 401);
+  if (auth.banned) return json({ error: "账号已被封禁。" }, 403);
+  const userId = auth.id;
+  const userName = auth.name;
 
   // 2. 版本号控制:只允许后台「版本号控制」里启用的 PD+版本。
   const allowed = await env.DB
@@ -135,18 +137,18 @@ async function resolveRom(env: Env, pd: string, version: string, request: Reques
   }, 200);
 }
 
-/** 从 Authorization: Bearer 头解析 API 用户。无 token → null(匿名);token 无效/停用 → 401 Response。 */
-async function authenticateUser(env: Env, request: Request): Promise<{ id: number; name: string } | null | Response> {
+/** 从 Authorization: Bearer 头解析 API 用户。无 token → null;token 无效/停用 → 401 Response。 */
+async function authenticateUser(env: Env, request: Request): Promise<{ id: number; name: string; banned: boolean } | null | Response> {
   const header = request.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) return null;
 
   const user = await env.DB
-    .prepare("SELECT id, name FROM api_users WHERE token = ? AND enabled = 1")
+    .prepare("SELECT id, name, enabled, banned FROM api_users WHERE token = ?")
     .bind(token)
-    .first<{ id: number; name: string }>();
-  if (!user) return json({ error: "API token 无效或已停用。" }, 401);
-  return user;
+    .first<{ id: number; name: string; enabled: number; banned: number }>();
+  if (!user || !user.enabled) return json({ error: "API token 无效或已停用。" }, 401);
+  return { id: user.id, name: user.name, banned: user.banned === 1 };
 }
 
 /** 写一条访问日志(D1 失败不影响主流程)。 */
@@ -185,10 +187,12 @@ async function login(env: Env, request: Request): Promise<Response> {
   if (!username || !password) return json({ error: "缺少用户名或密码。" }, 400);
 
   const user = await env.DB
-    .prepare("SELECT * FROM api_users WHERE username = ? AND enabled = 1")
+    .prepare("SELECT * FROM api_users WHERE username = ?")
     .bind(username)
-    .first<{ id: number; name: string; token: string; password: string | null; salt: string | null }>();
+    .first<{ id: number; name: string; token: string; password: string | null; salt: string | null; enabled: number; banned: number }>();
   if (!user) return json({ error: "用户名或密码错误。" }, 401);
+  if (user.banned === 1) return json({ error: "账号已被封禁,请联系管理员。" }, 401);
+  if (user.enabled !== 1) return json({ error: "账号已被停用。" }, 401);
   if (!user.password || !user.salt) return json({ error: "该账号未设置密码,请联系管理员。" }, 401);
 
   const hash = await pbkdf2(password, user.salt);
