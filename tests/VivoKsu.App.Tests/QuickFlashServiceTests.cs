@@ -14,7 +14,7 @@ public class QuickFlashServiceTests : IDisposable
     {
         var content = new byte[] { 0x56, 0x4B, 0x53, 0x55 };
         await File.WriteAllBytesAsync(imagePath, content);
-        var service = new QuickFlashService(new FastbootRsBackend(new QuickFlashNativeApi()), new OperationLogService());
+        var service = CreateService();
 
         var image = await service.InspectImageAsync(imagePath, CancellationToken.None);
 
@@ -27,7 +27,7 @@ public class QuickFlashServiceTests : IDisposable
     {
         var binPath = Path.ChangeExtension(imagePath, ".bin");
         await File.WriteAllBytesAsync(binPath, [0x56, 0x4B, 0x53, 0x55]);
-        var service = new QuickFlashService(new FastbootRsBackend(new QuickFlashNativeApi()), new OperationLogService());
+        var service = CreateService();
 
         var image = await service.InspectImageAsync(binPath, CancellationToken.None);
 
@@ -40,16 +40,16 @@ public class QuickFlashServiceTests : IDisposable
     public async Task FlashAsync_flashes_an_approved_partition_then_reboots_a_matching_fastboot_device()
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);
-        var native = new QuickFlashNativeApi();
+        var fake = new FakeFastbootCliRunner();
         var logs = new OperationLogService();
-        var service = new QuickFlashService(new FastbootRsBackend(native), logs);
+        var service = CreateService(fake, logs);
         var session = new DeviceSessionViewModel();
         var image = await service.InspectImageAsync(imagePath, CancellationToken.None);
 
         await service.FlashAsync(session, QuickFlashPartition.InitBoot, image, FastbootTarget.Fastboot, CancellationToken.None);
 
-        Assert.Equal(("FAST123", "init_boot", imagePath), native.LastFlashRequest);
-        Assert.Equal("FAST123", native.FastbootRebootSerial);
+        Assert.Equal(("init_boot", imagePath), fake.LastFlash);
+        Assert.Contains("FAST123", fake.Rebooted);
         Assert.Equal(OperationKind.Completed, session.OperationKind);
         Assert.Contains(logs.Entries, entry => entry.Level == OperationLogLevel.Success);
     }
@@ -59,7 +59,7 @@ public class QuickFlashServiceTests : IDisposable
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);
         var logs = new OperationLogService();
-        var service = new QuickFlashService(new FastbootRsBackend(new EmptyQuickFlashNativeApi()), logs);
+        var service = CreateService(new FakeFastbootCliRunner(), logs);
         var session = new DeviceSessionViewModel();
         var image = await service.InspectImageAsync(imagePath, CancellationToken.None);
         using var cancellation = new CancellationTokenSource();
@@ -84,8 +84,8 @@ public class QuickFlashServiceTests : IDisposable
         var vendorPath = Path.ChangeExtension(imagePath, ".bin");
         await File.WriteAllBytesAsync(imagePath, [0x01]);
         await File.WriteAllBytesAsync(vendorPath, [0x02]);
-        var native = new QuickFlashNativeApi();
-        var service = new QuickFlashService(new FastbootRsBackend(native), new OperationLogService());
+        var fake = new FakeFastbootCliRunner();
+        var service = CreateService(fake, new OperationLogService());
         var session = new DeviceSessionViewModel();
 
         await service.FlashRootImagesAsync(
@@ -99,8 +99,8 @@ public class QuickFlashServiceTests : IDisposable
 
         Assert.Equal(
             [("FAST123", "init_boot", imagePath), ("FAST123", "vendor_boot", vendorPath)],
-            native.FlashRequests);
-        Assert.Equal("FAST123", native.FastbootRebootSerial);
+            fake.FlashRequests);
+        Assert.Contains("FAST123", fake.Rebooted);
         Assert.Equal(OperationKind.Completed, session.OperationKind);
         File.Delete(vendorPath);
     }
@@ -110,11 +110,11 @@ public class QuickFlashServiceTests : IDisposable
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);
         await File.WriteAllBytesAsync(secondImagePath, [0x02]);
-        var native = new QuickFlashNativeApi
+        var fake = new FakeFastbootCliRunner
         {
             GetVarHandler = variable => variable.StartsWith("has-slot:", StringComparison.Ordinal) ? "yes" : "no"
         };
-        var service = new QuickFlashService(new FastbootRsBackend(native), new OperationLogService());
+        var service = CreateService(fake);
         var session = new DeviceSessionViewModel();
 
         await service.FlashImagesAsync(
@@ -133,8 +133,8 @@ public class QuickFlashServiceTests : IDisposable
             ("FAST123", "init_boot_a", secondImagePath),
             ("FAST123", "init_boot_b", secondImagePath)
         ],
-        native.FlashRequests);
-        Assert.Null(native.FastbootRebootSerial);
+        fake.FlashRequests);
+        Assert.Empty(fake.Rebooted);
     }
 
     [Fact]
@@ -142,11 +142,11 @@ public class QuickFlashServiceTests : IDisposable
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);
         await File.WriteAllBytesAsync(secondImagePath, [0x02]);
-        var native = new QuickFlashNativeApi
+        var fake = new FakeFastbootCliRunner
         {
             GetVarHandler = variable => variable == "has-slot:boot" ? "yes" : "no"
         };
-        var service = new QuickFlashService(new FastbootRsBackend(native), new OperationLogService());
+        var service = CreateService(fake);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.FlashImagesAsync(
             new DeviceSessionViewModel(),
@@ -157,14 +157,14 @@ public class QuickFlashServiceTests : IDisposable
             new(FastbootTarget.Fastboot, true, true, false, false),
             CancellationToken.None));
 
-        Assert.Empty(native.FlashRequests);
+        Assert.Empty(fake.FlashRequests);
     }
 
     [Fact]
     public async Task Switch_slot_runs_after_all_flashes_and_before_optional_reboot()
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);
-        var native = new QuickFlashNativeApi
+        var fake = new FakeFastbootCliRunner
         {
             GetVarHandler = variable => variable switch
             {
@@ -174,7 +174,7 @@ public class QuickFlashServiceTests : IDisposable
                 _ => string.Empty
             }
         };
-        var service = new QuickFlashService(new FastbootRsBackend(native), new OperationLogService());
+        var service = CreateService(fake);
 
         await service.FlashImagesAsync(
             new DeviceSessionViewModel(),
@@ -182,14 +182,14 @@ public class QuickFlashServiceTests : IDisposable
             new(FastbootTarget.Fastboot, true, true, true, true),
             CancellationToken.None);
 
-        Assert.Equal(["flash:boot_a", "flash:boot_b", "set-active:b", "reboot"], native.Events);
+        Assert.Equal(["flash:boot_a", "flash:boot_b", "set-active:b", "reboot"], fake.Events);
     }
 
     [Fact]
     public async Task Flash_failure_prevents_slot_switch_and_reboot()
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);
-        var native = new QuickFlashNativeApi
+        var fake = new FakeFastbootCliRunner
         {
             FailPartition = "boot_b",
             GetVarHandler = variable => variable switch
@@ -200,7 +200,7 @@ public class QuickFlashServiceTests : IDisposable
                 _ => string.Empty
             }
         };
-        var service = new QuickFlashService(new FastbootRsBackend(native), new OperationLogService());
+        var service = CreateService(fake);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.FlashImagesAsync(
             new DeviceSessionViewModel(),
@@ -208,8 +208,8 @@ public class QuickFlashServiceTests : IDisposable
             new(FastbootTarget.Fastboot, true, true, true, true),
             CancellationToken.None));
 
-        Assert.Empty(native.SetActiveRequests);
-        Assert.Null(native.FastbootRebootSerial);
+        Assert.Empty(fake.SetActiveSlots);
+        Assert.Empty(fake.Rebooted);
     }
 
     [Fact]
@@ -217,7 +217,7 @@ public class QuickFlashServiceTests : IDisposable
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);
         var native = new QuickFlashNativeApi { DeviceListing = string.Empty };
-        var service = new QuickFlashService(new FastbootRsBackend(native), new OperationLogService());
+        var service = CreateService(new FakeFastbootCliRunner(), logs: new OperationLogService(), native);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.FlashImagesAsync(
             new DeviceSessionViewModel(),
@@ -228,6 +228,15 @@ public class QuickFlashServiceTests : IDisposable
         Assert.Equal(1, native.DiscoveryCount);
     }
 
+    private static QuickFlashService CreateService(
+        FakeFastbootCliRunner? fake = null,
+        OperationLogService? logs = null,
+        QuickFlashNativeApi? native = null) =>
+        new(
+            new FastbootRsBackend(native ?? new QuickFlashNativeApi()),
+            fake ?? new FakeFastbootCliRunner(),
+            logs ?? new OperationLogService());
+
     public void Dispose()
     {
         File.Delete(imagePath);
@@ -236,14 +245,7 @@ public class QuickFlashServiceTests : IDisposable
 
     private sealed class QuickFlashNativeApi : IFastbootRsNativeApi
     {
-        public List<(string? Serial, string Partition, string ImagePath)> FlashRequests { get; } = [];
-        public List<(string? Serial, string Slot)> SetActiveRequests { get; } = [];
-        public List<string> Events { get; } = [];
-        public (string? Serial, string Partition, string ImagePath)? LastFlashRequest { get; private set; }
-        public string? FastbootRebootSerial { get; private set; }
-        public Func<string, string>? GetVarHandler { get; init; }
         public string DeviceListing { get; init; } = "FAST123\tfastboot\n";
-        public string? FailPartition { get; init; }
         public int DiscoveryCount { get; private set; }
 
         public string ListDevices()
@@ -251,40 +253,6 @@ public class QuickFlashServiceTests : IDisposable
             DiscoveryCount++;
             return DeviceListing;
         }
-        public string Shell(string? serial, string command) => string.Empty;
-        public string GetVar(string? serial, string variable) =>
-            GetVarHandler?.Invoke(variable) ?? (variable == "is-userspace" ? "no" : string.Empty);
-        public void Reboot(string? serial, string target) { }
-        public void FastbootReboot(string? serial)
-        {
-            FastbootRebootSerial = serial;
-            Events.Add("reboot");
-        }
-        public void Push(string? serial, string localPath, string remotePath) { }
-        public long Pull(string? serial, string remotePath, string localPath) => 0;
-        public string Install(string? serial, string apkPath, bool replace) => string.Empty;
-        public void Flash(string? serial, string partition, string imagePath)
-        {
-            if (string.Equals(partition, FailPartition, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException($"failed {partition}");
-            }
-
-            LastFlashRequest = (serial, partition, imagePath);
-            FlashRequests.Add((serial, partition, imagePath));
-            Events.Add($"flash:{partition}");
-        }
-
-        public void SetActive(string? serial, string slot)
-        {
-            SetActiveRequests.Add((serial, slot));
-            Events.Add($"set-active:{slot}");
-        }
-    }
-
-    private sealed class EmptyQuickFlashNativeApi : IFastbootRsNativeApi
-    {
-        public string ListDevices() => string.Empty;
         public string Shell(string? serial, string command) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }

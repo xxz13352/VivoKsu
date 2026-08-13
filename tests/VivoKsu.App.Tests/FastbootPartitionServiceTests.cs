@@ -8,16 +8,16 @@ public class FastbootPartitionServiceTests
     [Fact]
     public async Task ReadAsync_formats_supported_partition_sizes_and_fastboot_metadata()
     {
-        var backend = new FastbootRsBackend(new PartitionNativeApi(new Dictionary<string, string>
+        var fake = CreateFake(new Dictionary<string, string>
         {
             ["current-slot"] = "a",
             ["is-userspace"] = "no",
             ["partition-size:boot"] = "0x04000000",
             ["partition-size:init_boot"] = "0x00800000",
             ["partition-size:vendor_boot"] = "0x06000000"
-        }));
+        });
 
-        var snapshot = await ReadTableAsync(backend);
+        var snapshot = await ReadTableAsync(fake);
 
         Assert.Equal("a", Get(snapshot, "ActiveSlot"));
         Assert.Equal("fastboot", Get(snapshot, "ModeLabel"));
@@ -33,15 +33,15 @@ public class FastbootPartitionServiceTests
     [Fact]
     public async Task ReadAsync_keeps_an_unsupported_partition_as_unavailable()
     {
-        var backend = new FastbootRsBackend(new PartitionNativeApi(new Dictionary<string, string>
+        var fake = CreateFake(new Dictionary<string, string>
         {
             ["current-slot"] = "b",
             ["is-userspace"] = "yes",
             ["partition-size:boot"] = "0x04000000",
             ["partition-size:init_boot"] = "0x00800000"
-        }));
+        });
 
-        var snapshot = await ReadTableAsync(backend);
+        var snapshot = await ReadTableAsync(fake);
         var vendorBoot = FindPartition(snapshot, "vendor_boot");
 
         Assert.Equal("fastbootd", Get(snapshot, "ModeLabel"));
@@ -49,13 +49,16 @@ public class FastbootPartitionServiceTests
         Assert.Equal("未读取", Get(vendorBoot, "Status"));
     }
 
-    private static async Task<object> ReadTableAsync(FastbootRsBackend backend)
+    private static FakeFastbootCliRunner CreateFake(IReadOnlyDictionary<string, string> values) =>
+        new() { GetVarHandler = variable => values.TryGetValue(variable, out var value) ? value : string.Empty };
+
+    private static async Task<object> ReadTableAsync(IFastbootCliRunner cliRunner)
     {
         var assembly = typeof(FastbootRsBackend).Assembly;
         var serviceType = assembly.GetType("VivoKsu.App.Services.FastbootPartitionService");
         Assert.NotNull(serviceType);
 
-        var service = Activator.CreateInstance(serviceType!, backend);
+        var service = Activator.CreateInstance(serviceType!, cliRunner);
         Assert.NotNull(service);
 
         var method = serviceType.GetMethod("ReadAsync");
@@ -76,16 +79,4 @@ public class FastbootPartitionServiceTests
 
     private static object Get(object value, string property) =>
         value.GetType().GetProperty(property)!.GetValue(value)!;
-
-    private sealed class PartitionNativeApi(IReadOnlyDictionary<string, string> values) : IFastbootRsNativeApi
-    {
-        public string ListDevices() => "FAST123\tfastboot\n";
-        public string Shell(string? serial, string command) => string.Empty;
-        public string GetVar(string? serial, string variable) => values.TryGetValue(variable, out var value) ? value : string.Empty;
-        public void Reboot(string? serial, string target) { }
-        public void Push(string? serial, string localPath, string remotePath) { }
-        public long Pull(string? serial, string remotePath, string localPath) => 0;
-        public string Install(string? serial, string apkPath, bool replace) => string.Empty;
-        public void Flash(string? serial, string partition, string imagePath) { }
-    }
 }

@@ -18,16 +18,19 @@ public sealed class AppComposition
         ToolPathPreferences? preferences = null)
     {
         var backend = new FastbootRsBackend(nativeApi);
+        // 唯一 fastboot 执行器:全部刷写 / 读变量 / 擦除 / 重启 / 槽位操作走它(fastboot-rs DLL 已移除)。
+        var cliRunner = new FastbootCliRunner(
+            Path.Combine(AppContext.BaseDirectory, "platform-tools", "fastboot.exe"));
         LogService = new OperationLogService();
         Session = new DeviceSessionViewModel();
         Coordinator = new OperationCoordinator(Session, LogService);
 
-        var deviceInfo = new DeviceInfoService(backend);
+        var deviceInfo = new DeviceInfoService(backend, cliRunner);
         var deviceSessionService = new DeviceSessionService(backend, deviceInfo, LogService);
         Monitor = new DeviceMonitorService(deviceSessionService, Session, Coordinator, logs: LogService);
 
         var toolPreferences = preferences ?? ToolPathPreferences.CreateDefault();
-        var quickFlashService = new QuickFlashService(backend, LogService);
+        var quickFlashService = new QuickFlashService(backend, cliRunner, LogService);
         var payloadDumper = new PayloadDumperRunner(
             Path.Combine(AppContext.BaseDirectory, "payload-tools", "payload_dumper.exe"));
         mirrorService = new MirrorService(processRunner, LogService, provisioner: new ScrcpyProvisioningService());
@@ -35,8 +38,8 @@ public sealed class AppComposition
         var firmwareExtract = new FirmwareExtractViewModel(LogService, payloadDumper, new VivoFirmwareExtractor());
         var mirror = new MirrorViewModel(Session, mirrorService, toolPreferences);
         var fileManager = new FileManagerViewModel(Session, new AdbFileService(backend, LogService), LogService, Coordinator);
-        var lineFlash = new LineFlashViewModel(Session, new FastbootPartitionService(backend), LogService);
-        var fastbootPartitionTransport = new FastbootPartitionTransport(backend);
+        var lineFlash = new LineFlashViewModel(Session, new FastbootPartitionService(cliRunner), LogService);
+        var fastbootPartitionTransport = new FastbootPartitionTransport(cliRunner);
         var adbExecutable = new PlatformToolsExecutableLocator(AppContext.BaseDirectory).Resolve("adb.exe");
         var adbRootPartitionTransport = new AdbRootPartitionTransport(
             new AdbRootTransferRunner(adbExecutable, new SystemAdbBinaryRunner()));
@@ -60,8 +63,6 @@ public sealed class AppComposition
             new VivoRootResourceService(AppContext.BaseDirectory),
             Coordinator);
         var overview = new OverviewViewModel(Session, backend, LogService, Coordinator);
-        var fastbootRsCli = new FastbootRsCliRunner(
-            Path.Combine(AppContext.BaseDirectory, "platform-tools", "fastboot-rs.exe"));
         otaClient = new OtaApiClient();
         var safeFlash = new SafeFlashViewModel(
             Session,
@@ -71,7 +72,7 @@ public sealed class AppComposition
             new OtaDownloadService(),
             new FirmwarePartitionExtractor(payloadDumper),
             Coordinator,
-            fastbootRsCli);
+            cliRunner);
 
         MainViewModel = new MainViewModel(
             Session,

@@ -20,7 +20,7 @@ public partial class SafeFlashViewModel : ObservableObject
     private readonly DeviceSessionViewModel session;
     private readonly OperationLogService logs;
     private readonly FastbootRsBackend backend;
-    private readonly FastbootRsCliRunner? cliRunner;
+    private readonly IFastbootCliRunner cliRunner;
     private readonly OtaApiClient otaClient;
     private readonly OtaDownloadService downloader;
     private readonly FirmwarePartitionExtractor extractor;
@@ -59,6 +59,8 @@ public partial class SafeFlashViewModel : ObservableObject
     private string stagingRoot = string.Empty;
     private string sourcePath = string.Empty;
     private IReadOnlyList<PayloadPartitionEntry> pendingPartitions = [];
+    private long lastExtractSpeedBytes;
+    private long lastExtractSpeedTicks;
 
     [ObservableProperty]
     private string deviceSummary = "未连接 ADB 设备";
@@ -77,6 +79,9 @@ public partial class SafeFlashViewModel : ObservableObject
 
     [ObservableProperty]
     private double overallProgress;
+
+    [ObservableProperty]
+    private double currentPartitionProgress;
 
     [ObservableProperty]
     private string currentPartition = "--";
@@ -98,7 +103,7 @@ public partial class SafeFlashViewModel : ObservableObject
         OtaDownloadService downloader,
         FirmwarePartitionExtractor extractor,
         IOperationCoordinator? coordinator = null,
-        FastbootRsCliRunner? cliRunner = null)
+        IFastbootCliRunner cliRunner = null!)
     {
         this.session = session;
         this.logs = logs;
@@ -129,12 +134,28 @@ public partial class SafeFlashViewModel : ObservableObject
 
     public IRelayCommand StopCommand { get; }
 
-    public string OverallProgressPercent => $"{OverallProgress:P0}";
+    public string OverallProgressPercent => IsBusy ? $"{OverallProgress:P0}" : "--";
+
+    /// <summary>空闲或当前分区无逐字节进度(fastboot flash/下载中)时显示 "--"。</summary>
+    public string CurrentPartitionProgressPercent =>
+        IsBusy && CurrentPartitionProgress > 0 ? $"{CurrentPartitionProgress:P0}" : "--";
+
+    /// <summary>当前分区无可量化的字节进度(fastboot flash 阶段)时用不确定动画。</summary>
+    public bool IsCurrentPartitionIndeterminate => IsBusy && CurrentPartitionProgress <= 0;
 
     partial void OnOverallProgressChanged(double value) => OnPropertyChanged(nameof(OverallProgressPercent));
 
+    partial void OnCurrentPartitionProgressChanged(double value)
+    {
+        OnPropertyChanged(nameof(CurrentPartitionProgressPercent));
+        OnPropertyChanged(nameof(IsCurrentPartitionIndeterminate));
+    }
+
     partial void OnIsBusyChanged(bool value)
     {
+        OnPropertyChanged(nameof(IsCurrentPartitionIndeterminate));
+        OnPropertyChanged(nameof(OverallProgressPercent));
+        OnPropertyChanged(nameof(CurrentPartitionProgressPercent));
         DownloadAndFlashCommand.NotifyCanExecuteChanged();
         SelectAndFlashCommand.NotifyCanExecuteChanged();
         ConfirmFlashCommand.NotifyCanExecuteChanged();
@@ -263,6 +284,7 @@ public partial class SafeFlashViewModel : ObservableObject
         });
         if (!success)
         {
+            CleanupStaging();
             return;
         }
 
@@ -270,6 +292,7 @@ public partial class SafeFlashViewModel : ObservableObject
         {
             StatusText = "固件中未找到可刷写分区。";
             logs.Write(OperationLogLevel.Warning, StatusText);
+            CleanupStaging();
             return;
         }
 
@@ -280,6 +303,13 @@ public partial class SafeFlashViewModel : ObservableObject
         }
 
         ConfirmSummary = $"将刷入 {FlashCount} 个分区(已跳过 preloader/lk),随后重启到 fastbootd 逐个刷写。";
+        if (extractor.HasBlockBasedContent(sourcePath))
+        {
+            var blockWarning = "⚠ 固件含块式分区内容(.new.dat / transfer.list,如 system/vendor/product),暂不支持刷写,本次只会刷可直接镜像的分区,其余保持原样。";
+            logs.Write(OperationLogLevel.Warning, blockWarning);
+            ConfirmSummary += Environment.NewLine + blockWarning;
+        }
+
         IsConfirmVisible = true;
     }
 
@@ -289,6 +319,8 @@ public partial class SafeFlashViewModel : ObservableObject
         pendingPartitions = [];
         FlashCount = 0;
         StatusText = "已取消刷写";
+        // 取消后必须释放已下载的 staging(数 GB OTA),否则每次取消/重试都累积残留。
+        CleanupStaging();
     }
 
     /// <summary>③ 确认后:解压解包 → 重启 fastbootd → 逐个刷入 → 重启设备。</summary>
@@ -301,7 +333,7 @@ public partial class SafeFlashViewModel : ObservableObject
 
         var partitionsToFlash = pendingPartitions;
         IsConfirmVisible = false;
-        await RunOperationAsync(OperationKind.Flashing, "安全刷写", async (context, ct) =>
+        await RunOperationAsync(OperationKind.Flashing, "VIVO 线刷", async (context, ct) =>
         {
             var extractDirectory = Path.Combine(stagingRoot, "extract", Guid.NewGuid().ToString("N"));
 
@@ -319,12 +351,16 @@ public partial class SafeFlashViewModel : ObservableObject
                 var capturedIndex = index;
                 var size = partition.SizeBytes;
                 CurrentPartition = partition.Name;
+                CurrentPartitionProgress = 0;
+                lastExtractSpeedBytes = 0;
+                lastExtractSpeedTicks = 0;
                 context.ReportStage($"正在解包 {partition.Name}({index + 1}/{partitionsToFlash.Count})", OperationKind.Hashing);
                 var writeProgress = new Progress<long>(bytes =>
                 {
                     var fraction = size > 0 ? Math.Clamp(bytes / (double)size, 0, 1) : 0;
+                    CurrentPartitionProgress = fraction;
                     OverallProgress = 0.5 * (capturedIndex + fraction) / partitionsToFlash.Count;
-                    SpeedText = FormatBytes(bytes) + " 已解包";
+                    UpdateExtractSpeed(bytes);
                 });
                 var image = await extractor.ExtractPartitionAsync(sourcePath, partition.Name, extractDirectory, ct, writeProgress);
                 images.Add(image);
@@ -342,7 +378,10 @@ public partial class SafeFlashViewModel : ObservableObject
                 }
 
                 logs.Write(OperationLogLevel.Info, $"已连接 {session.Serial} | 用时 {taskStopwatch.Elapsed.TotalSeconds:0} 秒");
-                logs.Write(OperationLogLevel.Info, "等待设备连接稳定...0s");
+                // 设备刚进入 fastbootd 时 USB 可能仍在枚举;等一小段再发 getvar,
+                // 避免瞬态探测失败被误判为“设备无此分区”而静默跳过必需分区。
+                logs.Write(OperationLogLevel.Info, "等待设备连接稳定...");
+                await Task.Delay(TimeSpan.FromSeconds(1.5), ct);
             }
             else if (session.ConnectionState != DeviceConnectionState.FastbootConnected || string.IsNullOrWhiteSpace(session.Serial))
             {
@@ -373,19 +412,22 @@ public partial class SafeFlashViewModel : ObservableObject
                 }
 
                 CurrentPartition = image.PartitionName;
-                context.ReportStage($"正在刷写 {image.PartitionName}({index + 1}/{images.Count})");
+                // fastboot CLI 带连续传输进度(进程写字节/镜像大小),实时更新右侧栏当前分区进度 + 速度。
+                CurrentPartitionProgress = 0;
+                lastExtractSpeedBytes = 0;
+                lastExtractSpeedTicks = 0;
+                SpeedText = string.Empty;
+                context.ReportStage($"正在刷写 {image.PartitionName}({index + 1}/{images.Count})", OperationKind.Flashing);
                 var flashWatch = Stopwatch.StartNew();
                 logs.Write(OperationLogLevel.Info, $"Sending '{image.PartitionName}' ({Math.Max(image.SizeBytes / 1024, 1)} KB)");
-                if (cliRunner is not null)
+                var flashProgress = new Progress<double>(fraction =>
                 {
-                    // fastboot-rs CLI 会打印可读错误(无设备/镜像缺失/设备 FAIL 消息)。
-                    await cliRunner.FlashAsync(serial, image.PartitionName, image.ImagePath, ct);
-                }
-                else
-                {
-                    await backend.FlashAsync(serial, image.PartitionName, image.ImagePath, ct);
-                }
-
+                    CurrentPartitionProgress = fraction;
+                    OverallProgress = 0.5 + ((index + fraction) / images.Count) * 0.5;
+                    UpdateExtractSpeed((long)(fraction * image.SizeBytes));
+                });
+                // fastboot CLI 会打印可读错误(无设备/镜像缺失/设备 FAIL 消息)。
+                await cliRunner.FlashAsync(serial, image.PartitionName, image.ImagePath, flashProgress, ct);
                 flashWatch.Stop();
                 var seconds = flashWatch.Elapsed.TotalSeconds;
                 logs.Write(OperationLogLevel.Info, $"OKAY [  {seconds:0.3f}s]");
@@ -398,14 +440,7 @@ public partial class SafeFlashViewModel : ObservableObject
             // 4. 重启回系统。
             logs.Write(OperationLogLevel.Info, "[Rebooting]发送重启命令...");
             context.ReportStage("正在重启设备");
-            if (cliRunner is not null)
-            {
-                await cliRunner.RebootAsync(session.Serial, ct); // fastboot reboot
-            }
-            else if (!string.IsNullOrWhiteSpace(session.Serial))
-            {
-                await backend.FastbootRebootAsync(session.Serial, ct); // fastboot reboot
-            }
+            await cliRunner.RebootAsync(session.Serial, ct); // fastboot reboot
 
             OverallProgress = 1;
             taskStopwatch.Stop();
@@ -467,36 +502,38 @@ public partial class SafeFlashViewModel : ObservableObject
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (session.ConnectionState == DeviceConnectionState.FastbootConnected)
+
+            // 直接轮询 fastboot 后端,而不是 session:操作期间 coordinator.IsBusy
+            // 会冻结 DeviceMonitor/DeviceSession 的自动刷新,session.ConnectionState
+            // 不会更新(adb reboot fastboot 后永远停在 AdbConnected),必须实时探测。
+            // 设备重启过渡期后端可能瞬时报错,吞掉继续等到超时,而非中断整条刷写。
+            try
             {
-                return true;
+                var device = await backend.DiscoverAsync(cancellationToken);
+                if (device.ConnectionState == DeviceConnectionState.FastbootConnected)
+                {
+                    session.ApplyDevice(device);
+                    return true;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                // 过渡期探测失败视为设备尚未现身,继续等待。
             }
 
             await Task.Delay(500, cancellationToken);
         }
 
-        return session.ConnectionState == DeviceConnectionState.FastbootConnected;
+        return false;
     }
 
     /// <summary>用 <c>getvar partition-type:&lt;name&gt;</c> 探测分区是否存在于设备。</summary>
     private async Task<bool> PartitionExistsAsync(string serial, string partition, CancellationToken cancellationToken)
-    {
-        if (cliRunner is not null)
-        {
-            return await cliRunner.PartitionExistsAsync(serial, partition, cancellationToken);
-        }
-
-        try
-        {
-            var type = await backend.GetVarAsync(serial, $"partition-type:{partition}", cancellationToken);
-            return !string.IsNullOrWhiteSpace(type);
-        }
-        catch
-        {
-            // getvar 失败即视为设备无此分区。
-            return false;
-        }
-    }
+        => await cliRunner.PartitionExistsAsync(serial, partition, cancellationToken);
 
     /// <summary>
     /// 选 staging 盘:系统盘(通常是 SSD,bezzad 多分片随机写才不卡)有 ≥15GB 空闲就优先,
@@ -551,6 +588,24 @@ public partial class SafeFlashViewModel : ObservableObject
         {
             SpeedText = FormatBytes((long)progress.BytesPerSecond) + "/s";
         }
+    }
+
+    /// <summary>按解包写入字节的时间差计算 MB/s 速度(右侧栏与页底速度显示)。</summary>
+    private void UpdateExtractSpeed(long bytes)
+    {
+        var now = Environment.TickCount64;
+        if (lastExtractSpeedBytes > 0 && now > lastExtractSpeedTicks)
+        {
+            var deltaBytes = bytes - lastExtractSpeedBytes;
+            var deltaSeconds = (now - lastExtractSpeedTicks) / 1000.0;
+            if (deltaBytes > 0 && deltaSeconds > 0)
+            {
+                SpeedText = FormatBytes((long)(deltaBytes / deltaSeconds)) + "/s";
+            }
+        }
+
+        lastExtractSpeedBytes = bytes;
+        lastExtractSpeedTicks = now;
     }
 
     private void StartElapsedTicker()

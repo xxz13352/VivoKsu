@@ -12,11 +12,11 @@ public sealed class FastbootPartitionService
         ("vendor_boot", "Vendor Boot 镜像")
     ];
 
-    private readonly FastbootRsBackend backend;
+    private readonly IFastbootCliRunner cliRunner;
 
-    public FastbootPartitionService(FastbootRsBackend backend)
+    public FastbootPartitionService(IFastbootCliRunner cliRunner)
     {
-        this.backend = backend;
+        this.cliRunner = cliRunner;
     }
 
     public async Task<FastbootPartitionTableSnapshot> ReadAsync(string serial, CancellationToken cancellationToken)
@@ -24,15 +24,25 @@ public sealed class FastbootPartitionService
         var activeSlot = Normalize(await ReadVarAsync(serial, "current-slot", cancellationToken));
         var userspace = Normalize(await ReadVarAsync(serial, "is-userspace", cancellationToken));
         var partitions = new List<FastbootPartitionInfo>(SupportedPartitions.Length);
+        var anyRead = false;
 
         foreach (var partition in SupportedPartitions)
         {
             var size = ParseSize(await ReadVarAsync(serial, $"partition-size:{partition.Name}", cancellationToken));
+            anyRead |= size is not null;
             partitions.Add(new FastbootPartitionInfo(
                 partition.Name,
                 partition.Purpose,
                 size is null ? "--" : FormatSize(size.Value),
                 size is null ? "未读取" : "已读取"));
+        }
+
+        // 一个分区都没读到(getvar 全部失败或全部为空):设备不可达或该
+        // fastboot 不支持 getvar。绝不能返回一张全 "--" 的表让上层误报
+        // “分区表已更新”——用户无法区分“设备不可达”和“正常读取”。
+        if (!anyRead)
+        {
+            throw new InvalidOperationException("无法读取分区信息：getvar 全部失败，设备可能已断开或该 fastboot 不支持 getvar。");
         }
 
         return new FastbootPartitionTableSnapshot(
@@ -47,7 +57,7 @@ public sealed class FastbootPartitionService
     {
         try
         {
-            return await backend.GetVarAsync(serial, name, cancellationToken);
+            return await cliRunner.GetVarAsync(serial, name, cancellationToken);
         }
         catch (OperationCanceledException)
         {

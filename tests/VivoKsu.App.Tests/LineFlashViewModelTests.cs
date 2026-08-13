@@ -16,8 +16,20 @@ public class LineFlashViewModelTests
         session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.FastbootConnected, "FAST123", "Fastboot 已连接"));
         var backend = new FastbootRsBackend(new LineFlashNativeApi());
         var logs = new OperationLogService();
+        var fake = new FakeFastbootCliRunner
+        {
+            GetVarHandler = variable => variable switch
+            {
+                "current-slot" => "a",
+                "is-userspace" => "no",
+                "partition-size:boot" => "0x04000000",
+                "partition-size:init_boot" => "0x00800000",
+                "partition-size:vendor_boot" => "0x06000000",
+                _ => string.Empty
+            }
+        };
 
-        var viewModel = CreateViewModel(session, backend, logs);
+        var viewModel = CreateViewModel(session, backend, logs, fake);
         await (Task)viewModel.GetType().GetMethod("RefreshAsync")!.Invoke(viewModel, [true])!;
 
         var partitions = (IEnumerable)viewModel.GetType().GetProperty("Partitions")!.GetValue(viewModel)!;
@@ -93,11 +105,15 @@ public class LineFlashViewModelTests
         }
     }
 
-    private static object CreateViewModel(DeviceSessionViewModel session, FastbootRsBackend backend, OperationLogService logs)
+    private static object CreateViewModel(
+        DeviceSessionViewModel session,
+        FastbootRsBackend backend,
+        OperationLogService logs,
+        IFastbootCliRunner? cliRunner = null)
     {
         var type = typeof(MainViewModel).Assembly.GetType("VivoKsu.App.ViewModels.LineFlashViewModel");
         Assert.NotNull(type);
-        return Activator.CreateInstance(type!, session, new FastbootPartitionService(backend), logs)!;
+        return Activator.CreateInstance(type!, session, new FastbootPartitionService(cliRunner ?? new FakeFastbootCliRunner()), logs)!;
     }
 
     private static object Get(object value, string property) =>

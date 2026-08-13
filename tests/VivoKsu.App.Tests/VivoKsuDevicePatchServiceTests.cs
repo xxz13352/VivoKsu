@@ -17,7 +17,7 @@ public sealed class VivoKsuDevicePatchServiceTests
         var native = new DevicePatchNativeApi("patched-image"u8.ToArray());
         var backend = new FastbootRsBackend(native);
         var resources = new VivoRootResourceService(AppContext.BaseDirectory);
-        var service = new VivoKsuDevicePatchService(backend, resources, new QuickFlashService(backend, new OperationLogService()));
+        var service = new VivoKsuDevicePatchService(backend, resources, new QuickFlashService(backend, new FakeFastbootCliRunner(), new OperationLogService()));
 
         try
         {
@@ -50,7 +50,7 @@ public sealed class VivoKsuDevicePatchServiceTests
         var service = new VivoKsuDevicePatchService(
             backend,
             new VivoRootResourceService(AppContext.BaseDirectory),
-            new QuickFlashService(backend, new OperationLogService()));
+            new QuickFlashService(backend, new FakeFastbootCliRunner(), new OperationLogService()));
 
         try
         {
@@ -79,7 +79,7 @@ public sealed class VivoKsuDevicePatchServiceTests
         var service = new VivoKsuDevicePatchService(
             backend,
             new VivoRootResourceService(AppContext.BaseDirectory),
-            new QuickFlashService(backend, logs));
+            new QuickFlashService(backend, new FakeFastbootCliRunner(), logs));
         var coordinator = new OperationCoordinator(new DeviceSessionViewModel(), logs);
 
         try

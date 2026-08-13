@@ -29,7 +29,7 @@ flowchart LR
     subgraph Desktop["桌面端 (VivoKsu.App · WPF .NET8)"]
         UI["MainWindow + 9 个页面\n(登录门禁后进入)"]
         CORE["AppComposition 组合根\n会话 / 监视 / 协调器 / 各页面 VM"]
-        FB["FastbootRsBackend\n(fastboot-rs DLL / adb.exe / fastboot.exe)"]
+        FB["FastbootCliRunner(唯一 fastboot.exe)\n+ FastbootRsBackend(adb)"]
     end
 
     subgraph Cloudflare["Cloudflare Edge"]
@@ -83,7 +83,7 @@ VivoKsu 工具/
 │  │  ├─ Services/                  # 业务服务与基础设施(40+ 个)
 │  │  ├─ apk/                       # KernelSU 安装包(KSU.APK / KernelSU.apk)
 │  │  ├─ payload-tools/             # payload_dumper.exe(payload-dumper-rust)
-│  │  ├─ platform-tools/            # adb.exe / fastboot.exe / fastboot-rs.exe
+│  │  ├─ platform-tools/            # adb.exe + 唯一 fastboot.exe(带进度)
 │  │  ├─ root-tools/                # magiskboot.so
 │  │  └─ scrcpy/                    # scrcpy(发布脚本自动补齐)
 │  └─ VivoKsu.Server/               # 旧 .NET 服务端(已被 Worker 取代,保留作本地回退)
@@ -136,7 +136,7 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph infra["基础设施"]
-        NATIVE["FastbootRsApiFactory\n(fastboot-rs DLL ⇄ adb.exe/fastboot.exe 回退)"]
+        NATIVE["FastbootRsApiFactory\n(adb: PlatformToolsNativeApi / adb.exe)"]
         PROC["SystemProcessRunner"]
         PREFS["ToolPathPreferences"]
     end
@@ -239,31 +239,23 @@ sequenceDiagram
 
 [OperationLogService.cs](src/VivoKsu.App/Services/OperationLogService.cs) 按级别(Info/Success/Warning/Error)记录所有操作;操作日志页用 `[HH:mm:ss] 消息` 单行等宽显示并自动滚底。
 
-### 3.6 后端抽象(fastboot-rs DLL / adb / fastboot / CLI)
+### 3.6 后端抽象(adb + 唯一 fastboot.exe)
 
-三层封装,互有回退:
+fastboot-rs 原生 DLL 已整体移除(错误码不可读、无刷写进度)。刷写后端统一为一个 **`FastbootCliRunner`**,指向唯一 `platform-tools/fastboot.exe`(35.0.2-eng,带进度),承担**全部** fastboot 操作并带**连续传输进度**:
 
 ```
-IFastbootRsNativeApi (C ABI 契约)
-├── FastbootRsApiWithPlatformDeviceDiscovery (默认组合)
-│     ├── fastboot-rs 原生 DLL: getvar / flash / erase / fetch / set_active / fastboot reboot
-│     └── adb.exe:          list / shell / reboot / push / pull / install
-├── PlatformToolsNativeApi  (DLL 缺失/加载失败时整体回退到 adb.exe + fastboot.exe 子进程)
-└── FastbootRsCliRunner     (fastboot-rs.exe CLI 子进程 —— SafeFlash 专用)
+FastbootCliRunner (唯一 fastboot.exe)
+├── FlashAsync(serial, partition, image, progress)  连续进度:GetProcessIoCounters 采样 写字节/镜像大小
+├── GetVarAsync / PartitionExistsAsync              剥离 (bootloader) 前缀;区分「无分区」vs「传输失败」
+├── EraseAsync / RebootAsync / SetActiveAsync
+└── 错误 = exit code + 输出文本(可读,不再有 C ABI 错误码)
 ```
 
-- **`FastbootRsApiFactory`** 先 `NativeLibrary` 探测 DLL 可加载性,DLL 可用才用原生组合,否则回退 `PlatformToolsNativeApi`(adb 列表对 debug 会话权威)。
-- **`FastbootRsBackend`** 把原生调用包成 `Task.Run` + 取消,并解析 `ListDevices()` 为 `DeviceSnapshot`([FastbootRsDeviceParser.cs](src/VivoKsu.App/Services/FastbootRsDeviceParser.cs))。
-- **`PlatformToolsNativeApi`** 大分区 `flash/fetch` 用 **30 分钟超时**(默认 15s 会中途强杀传输)。
-- **`FastbootRsCliRunner`** 调 `platform-tools/fastboot-rs.exe`(来自用户编译的 fastboot-rs fork),专供安全刷写:
+- **`FastbootRsBackend`**(经 `IFastbootRsNativeApi` / `PlatformToolsNativeApi`)仅保留 **ADB 能力**:设备发现 / shell / 文件传输 / 安装 / adb reboot。
+- **进度**:flash 用「无进展超时」+ 每 250ms 采样 `GetProcessIoCounters`,`进度 = 进程写字节 / 镜像大小`(慢速 USB 刷 4-6GB 大分区不被强杀,且有真实百分比)。
+- **超时策略**:flash 无进展超时 600s;getvar 探测 20s 墙钟(非零退出区分「无分区」vs「传输失败」);erase/reboot/set_active 60s 墙钟。
 
-| 操作 | 超时策略 |
-| --- | --- |
-| `flash` | **无进展超时**(监控 `GetProcessIoCounters`,读写还在就重置计时)600s —— 慢速 USB 刷 4-6GB 大分区不被墙钟强杀 |
-| `getvar partition-type` | 20s 墙钟;非零退出要区分「设备无此分区」(`unknown partition` 等 → 跳过)与「传输失败」(→ 抛错中止,防半刷) |
-| `reboot` | 60s 墙钟 |
-
-> 为什么 SafeFlash 用 CLI 而其它路径用 DLL?DLL 的 `fastboot_flash` C ABI 只回粗错误码(多数失败归 `-8`),拿不到详细原因;CLI 打印可读错误(无设备 + 检查清单 / 镜像未找到:<路径> / 设备 FAIL 消息)。
+> 为什么统一 CLI?fastboot DLL 的 `fastboot_flash` C ABI 只回粗错误码(多数失败归 `-8`),getvar/reboot 把所有失败压成 `-4`,拿不到原因;CLI 打印可读错误(无设备 + 检查清单 / 镜像未找到:<路径> / 设备 FAIL 消息),且能采样出真实进度。
 
 ### 3.7 分区传输抽象
 
@@ -489,7 +481,7 @@ sequenceDiagram
 
 | 决策 / 坑 | 解决 |
 | --- | --- |
-| fastboot DLL 只回粗错误码(-8/-5/-6/-3) | SafeFlash 改走 `fastboot-rs.exe` CLI,可读错误;失败归类(分区缺失 vs 传输失败) |
+| fastboot DLL 错误码不可读(-4/-8),无刷写进度 | 整体移除 DLL,统一 `platform-tools/fastboot.exe`(35.0.2-eng)CLI:可读错误 + GetProcessIoCounters 连续进度 |
 | 大分区刷写被固定超时强杀 | flash 用**无进展超时**(`GetProcessIoCounters` 读写仍在就重置);payload_dumper 同理 |
 | bezzad/Downloader RangeHigh 只下 1 字节 | 先探测大小设 `RangeHigh = 大小-1`;失败不再假成功(检查 `DownloadFileCompleted` 异常) |
 | 下载失败继续跑 PrepareFlash 空路径报错 | `sourcePath` 非空才 `PrepareFlashAsync` |
@@ -529,7 +521,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `payload-tools/payload_dumper.exe` | payload-dumper-rust | OTA payload 解包、云提取 |
 | `platform-tools/adb.exe · fastboot.exe` | Android SDK Platform Tools | 设备通信(回退路径) |
-| `platform-tools/fastboot-rs.exe` | GriefRedd/fastboot-rs fork 编译 | SafeFlash 刷写 CLI |
+| `platform-tools/fastboot.exe` | fastboot 35.0.2-eng(带进度,用户提供) | 全部 fastboot 刷写 / 读变量 / 擦除 / 重启 / 槽位 |
 | `scrcpy/` | scrcpy | 屏幕镜像(发布时自动获取) |
 | `root-tools/magiskboot.so` | Magisk | vendor_boot 补丁处理 |
 | `apk/KSU.APK · KernelSU.apk` | KernelSU | Root 管理器安装包(带 SHA-256 校验) |
@@ -541,7 +533,7 @@ sequenceDiagram
 - **payload 分区内部百分比无法测量**:payload_dumper 预分配输出文件且不流式输出进度,分区内进度按进程写入字节驱动(真实但以分区为单位)。
 - **分区操作有真实设备风险**:写入 / 擦除修改设备分区,执行前有确认弹窗,任务在首个失败分区停止。
 - **`.ps1` 脚本必须纯 ASCII**:本机无 BOM 的 UTF-8 被按 GBK 读取会乱码(中文注释请用英文)。
-- **安全刷写待真机验证**:fastboot-rs CLI 逐个刷 36 分区是唯一未真机实测环节。
+- **唯一 fastboot.exe 待真机验证**:fastboot 35.0.2-eng 在 vivo fastbootd 逐个刷分区是唯一未真机实测环节。
 - **下载盘需 ~25GB 空闲且最好是 SSD**:bezzad 多分片随机写 HDD 会停滞(staging 自动优先系统盘)。
 - **VOTA 链接有时效**:`url` 带 `sign`/`t`,拿到后尽快下载。
 - **版本需后台启用**:查询的 PD+版本必须在 `web.nwflash.cc.cd`「版本号控制」启用,否则 404。

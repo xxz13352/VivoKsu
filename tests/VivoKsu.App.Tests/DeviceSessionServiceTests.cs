@@ -14,7 +14,7 @@ public class DeviceSessionServiceTests
         var backend = new FastbootRsBackend(native);
         var logs = new OperationLogService();
         var session = new DeviceSessionViewModel();
-        var service = new DeviceSessionService(backend, new DeviceInfoService(backend), logs);
+        var service = new DeviceSessionService(backend, new DeviceInfoService(backend, new FakeFastbootCliRunner()), logs);
 
         await service.RefreshAsync(session, CancellationToken.None);
 
@@ -33,7 +33,7 @@ public class DeviceSessionServiceTests
         session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.AdbConnected, "OLD", "ADB 已连接"));
         session.ApplyDetails(DeviceDetailsSnapshot.Empty with { Model = "旧设备", Serial = "OLD" });
         session.BatteryLevel = "88%";
-        var service = new DeviceSessionService(backend, new DeviceInfoService(backend), new OperationLogService());
+        var service = new DeviceSessionService(backend, new DeviceInfoService(backend, new FakeFastbootCliRunner()), new OperationLogService());
 
         await service.RefreshAsync(session, CancellationToken.None, logActivity: false);
 
@@ -49,7 +49,7 @@ public class DeviceSessionServiceTests
         var backend = new FastbootRsBackend(new EmptySessionNativeApi());
         var session = CreateConnectedSession();
         session.CompleteOperation("ADB 已连接");
-        var service = new DeviceSessionService(backend, new DeviceInfoService(backend), new OperationLogService());
+        var service = new DeviceSessionService(backend, new DeviceInfoService(backend, new FakeFastbootCliRunner()), new OperationLogService());
 
         await InvokeAutomaticRefreshAsync(service, session);
 
@@ -64,7 +64,7 @@ public class DeviceSessionServiceTests
     {
         var backend = new FastbootRsBackend(new EmptySessionNativeApi());
         var session = CreateConnectedSession();
-        var service = new DeviceSessionService(backend, new DeviceInfoService(backend), new OperationLogService());
+        var service = new DeviceSessionService(backend, new DeviceInfoService(backend, new FakeFastbootCliRunner()), new OperationLogService());
 
         await InvokeAutomaticRefreshAsync(service, session);
         await InvokeAutomaticRefreshAsync(service, session);
@@ -81,7 +81,7 @@ public class DeviceSessionServiceTests
         var backend = new FastbootRsBackend(native);
         var session = CreateConnectedSession();
         session.BeginOperation(OperationKind.Flashing, "正在刷写 boot");
-        var service = new DeviceSessionService(backend, new DeviceInfoService(backend), new OperationLogService());
+        var service = new DeviceSessionService(backend, new DeviceInfoService(backend, new FakeFastbootCliRunner()), new OperationLogService());
 
         await InvokeAutomaticRefreshAsync(service, session);
 
@@ -103,7 +103,17 @@ public class DeviceSessionServiceTests
             FirmwareVersion = "OriginOS 5",
             KernelVersion = "5.15.94"
         });
-        var service = new DeviceSessionService(backend, new DeviceInfoService(backend), new OperationLogService());
+        var fake = new FakeFastbootCliRunner
+        {
+            GetVarHandler = variable => variable switch
+            {
+                "current-slot" => "b",
+                "unlocked" => "yes",
+                "product" => "V2318A",
+                _ => string.Empty
+            }
+        };
+        var service = new DeviceSessionService(backend, new DeviceInfoService(backend, fake), new OperationLogService());
 
         await service.RefreshAsync(session, CancellationToken.None, logActivity: false);
 

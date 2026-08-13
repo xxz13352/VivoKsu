@@ -144,10 +144,11 @@ public sealed class RootViewModelTests
         var native = new AutomaticRootNativeApi();
         var backend = new FastbootRsBackend(native);
         var coordinator = new OperationCoordinator(session, logs);
+        var fake = new FakeFastbootCliRunner();
         var artifacts = new RootPatchArtifactService(() => directory);
         var root = new RootViewModel(
             session,
-            new QuickFlashService(backend, logs),
+            new QuickFlashService(backend, fake, logs),
             logs,
             backend,
             new VivoRootResourceService(AppContext.BaseDirectory),
@@ -162,7 +163,9 @@ public sealed class RootViewModelTests
             await root.RunAutomaticRootCommand.ExecuteAsync(null);
 
             Assert.Contains(("ADB123", "bootloader"), native.Reboots);
-            Assert.Contains(("FAST123", "init_boot", Path.Combine(directory, RootPatchArtifactService.OutputFolderName, "init_boot_vivoksu_patched.img")), native.Flashes);
+            Assert.Contains(
+                ("ADB123", "init_boot", Path.Combine(directory, RootPatchArtifactService.OutputFolderName, "init_boot_vivoksu_patched.img")),
+                fake.FlashRequests);
             Assert.False(coordinator.IsBusy);
             Assert.True(
                 session.OperationKind == OperationKind.Completed,
@@ -181,7 +184,7 @@ public sealed class RootViewModelTests
         var backend = new FastbootRsBackend(native);
         return new RootViewModel(
             session,
-            new QuickFlashService(backend, logs),
+            new QuickFlashService(backend, new FakeFastbootCliRunner(), logs),
             logs,
             backend,
             new VivoRootResourceService(AppContext.BaseDirectory));
@@ -218,7 +221,7 @@ public sealed class RootViewModelTests
 
         public List<(string Serial, string Partition, string ImagePath)> Flashes { get; } = [];
 
-        public string ListDevices() => isFastboot ? "FAST123\tfastboot\n" : "ADB123\tdevice\n";
+        public string ListDevices() => isFastboot ? "ADB123\tfastboot\n" : "ADB123\tdevice\n";
 
         public string Shell(string? serial, string command) => command.StartsWith("pm path", StringComparison.Ordinal)
             ? "package:/data/app/manager.apk"

@@ -21,7 +21,7 @@ public class MainViewModelTests
     {
         var session = new DeviceSessionViewModel();
         var backend = new FastbootRsBackend(new CurrentDeviceApi());
-        var service = new DeviceSessionService(backend, new DeviceInfoService(backend), new OperationLogService());
+        var service = new DeviceSessionService(backend, new DeviceInfoService(backend, new FakeFastbootCliRunner()), new OperationLogService());
         var viewModel = new MainViewModel(session, deviceSessionService: service);
 
         await viewModel.RefreshDeviceAsync(logActivity: false);

@@ -7,11 +7,13 @@ namespace VivoKsu.App.Services;
 public sealed class QuickFlashService
 {
     private readonly FastbootRsBackend backend;
+    private readonly IFastbootCliRunner cliRunner;
     private readonly OperationLogService logs;
 
-    public QuickFlashService(FastbootRsBackend backend, OperationLogService logs)
+    public QuickFlashService(FastbootRsBackend backend, IFastbootCliRunner cliRunner, OperationLogService logs)
     {
         this.backend = backend;
+        this.cliRunner = cliRunner;
         this.logs = logs;
     }
 
@@ -64,7 +66,8 @@ public sealed class QuickFlashService
         IReadOnlyList<QuickFlashRequest> requests,
         QuickFlashOptions options,
         CancellationToken cancellationToken,
-        OperationContext? context = null)
+        OperationContext? context = null,
+        IProgress<(string Partition, double Fraction)>? flashProgress = null)
     {
         if (requests.Count == 0)
         {
@@ -87,7 +90,7 @@ public sealed class QuickFlashService
                 foreach (var request in requests)
                 {
                     var partitionName = ToPartitionName(request.Partition);
-                    var hasSlot = await backend.GetVarAsync(device.Serial, $"has-slot:{partitionName}", cancellationToken);
+                    var hasSlot = await cliRunner.GetVarAsync(device.Serial, $"has-slot:{partitionName}", cancellationToken);
                     if (!IsTrueFastbootValue(hasSlot))
                     {
                         throw new InvalidOperationException($"设备分区 {partitionName} 不支持 A/B 双槽刷写。");
@@ -96,7 +99,7 @@ public sealed class QuickFlashService
 
                 if (options.SwitchSlotAfterFlash)
                 {
-                    var currentSlot = await backend.GetVarAsync(device.Serial, "current-slot", cancellationToken);
+                    var currentSlot = await cliRunner.GetVarAsync(device.Serial, "current-slot", cancellationToken);
                     nextSlot = NormalizeCurrentSlot(currentSlot) == "a" ? "b" : "a";
                 }
             }
@@ -111,7 +114,12 @@ public sealed class QuickFlashService
                 foreach (var targetPartition in targetPartitions)
                 {
                     ReportFlashing(session, targetPartition, request.Image, context);
-                    await backend.FlashAsync(device.Serial, targetPartition, request.Image.Path, cancellationToken);
+                    await cliRunner.FlashAsync(
+                        device.Serial,
+                        targetPartition,
+                        request.Image.Path,
+                        CreateFlashProgress(context, flashProgress, targetPartition),
+                        cancellationToken);
                 }
             }
 
@@ -127,7 +135,7 @@ public sealed class QuickFlashService
                     context.ReportStage($"刷写完成，正在切换到槽位 {nextSlot}");
                 }
 
-                await backend.SetActiveAsync(device.Serial, nextSlot, cancellationToken);
+                await cliRunner.SetActiveAsync(device.Serial, nextSlot, cancellationToken);
             }
 
             if (options.AutoReboot)
@@ -141,7 +149,7 @@ public sealed class QuickFlashService
                     context.ReportStage("刷写完成，正在重启设备");
                 }
 
-                await backend.FastbootRebootAsync(device.Serial, cancellationToken);
+                await cliRunner.RebootAsync(device.Serial, cancellationToken);
             }
 
             if (context is null)
@@ -184,7 +192,9 @@ public sealed class QuickFlashService
         IReadOnlyList<(QuickFlashPartition Partition, FlashImageInfo Image)> images,
         FastbootTarget target,
         CancellationToken cancellationToken,
-        OperationContext? context = null)
+        OperationContext? context = null,
+        TimeSpan? waitTimeout = null,
+        string? expectedSerial = null)
     {
         if (images.Count == 0)
         {
@@ -203,7 +213,7 @@ public sealed class QuickFlashService
 
         try
         {
-            var device = await WaitForTargetAsync(target, cancellationToken);
+            var device = await WaitForTargetAsync(target, cancellationToken, waitTimeout, expectedSerial);
             session.ApplyDevice(device);
 
             foreach (var (partition, image) in images)
@@ -219,7 +229,12 @@ public sealed class QuickFlashService
                     context.ReportStage($"ROOT 自动流程正在刷写 {partitionName}");
                 }
 
-                await backend.FlashAsync(device.Serial, partitionName, image.Path, cancellationToken);
+                await cliRunner.FlashAsync(
+                    device.Serial,
+                    partitionName,
+                    image.Path,
+                    new Progress<double>(fraction => context?.ReportProgress(fraction)),
+                    cancellationToken);
             }
 
             if (context is null)
@@ -231,7 +246,7 @@ public sealed class QuickFlashService
                 context.ReportStage("ROOT 镜像刷写完成，正在重启设备");
             }
 
-            await backend.FastbootRebootAsync(device.Serial, cancellationToken);
+            await cliRunner.RebootAsync(device.Serial, cancellationToken);
             if (context is null)
             {
                 session.CompleteOperation("ROOT 自动刷写完成，设备正在重启");
@@ -259,6 +274,17 @@ public sealed class QuickFlashService
             throw;
         }
     }
+
+    /// <summary>构造分区刷写进度:同时上报到操作协调器(context)与 VM(flashProgress)。</summary>
+    private static IProgress<double> CreateFlashProgress(
+        OperationContext? context,
+        IProgress<(string Partition, double Fraction)>? flashProgress,
+        string partition) =>
+        new Progress<double>(fraction =>
+        {
+            context?.ReportProgress(fraction);
+            flashProgress?.Report((partition, fraction));
+        });
 
     private void ReportWaiting(
         DeviceSessionViewModel session,
@@ -292,18 +318,21 @@ public sealed class QuickFlashService
         context.ReportStage($"正在刷写 {partitionName}");
     }
 
-    private Task<DeviceSnapshot> WaitForTargetAsync(FastbootTarget target, CancellationToken cancellationToken) =>
-        ResolveTargetAsync(target, waitForDevice: true, cancellationToken);
+    private Task<DeviceSnapshot> WaitForTargetAsync(FastbootTarget target, CancellationToken cancellationToken, TimeSpan? waitTimeout = null, string? expectedSerial = null) =>
+        ResolveTargetAsync(target, waitForDevice: true, cancellationToken, waitTimeout, expectedSerial);
 
     private async Task<DeviceSnapshot> ResolveTargetAsync(
         FastbootTarget target,
         bool waitForDevice,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? waitTimeout = null,
+        string? expectedSerial = null)
     {
+        var deadline = waitTimeout is { } timeout ? DateTime.UtcNow + timeout : (DateTime?)null;
         while (true)
         {
             var device = await backend.DiscoverAsync(cancellationToken);
-            if (await MatchesTargetAsync(device, target, cancellationToken))
+            if (await MatchesTargetAsync(device, target, cancellationToken, expectedSerial))
             {
                 return device;
             }
@@ -313,6 +342,14 @@ public sealed class QuickFlashService
                 throw new InvalidOperationException($"未检测到匹配的 {ToTargetLabel(target)} 设备。");
             }
 
+            // 部分调用方(如全自动 ROOT)没有手动取消入口,必须给等待加超时,
+            // 否则设备重启后没在 fastboot 现身会无限轮询、永久占用 operationGate。
+            if (deadline is not null && DateTime.UtcNow >= deadline.Value)
+            {
+                throw new TimeoutException(
+                    $"等待 {ToTargetLabel(target)} 设备超时（{waitTimeout!.Value.TotalSeconds:0} 秒），请确认设备已进入目标模式后重试。");
+            }
+
             await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
         }
     }
@@ -320,14 +357,39 @@ public sealed class QuickFlashService
     private async Task<bool> MatchesTargetAsync(
         DeviceSnapshot device,
         FastbootTarget target,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? expectedSerial = null)
     {
         if (device.ConnectionState != DeviceConnectionState.FastbootConnected)
         {
             return false;
         }
 
-        var userspace = await backend.GetVarAsync(device.Serial, "is-userspace", cancellationToken);
+        // ROOT 自动流程绑定预检设备:序列号不一致(误连到另一台在 fastboot 的手机)
+        // 绝不能刷,否则把 A 机修补的镜像刷进 B 机直接变砖。等待直到同一台现身。
+        if (expectedSerial is not null && !string.Equals(device.Serial, expectedSerial, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string userspace;
+        try
+        {
+            userspace = await cliRunner.GetVarAsync(device.Serial, "is-userspace", cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // 旧 bootloader 对 is-userspace 回答 FAIL unknown variable,CLI 抛错。
+            // 按代码库惯例(DeviceInfoService.TryGetVarAsync / SafeFlashViewModel 都把
+            // 可选 getvar 失败当良性条件)降级为“非 fastbootd”,让 Fastboot 目标能
+            // 匹配上继续刷写,而不是抛异常摧毁整个等待循环。
+            userspace = string.Empty;
+        }
+
         var isFastbootd = IsTrueFastbootValue(userspace);
         return (target == FastbootTarget.Fastboot && !isFastbootd) ||
                (target == FastbootTarget.Fastbootd && isFastbootd);

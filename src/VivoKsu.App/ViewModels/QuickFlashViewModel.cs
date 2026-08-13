@@ -40,6 +40,18 @@ public partial class QuickFlashViewModel : ObservableObject
     private bool switchSlotAfterFlash;
 
     [ObservableProperty]
+    private string currentPartition = "--";
+
+    [ObservableProperty]
+    private double currentPartitionProgress;
+
+    [ObservableProperty]
+    private double overallProgress;
+
+    [ObservableProperty]
+    private string speedText = string.Empty;
+
+    [ObservableProperty]
     private QuickFlashExecutionPlan? pendingPlan;
 
     [ObservableProperty]
@@ -111,6 +123,13 @@ public partial class QuickFlashViewModel : ObservableObject
 
     public bool CanSwitchSlotAfterFlash => FlashBothSlots;
 
+    public string CurrentPartitionProgressPercent =>
+        IsFlashOperationActive && CurrentPartitionProgress > 0 ? $"{CurrentPartitionProgress:P0}" : "--";
+
+    public string OverallProgressPercent => IsFlashOperationActive ? $"{OverallProgress:P0}" : "--";
+
+    public bool IsCurrentPartitionIndeterminate => IsFlashOperationActive && CurrentPartitionProgress <= 0;
+
     public string ImageSizeDisplay => SelectedImage is null ? "未选择镜像" : FormatBytes(SelectedImage.SizeBytes);
 
     public string ConfirmationSummary => PendingPlan is null
@@ -157,6 +176,14 @@ public partial class QuickFlashViewModel : ObservableObject
 
         OnPropertyChanged(nameof(CanSwitchSlotAfterFlash));
     }
+
+    partial void OnCurrentPartitionProgressChanged(double value)
+    {
+        OnPropertyChanged(nameof(CurrentPartitionProgressPercent));
+        OnPropertyChanged(nameof(IsCurrentPartitionIndeterminate));
+    }
+
+    partial void OnOverallProgressChanged(double value) => OnPropertyChanged(nameof(OverallProgressPercent));
 
     private void OnPresetPropertyChanged(object? sender, PropertyChangedEventArgs args)
     {
@@ -285,9 +312,11 @@ public partial class QuickFlashViewModel : ObservableObject
             return;
         }
 
-        // Rebuild the plan from the live UI state instead of trusting the request-time
-        // snapshot, so the executed flash always matches what the user currently sees.
-        var plan = RebuildCurrentPlan();
+        // 只刷用户确认面板上看到的计划(PendingPlan)。绝不能按当前 UI 重建:
+        // 单预设「刷入」确认的是 1 个分区,重建会扩成所有已加载镜像的预设,
+        // 把用户从未确认的分区也刷进去。确认面板打开期间浏览被禁,快照有效。
+        // 没有 PendingPlan 时回退到旧的单镜像路径(SelectedImage)。
+        var plan = PendingPlan ?? CreateLegacyPlan();
         if (plan is null || plan.Requests.Count == 0)
         {
             CancelConfirmation();
@@ -297,6 +326,8 @@ public partial class QuickFlashViewModel : ObservableObject
         PendingPlan = null;
         IsConfirmationVisible = false;
         IsFlashOperationActive = true;
+        ResetFlashProgress(plan);
+        var flashProgress = new Progress<(string Partition, double Fraction)>(value => OnFlashProgress(value, plan));
 
         try
         {
@@ -310,7 +341,8 @@ public partial class QuickFlashViewModel : ObservableObject
                         plan.Requests,
                         plan.Options,
                         cancellationToken,
-                        context));
+                        context,
+                        flashProgress));
             }
             else
             {
@@ -320,7 +352,8 @@ public partial class QuickFlashViewModel : ObservableObject
                     session,
                     plan.Requests,
                     plan.Options,
-                    cancellation.Token);
+                    cancellation.Token,
+                    flashProgress: flashProgress);
             }
         }
         catch (Exception)
@@ -344,22 +377,6 @@ public partial class QuickFlashViewModel : ObservableObject
         return new QuickFlashExecutionPlan(
             [new QuickFlashRequest(SelectedPartition, SelectedImage)],
             new QuickFlashOptions(SelectedTarget, WaitForDevice, FlashBothSlots, SwitchSlotAfterFlash, AutoReboot));
-    }
-
-    private QuickFlashExecutionPlan? RebuildCurrentPlan()
-    {
-        var presetRequests = Presets
-            .Where(item => item.SelectedImage is not null)
-            .Select(item => new QuickFlashRequest(item.Partition, item.SelectedImage!))
-            .ToArray();
-        if (presetRequests.Length > 0)
-        {
-            return new QuickFlashExecutionPlan(
-                presetRequests,
-                new QuickFlashOptions(SelectedTarget, WaitForDevice, FlashBothSlots, SwitchSlotAfterFlash, AutoReboot));
-        }
-
-        return CreateLegacyPlan();
     }
 
     private void CancelConfirmation()
@@ -439,4 +456,94 @@ public partial class QuickFlashViewModel : ObservableObject
             _ => $"{sizeBytes / 1024d / 1024 / 1024:F2} GB"
         };
     }
+
+    // ---- 刷写进度(右侧 DEVICE STATUS 卡):当前分区 + 总进度 + 速度 ----
+
+    private string? lastReportedPartition;
+    private int completedFlushes;
+    private int totalFlushes;
+    private long lastSpeedBytes;
+    private long lastSpeedTicks;
+
+    private void ResetFlashProgress(QuickFlashExecutionPlan plan)
+    {
+        CurrentPartition = "--";
+        CurrentPartitionProgress = 0;
+        OverallProgress = 0;
+        SpeedText = string.Empty;
+        completedFlushes = 0;
+        totalFlushes = plan.Requests.Count * (plan.Options.FlashBothSlots ? 2 : 1);
+        lastReportedPartition = null;
+        lastSpeedBytes = 0;
+        lastSpeedTicks = 0;
+    }
+
+    private void OnFlashProgress((string Partition, double Fraction) value, QuickFlashExecutionPlan plan)
+    {
+        if (lastReportedPartition is not null &&
+            !string.Equals(lastReportedPartition, value.Partition, StringComparison.Ordinal))
+        {
+            completedFlushes++;
+        }
+
+        lastReportedPartition = value.Partition;
+        CurrentPartition = value.Partition;
+        CurrentPartitionProgress = value.Fraction;
+        OverallProgress = totalFlushes > 0
+            ? (completedFlushes + Math.Clamp(value.Fraction, 0d, 1d)) / totalFlushes
+            : Math.Clamp(value.Fraction, 0d, 1d);
+
+        var sizeBytes = FindImageSize(plan, value.Partition);
+        if (sizeBytes > 0)
+        {
+            UpdateFlashSpeed((long)(value.Fraction * sizeBytes));
+        }
+    }
+
+    private static long FindImageSize(QuickFlashExecutionPlan plan, string targetPartition)
+    {
+        var baseName = BasePartitionName(targetPartition);
+        foreach (var request in plan.Requests)
+        {
+            if (string.Equals(ToPartitionName(request.Partition), baseName, StringComparison.OrdinalIgnoreCase))
+            {
+                return request.Image.SizeBytes;
+            }
+        }
+
+        return 0;
+    }
+
+    private void UpdateFlashSpeed(long bytes)
+    {
+        var now = Environment.TickCount64;
+        if (lastSpeedBytes > 0 && now > lastSpeedTicks)
+        {
+            var deltaBytes = bytes - lastSpeedBytes;
+            var deltaSeconds = (now - lastSpeedTicks) / 1000.0;
+            if (deltaBytes > 0 && deltaSeconds > 0)
+            {
+                SpeedText = FormatBytes((long)(deltaBytes / deltaSeconds)) + "/s";
+            }
+        }
+
+        lastSpeedBytes = bytes;
+        lastSpeedTicks = now;
+    }
+
+    private static string BasePartitionName(string targetPartition) =>
+        targetPartition.EndsWith("_a", StringComparison.OrdinalIgnoreCase)
+            ? targetPartition[..^2]
+            : targetPartition.EndsWith("_b", StringComparison.OrdinalIgnoreCase)
+                ? targetPartition[..^2]
+                : targetPartition;
+
+    private static string ToPartitionName(QuickFlashPartition partition) => partition switch
+    {
+        QuickFlashPartition.Boot => "boot",
+        QuickFlashPartition.InitBoot => "init_boot",
+        QuickFlashPartition.VendorBoot => "vendor_boot",
+        QuickFlashPartition.Lk => "lk",
+        _ => string.Empty
+    };
 }

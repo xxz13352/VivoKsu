@@ -16,7 +16,7 @@ public sealed class VivoVendorBootProcessorTests
         var source = await InspectAsync(sourcePath);
         var native = new VendorPatchNativeApi();
         var backend = new FastbootRsBackend(native);
-        var service = new VivoVendorBootProcessor(backend, new VivoRootResourceService(AppContext.BaseDirectory), new QuickFlashService(backend, new OperationLogService()));
+        var service = new VivoVendorBootProcessor(backend, new VivoRootResourceService(AppContext.BaseDirectory), new QuickFlashService(backend, new FakeFastbootCliRunner(), new OperationLogService()));
 
         try
         {
@@ -47,7 +47,7 @@ public sealed class VivoVendorBootProcessorTests
         var source = await InspectAsync(sourcePath);
         var native = new VendorPatchNativeApi { ModuleListing = "lib/modules/modules.load" };
         var backend = new FastbootRsBackend(native);
-        var service = new VivoVendorBootProcessor(backend, new VivoRootResourceService(AppContext.BaseDirectory), new QuickFlashService(backend, new OperationLogService()));
+        var service = new VivoVendorBootProcessor(backend, new VivoRootResourceService(AppContext.BaseDirectory), new QuickFlashService(backend, new FakeFastbootCliRunner(), new OperationLogService()));
 
         try
         {
@@ -77,7 +77,7 @@ public sealed class VivoVendorBootProcessorTests
         var service = new VivoVendorBootProcessor(
             backend,
             new VivoRootResourceService(AppContext.BaseDirectory),
-            new QuickFlashService(backend, logs));
+            new QuickFlashService(backend, new FakeFastbootCliRunner(), logs));
         var coordinator = new OperationCoordinator(new DeviceSessionViewModel(), logs);
 
         try

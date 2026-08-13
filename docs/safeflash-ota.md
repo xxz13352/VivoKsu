@@ -58,12 +58,12 @@ PD 码用 `ro.product.device`(= `Details.Codename`)。bbk 为空 / 版本是通�
 
 staging 目录在剩余空间最大的固定盘 `VivoKsu\safe-flash\<guid>\`,下载与解包都在此,刷完清理。
 
-## 刷写(fastboot-rs CLI)
+## 刷写(唯一 fastboot.exe)
 
-刷写阶段用 **fastboot-rs 命令行 EXE**(`platform-tools/fastboot-rs.exe`,1.0.0),而非 DLL:
+刷写阶段用唯一的 **`platform-tools/fastboot.exe`**(fastboot 35.0.2-eng,带进度),经 `FastbootCliRunner` 子进程调用:
 
-- **为什么换 EXE**:DLL 的 `fastboot_flash` C ABI 只回粗错误码(多数失败归 `-8`),拿不到原因;EXE 打印可读、可操作错误(无设备 + 检查清单 / 镜像未找到:<路径> / 设备 FAIL 消息)。
-- 封装 `FastbootRsCliRunner`:子进程调 `fastboot-rs.exe -s <serial> flash <分区> <镜像>` / `getvar partition-type:<名>` / `reboot`。
+- **为什么统一 CLI**:fastboot-rs DLL 的 `fastboot_flash` C ABI 只回粗错误码(-8/-4),拿不到原因也无进度;CLI 打印可读、可操作错误(无设备 + 检查清单 / 镜像未找到:<路径> / 设备 FAIL 消息),并能采样出连续传输进度。
+- 封装 `FastbootCliRunner`:子进程调 `fastboot.exe -s <serial> flash <分区> <镜像>` / `getvar partition-type:<名>` / `reboot`。
 - **分区存在性预检**:flash 前 `getvar partition-type:<分区>`,设备没有的分区(OTA 里区域变体专属)跳过 + 日志,避免未知分区中止整条流程导致半刷。
 - **刷写模式(vivo 一律 fastbootd)**:`adb reboot fastboot`(ADB→fastbootd)→ 等待 FastbootConnected → 逐个 `fastboot flash` → `fastboot reboot`(回系统)。
 - 刷写循环不再每次校验 `session.Serial == 缓存`(避免长时间刷大分区时监控瞬时抖动误判),依赖 fastboot 自身报错;用当前 `session.Serial`。
@@ -94,7 +94,7 @@ staging 目录在剩余空间最大的固定盘 `VivoKsu\safe-flash\<guid>\`,下
 [12:36:04] 任务结束,耗时17.6秒.
 ```
 
-> Sending / OKAY / Writing 的时间用每次 flash 的实测耗时(fastboot-rs EXE 是阻塞调用,拿不到分相),格式对齐即可。
+> Sending / OKAY / Writing 的时间用每次 flash 的实测耗时(fastboot CLI 进程是阻塞调用,拿不到分相),格式对齐即可;当前分区进度条由 GetProcessIoCounters 给出连续传输百分比。
 
 ## 相关文档
 

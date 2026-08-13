@@ -6,10 +6,12 @@ namespace VivoKsu.App.Services;
 public sealed class DeviceInfoService
 {
     private readonly FastbootRsBackend backend;
+    private readonly IFastbootCliRunner cliRunner;
 
-    public DeviceInfoService(FastbootRsBackend backend)
+    public DeviceInfoService(FastbootRsBackend backend, IFastbootCliRunner cliRunner)
     {
         this.backend = backend;
+        this.cliRunner = cliRunner;
     }
 
     public async Task<DeviceDetailsSnapshot> ReadAdbAsync(string serial, CancellationToken cancellationToken)
@@ -57,9 +59,9 @@ public sealed class DeviceInfoService
     {
         try
         {
-            return await backend.GetVarAsync(serial, variable, cancellationToken);
+            return await cliRunner.GetVarAsync(serial, variable, cancellationToken);
         }
-        catch (FastbootRsNativeException)
+        catch (FastbootCliException)
         {
             return string.Empty;
         }

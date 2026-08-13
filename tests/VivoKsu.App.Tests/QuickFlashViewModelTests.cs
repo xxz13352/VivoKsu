@@ -32,7 +32,7 @@ public class QuickFlashViewModelTests
     {
         var viewModel = new QuickFlashViewModel(
             new DeviceSessionViewModel(),
-            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), new OperationLogService()),
+            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), new FakeFastbootCliRunner(), new OperationLogService()),
             new OperationLogService());
 
         Assert.False(viewModel.RequestFlashCommand.CanExecute(null));
@@ -48,7 +48,7 @@ public class QuickFlashViewModelTests
     {
         var viewModel = new QuickFlashViewModel(
             new DeviceSessionViewModel(),
-            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), new OperationLogService()),
+            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), new FakeFastbootCliRunner(), new OperationLogService()),
             new OperationLogService());
         var image = new FlashImageInfo("C:\\images\\init_boot_ksu_patched.img", 1024);
 
@@ -67,7 +67,7 @@ public class QuickFlashViewModelTests
         var session = new DeviceSessionViewModel();
         var viewModel = new QuickFlashViewModel(
             session,
-            new QuickFlashService(new FastbootRsBackend(native), logs),
+            new QuickFlashService(new FastbootRsBackend(native), new FakeFastbootCliRunner(), logs),
             logs)
         {
             SelectedImage = new FlashImageInfo("C:\\images\\boot.img", 1024)
@@ -97,7 +97,7 @@ public class QuickFlashViewModelTests
         var coordinator = new OperationCoordinator(session, logs);
         var viewModel = new QuickFlashViewModel(
             session,
-            new QuickFlashService(new FastbootRsBackend(native), logs),
+            new QuickFlashService(new FastbootRsBackend(native), new FakeFastbootCliRunner(), logs),
             logs,
             coordinator)
         {
@@ -182,7 +182,7 @@ public class QuickFlashViewModelTests
         var session = new DeviceSessionViewModel();
         var viewModel = new QuickFlashViewModel(
             session,
-            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), logs),
+            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), new FakeFastbootCliRunner(), logs),
             logs);
         var preset = Find(viewModel, QuickFlashPartition.Boot);
         preset.SelectedImage = new FlashImageInfo(@"D:\firmware\boot.img", 64L * 1024 * 1024);
@@ -199,12 +199,39 @@ public class QuickFlashViewModelTests
         Assert.True(viewModel.RequestPresetFlashCommand.CanExecute(preset));
     }
 
+    [Fact]
+    public async Task ConfirmFlashAsync_flashes_only_the_confirmed_preset()
+    {
+        var logs = new OperationLogService();
+        var session = new DeviceSessionViewModel();
+        var native = new RecordingFlashNativeApi();
+        var fake = new FakeFastbootCliRunner();
+        var viewModel = new QuickFlashViewModel(
+            session,
+            new QuickFlashService(new FastbootRsBackend(native), fake, logs),
+            logs)
+        {
+            AutoReboot = false
+        };
+        var boot = Find(viewModel, QuickFlashPartition.Boot);
+        boot.SelectedImage = new FlashImageInfo("C:\\images\\boot.img", 10);
+        Find(viewModel, QuickFlashPartition.VendorBoot).SelectedImage = new FlashImageInfo("C:\\images\\vendor_boot.img", 20);
+
+        viewModel.RequestPresetFlashCommand.Execute(boot);
+        Assert.Single(viewModel.PendingPlan!.Requests);
+
+        await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
+
+        // 只闪被确认的 boot;绝不能把用户从未确认的 vendor_boot 也刷进去。
+        Assert.Equal(new[] { "boot" }, fake.FlashRequests.Select(request => request.Partition));
+    }
+
     private static QuickFlashViewModel CreateViewModel()
     {
         var logs = new OperationLogService();
         return new QuickFlashViewModel(
             new DeviceSessionViewModel(),
-            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), logs),
+            new QuickFlashService(new FastbootRsBackend(new EmptyNativeApi()), new FakeFastbootCliRunner(), logs),
             logs);
     }
 
@@ -212,6 +239,27 @@ public class QuickFlashViewModelTests
         QuickFlashViewModel viewModel,
         QuickFlashPartition partition) =>
         Assert.Single(viewModel.Presets, item => item.Partition == partition);
+
+    private sealed class RecordingFlashNativeApi : IFastbootRsNativeApi
+    {
+        public List<string> FlashedPartitions { get; } = [];
+
+        public string ListDevices() => "FAST123\tfastboot";
+
+        public string Shell(string? serial, string command) => string.Empty;
+
+        public string GetVar(string? serial, string variable) => string.Empty;
+
+        public void Reboot(string? serial, string target) { }
+
+        public void Push(string? serial, string localPath, string remotePath) { }
+
+        public long Pull(string? serial, string remotePath, string localPath) => 0;
+
+        public string Install(string? serial, string apkPath, bool replace) => string.Empty;
+
+        public void Flash(string? serial, string partition, string imagePath) => FlashedPartitions.Add(partition);
+    }
 
     private sealed class EmptyNativeApi : IFastbootRsNativeApi
     {

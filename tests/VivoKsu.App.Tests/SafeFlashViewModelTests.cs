@@ -28,15 +28,16 @@ public class SafeFlashViewModelTests
                 DeviceConnectionState.FastbootConnected, "FB123", "fastboot 已连接", "vivo"));
             var api = new FlashApi();
             var logs = new OperationLogService();
-            var viewModel = CreateViewModel(session, api, logs);
+            var fake = new FakeFastbootCliRunner();
+            var viewModel = CreateViewModel(session, api, logs, fake);
             var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
             var partitions = await extractor.ListPartitionsAsync(zip, CancellationToken.None);
             viewModel.SetPendingSourceForTesting(zip, Path.Combine(directory, "staging"), partitions);
 
             await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
 
-            api.FlashedPartitions.Should().BeEquivalentTo(["boot"]);
-            api.FastbootRebootCalled.Should().BeTrue();
+            fake.FlashRequests.Select(request => request.Partition).Should().BeEquivalentTo(["boot"]);
+            fake.Rebooted.Should().Contain("FB123");
             viewModel.StatusText.Should().Contain("已刷入");
             logs.Entries.Should().Contain(entry => entry.Message.Contains("Sending 'boot'"));
             logs.Entries.Should().Contain(entry => entry.Message.Contains("Finished. Total time:"));
@@ -66,15 +67,60 @@ public class SafeFlashViewModelTests
             session.ApplyDevice(new DeviceSnapshot(
                 DeviceConnectionState.FastbootConnected, "FB123", "fastboot 已连接", "vivo"));
             var api = new FlashApi { MissingPartitions = ["dtbo"] };
-            var viewModel = CreateViewModel(session, api);
+            var fake = new FakeFastbootCliRunner { MissingPartitions = ["dtbo"] };
+            var viewModel = CreateViewModel(session, api, fake: fake);
             var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
             var partitions = await extractor.ListPartitionsAsync(zip, CancellationToken.None);
             viewModel.SetPendingSourceForTesting(zip, Path.Combine(directory, "staging"), partitions);
 
             await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
 
-            api.FlashedPartitions.Should().BeEquivalentTo(["boot"]);
+            fake.FlashRequests.Select(request => request.Partition).Should().BeEquivalentTo(["boot"]);
             viewModel.StatusText.Should().Contain("跳过");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConfirmFlashAsync_waits_for_fastbootd_after_adb_reboot()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var zip = Path.Combine(directory, "ota.zip");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            {
+                CreateEntry(archive, "boot.img", [0x01, 0x02]);
+                CreateEntry(archive, "preloader.img", [0x04]);
+            }
+
+            // 设备起初在 ADB;adb reboot fastboot 后 FastbootDeviceOutput 出现 fastbootd 设备。
+            var session = new DeviceSessionViewModel();
+            session.ApplyDevice(new DeviceSnapshot(
+                DeviceConnectionState.AdbConnected, "ADB123", "adb 已连接", "vivo"));
+            var api = new FlashApi { FastbootDeviceOutput = "FB123\tfastbootd" };
+            var logs = new OperationLogService();
+            var fake = new FakeFastbootCliRunner();
+            var viewModel = CreateViewModel(session, api, logs, fake);
+            var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
+            var partitions = await extractor.ListPartitionsAsync(zip, CancellationToken.None);
+            viewModel.SetPendingSourceForTesting(zip, Path.Combine(directory, "staging"), partitions);
+
+            await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
+
+            api.RebootTargets.Should().Contain("fastboot");
+            fake.FlashRequests.Select(request => request.Partition).Should().BeEquivalentTo(["boot"]);
+            fake.Rebooted.Should().Contain("FB123");
+            // WaitForFastbootAsync 应把探测到的 fastboot 设备应用到 session,
+            // 否则刷写循环会因 session 仍是 AdbConnected 而误判断开。
+            session.ConnectionState.Should().Be(DeviceConnectionState.FastbootConnected);
+            session.Serial.Should().Be("FB123");
+            viewModel.StatusText.Should().Contain("已刷入");
+            logs.Entries.Should().Contain(entry => entry.Message.Contains("已连接 FB123"));
         }
         finally
         {
@@ -131,10 +177,12 @@ public class SafeFlashViewModelTests
     private static SafeFlashViewModel CreateViewModel(
         DeviceSessionViewModel session,
         FlashApi api,
-        OperationLogService? logs = null)
+        OperationLogService? logs = null,
+        FakeFastbootCliRunner? fake = null)
     {
         logs ??= new OperationLogService();
         var backend = new FastbootRsBackend(api);
+        fake ??= new FakeFastbootCliRunner { MissingPartitions = [.. api.MissingPartitions] };
         return new SafeFlashViewModel(
             session,
             logs,
@@ -142,7 +190,8 @@ public class SafeFlashViewModelTests
             new OtaApiClient(),
             new OtaDownloadService(),
             new FirmwarePartitionExtractor(payloadDumper: null),
-            coordinator: null);
+            coordinator: null,
+            fake);
     }
 
     private static void CreateEntry(ZipArchive archive, string name, byte[] content)
@@ -162,7 +211,12 @@ public class SafeFlashViewModelTests
 
         public List<string> RebootTargets { get; } = [];
 
-        public string ListDevices() => string.Empty;
+        /// <summary>adb reboot fastboot 之后 ListDevices 返回的设备列表。</summary>
+        public string FastbootDeviceOutput { get; set; } = string.Empty;
+
+        private bool rebootIssued;
+
+        public string ListDevices() => rebootIssued ? FastbootDeviceOutput : string.Empty;
 
         public string Shell(string? serial, string command) => string.Empty;
 
@@ -172,7 +226,11 @@ public class SafeFlashViewModelTests
             return MissingPartitions.Contains(partition) ? string.Empty : "raw";
         }
 
-        public void Reboot(string? serial, string target) => RebootTargets.Add(target);
+        public void Reboot(string? serial, string target)
+        {
+            RebootTargets.Add(target);
+            rebootIssued = true;
+        }
 
         public void FastbootReboot(string? serial) => FastbootRebootCalled = true;
 

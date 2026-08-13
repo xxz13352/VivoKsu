@@ -76,7 +76,7 @@
           </Button>
           <Button Content="可视刷写" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.LineFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.LineFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
           <Button Content="固件提取" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.FirmwareExtract}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FirmwareExtract}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
-          <Button Content="安全刷写" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.SafeFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+          <Button Content="VIVO 线刷" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.SafeFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
         </StackPanel>
       </Grid>
     </Border>
@@ -308,7 +308,7 @@
 
         <Border Grid.Row="2" Style="{StaticResource PanelBorderStyle}" Padding="16,12" Margin="0,14,0,0">
           <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="280"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel VerticalAlignment="Center">
               <TextBlock Text="{Binding PartitionWorkspace.ProgressText}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
               <TextBlock FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0">
@@ -316,16 +316,7 @@
               </TextBlock>
               <TextBlock Text="标记仅用于提示；已选择的分区会在确认后依序执行。" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
             </StackPanel>
-            <StackPanel Grid.Column="1" Margin="16,0" VerticalAlignment="Center">
-              <TextBlock Text="{Binding PartitionWorkspace.CurrentOperationPartitionName, StringFormat='当前分区  {0}'}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" TextTrimming="CharacterEllipsis"/>
-              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding PartitionWorkspace.CurrentOperationProgress}" IsIndeterminate="{Binding PartitionWorkspace.IsCurrentOperationIndeterminate}"/>
-              <Grid Margin="0,8,0,5">
-                <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
-                <TextBlock Text="{Binding PartitionWorkspace.OperationProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-              </Grid>
-              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding PartitionWorkspace.OverallProgress}"/>
-            </StackPanel>
-            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
               <Button Content="备份所选" Style="{StaticResource ToolButtonStyle}" Command="{Binding PartitionWorkspace.BackupSelectedCommand}"/>
               <Button Content="写入所选" Style="{StaticResource PrimaryButtonStyle}" Command="{Binding PartitionWorkspace.WriteSelectedCommand}"/>
               <Button Content="擦除所选" Style="{StaticResource SignalButtonStyle}" Command="{Binding PartitionWorkspace.EraseSelectedCommand}"/>
@@ -822,6 +813,7 @@
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
                   <Button Content="全自动 ROOT" Style="{StaticResource PrimaryButtonStyle}" Command="{Binding Root.RunAutomaticRootCommand}" Padding="12,7" FontSize="11"/>
+                  <Button Content="取消操作" Style="{StaticResource ToolButtonStyle}" Command="{Binding Root.StopCommand}" Padding="11,7" FontSize="11" Margin="8,0,0,0"/>
                   <Button Content="安装管理器" Style="{StaticResource ToolButtonStyle}" Command="{Binding Root.InstallManagerCommand}" Padding="11,7" FontSize="11"/>
                   <Button Content="修补镜像" Style="{StaticResource ToolButtonStyle}" Command="{Binding Root.PatchImageCommand}" Padding="11,7" FontSize="11"/>
                   <Button Content="刷写 init_boot" Style="{StaticResource ToolButtonStyle}" Command="{Binding Root.ContinueToFlashCommand}" Padding="11,7" FontSize="11"/>
@@ -1039,8 +1031,8 @@
         <Grid Margin="0,0,0,18">
           <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <StackPanel>
-            <TextBlock Text="VIVO SAFE FLASH" Style="{StaticResource PageEyebrowStyle}"/>
-            <TextBlock Text="安全刷写" Style="{StaticResource PageTitleStyle}"/>
+            <TextBlock Text="VIVO LINE FLASH" Style="{StaticResource PageEyebrowStyle}"/>
+            <TextBlock Text="VIVO 线刷" Style="{StaticResource PageTitleStyle}"/>
             <TextBlock Text="查询设备 → 下载 OTA → 解压解包 → 跳过 preloader/lk → fastbootd 刷入其余" Style="{StaticResource PageSubtitleStyle}"/>
           </StackPanel>
           <Border Grid.Column="1" Style="{StaticResource StatusChipStyle}" VerticalAlignment="Bottom">
@@ -1067,7 +1059,7 @@
                 <Button Content="选择固件" Style="{StaticResource ToolButtonStyle}" Command="{Binding SafeFlash.SelectAndFlashCommand}" Margin="10,0,0,0" Padding="16,8"/>
               </StackPanel>
             </Grid>
-            <TextBlock Grid.Row="1" Margin="24,12,24,0" Text="固件中所有分区镜像会被逐个刷入,只有 preloader 与 lk 被跳过,以防止引导加载器被破坏导致变砖。" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+            <TextBlock Grid.Row="1" Margin="24,12,24,0" Text="固件中可直接刷写的分区镜像会被逐个刷入,preloader 与 lk 被跳过;含块式内容(如 system/vendor/product 的 .new.dat)的固件会在确认时给出警告。" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
             <Border Grid.Row="2" Margin="24,12,24,0" Background="#FFF4F0" BorderBrush="{StaticResource SignalBrush}" BorderThickness="1" Padding="16" CornerRadius="8" Visibility="{Binding SafeFlash.IsConfirmVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
               <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -1099,9 +1091,7 @@
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="{Binding SafeFlash.SpeedText}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,2,0,0"/>
                 <TextBlock Text="{Binding SafeFlash.ElapsedText}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="12,2,0,0"/>
-                <TextBlock Text="{Binding SafeFlash.OverallProgressPercent}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource ConnectionBrush}" Margin="12,2,0,0"/>
               </StackPanel>
-              <ProgressBar Height="5" Value="{Binding SafeFlash.OverallProgress}" Maximum="1" Margin="0,10,0,0"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
               <Button Content="停止操作" Style="{StaticResource SignalButtonStyle}" Command="{Binding SafeFlash.StopCommand}" AutomationProperties.Name="停止操作" Margin="0"/>
@@ -1135,6 +1125,90 @@
               <Run Text="OS  "/><Run Text="{Binding DeviceSession.AndroidVersion}"/>
               <Run Text="  BAT  "/><Run Text="{Binding DeviceSession.BatteryLevel}"/>
             </TextBlock>
+
+            <!-- 操作进度(刷写/可视读写):当前分区进度 + 总进度。按页面切换绑定对应 VM -->
+            <Border Height="1" Background="{StaticResource EdgeBrush}" Margin="0,12,0,10"/>
+            <StackPanel>
+              <StackPanel.Style>
+                <Style TargetType="StackPanel">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}">
+                      <Setter Property="Visibility" Value="Visible"/>
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </StackPanel.Style>
+              <Grid>
+                <TextBlock Text="当前分区" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding SafeFlash.CurrentPartition}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                  <TextBlock Text="{Binding SafeFlash.CurrentPartitionProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
+                  <TextBlock Text=" · " FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                  <TextBlock Text="{Binding SafeFlash.SpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
+                </StackPanel>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding SafeFlash.CurrentPartitionProgress}" IsIndeterminate="{Binding SafeFlash.IsCurrentPartitionIndeterminate}" Margin="0,6,0,0"/>
+              <Grid Margin="0,10,0,0">
+                <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding SafeFlash.OverallProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding SafeFlash.OverallProgress}" Margin="0,6,0,0"/>
+            </StackPanel>
+            <StackPanel>
+              <StackPanel.Style>
+                <Style TargetType="StackPanel">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.LineFlash}">
+                      <Setter Property="Visibility" Value="Visible"/>
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </StackPanel.Style>
+              <Grid>
+                <TextBlock Text="当前分区" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding PartitionWorkspace.CurrentOperationPartitionName}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                  <TextBlock Text="{Binding PartitionWorkspace.OperationProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
+                  <TextBlock Text=" · " FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                  <TextBlock Text="{Binding PartitionWorkspace.OperationSpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
+                </StackPanel>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding PartitionWorkspace.CurrentOperationProgress}" IsIndeterminate="{Binding PartitionWorkspace.IsCurrentOperationIndeterminate}" Margin="0,6,0,0"/>
+              <Grid Margin="0,10,0,0">
+                <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding PartitionWorkspace.OperationProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding PartitionWorkspace.OverallProgress}" Margin="0,6,0,0"/>
+            </StackPanel>
+            <StackPanel>
+              <StackPanel.Style>
+                <Style TargetType="StackPanel">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FastbootFlash}">
+                      <Setter Property="Visibility" Value="Visible"/>
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </StackPanel.Style>
+              <Grid>
+                <TextBlock Text="当前分区" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding QuickFlash.CurrentPartition}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                  <TextBlock Text="{Binding QuickFlash.CurrentPartitionProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
+                  <TextBlock Text=" · " FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                  <TextBlock Text="{Binding QuickFlash.SpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
+                </StackPanel>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding QuickFlash.CurrentPartitionProgress}" IsIndeterminate="{Binding QuickFlash.IsCurrentPartitionIndeterminate}" Margin="0,6,0,0"/>
+              <Grid Margin="0,10,0,0">
+                <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding QuickFlash.OverallProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding QuickFlash.OverallProgress}" Margin="0,6,0,0"/>
+            </StackPanel>
           </StackPanel>
         </Border>
         <Grid Grid.Row="1" Margin="18,0">

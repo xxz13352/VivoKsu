@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.Http;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -61,6 +62,7 @@ public partial class MainViewModel : ObservableObject
         IOperationCoordinator? coordinator = null)
     {
         var fallbackLogs = new OperationLogService();
+        var fallbackCliRunner = new FastbootCliRunner(Path.Combine(Path.GetTempPath(), "unavailable-fastboot.exe"));
         var unavailableBackend = new FastbootRsBackend(new UnavailableNativeApi());
         this.deviceSessionService = deviceSessionService;
         this.deviceMonitor = deviceMonitor;
@@ -68,12 +70,12 @@ public partial class MainViewModel : ObservableObject
         DeviceSession = deviceSession;
         Overview = overview ?? new OverviewViewModel(deviceSession, unavailableBackend, fallbackLogs);
         Logs = logs ?? new OperationLogViewModel(fallbackLogs);
-        QuickFlash = quickFlash ?? new QuickFlashViewModel(deviceSession, new QuickFlashService(unavailableBackend, fallbackLogs), fallbackLogs);
+        QuickFlash = quickFlash ?? new QuickFlashViewModel(deviceSession, new QuickFlashService(unavailableBackend, fallbackCliRunner, fallbackLogs), fallbackLogs);
         Mirror = mirror ?? new MirrorViewModel(deviceSession, new MirrorService(new SystemProcessRunner(), fallbackLogs));
         FileManager = fileManager ?? new FileManagerViewModel(deviceSession, new AdbFileService(unavailableBackend, fallbackLogs), fallbackLogs);
-        LineFlash = lineFlash ?? new LineFlashViewModel(deviceSession, new FastbootPartitionService(unavailableBackend), fallbackLogs);
+        LineFlash = lineFlash ?? new LineFlashViewModel(deviceSession, new FastbootPartitionService(fallbackCliRunner), fallbackLogs);
         var workspaceCoordinator = coordinator ?? new OperationCoordinator(deviceSession, fallbackLogs);
-        var fallbackFastbootTransport = new FastbootPartitionTransport(unavailableBackend);
+        var fallbackFastbootTransport = new FastbootPartitionTransport(fallbackCliRunner);
         var fallbackAdbRootTransport = new AdbRootPartitionTransport(new UnavailableAdbRootTransferRunner());
         PartitionWorkspace = partitionWorkspace ?? new PartitionWorkspaceViewModel(
             deviceSession,
@@ -82,7 +84,7 @@ public partial class MainViewModel : ObservableObject
             new PartitionExecutionService(deviceSession, workspaceCoordinator, fallbackLogs, [fallbackFastbootTransport, fallbackAdbRootTransport]),
             fallbackLogs,
             workspaceCoordinator);
-        Root = root ?? new RootViewModel(deviceSession, new QuickFlashService(unavailableBackend, fallbackLogs), fallbackLogs);
+        Root = root ?? new RootViewModel(deviceSession, new QuickFlashService(unavailableBackend, fallbackCliRunner, fallbackLogs), fallbackLogs);
         FirmwareExtract = firmwareExtract ?? new FirmwareExtractViewModel(fallbackLogs);
         SafeFlash = safeFlash ?? new SafeFlashViewModel(
             deviceSession,
@@ -91,7 +93,8 @@ public partial class MainViewModel : ObservableObject
             new OtaApiClient(),
             new OtaDownloadService(),
             new FirmwarePartitionExtractor(payloadDumper: null),
-            coordinator);
+            coordinator,
+            fallbackCliRunner);
         SelectPageCommand = new RelayCommand<AppPage>(page => SelectedPage = page);
         RefreshDeviceCommand = new AsyncRelayCommand(() => RefreshDeviceAsync(logActivity: true));
     }

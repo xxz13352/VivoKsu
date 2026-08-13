@@ -99,7 +99,7 @@ VivoKsu 工具/
 
 - **OTA 下载** `OtaDownloadService`:bezzad/Downloader 多分片,含 1 字节 bug / 失败假成功 / 磁盘预检等修复;staging 优先系统 SSD。
 - **解压解包** `FirmwarePartitionExtractor`:自动分流 payload OTA(PD2417)/ 直接镜像 zip(PD2057)/ firmware-update 镜像,过滤 `preloader*` 与 `lk`。
-- **刷写** `FastbootRsCliRunner`:调 fastboot-rs 命令行 EXE(可读错误),`adb reboot fastboot` 进 fastbootd,`getvar partition-type` 预检跳过设备缺失分区,逐个 flash 后 `fastboot reboot`。
+- **刷写** `FastbootCliRunner`:调唯一 `platform-tools/fastboot.exe`(35.0.2-eng,带连续进度 + 可读错误),`adb reboot fastboot` 进 fastbootd,`getvar partition-type` 预检跳过设备缺失分区,逐个 flash 后 `fastboot reboot`。
 - 操作日志按 `[HH:mm:ss] 消息` 单行等宽显示刷机进度,自动滚动。
 
 ### UI 现代化
@@ -179,7 +179,7 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 - **payload 分区内部百分比无法测量**:payload_dumper 预分配输出文件且不流式输出进度,分区内的进度条按进程写入字节驱动(真实但以分区为单位),分区内更细的百分比受工具二进制限制无法获得。
 - **分区操作有真实设备风险**:写入 / 擦除会修改设备分区,执行前有确认弹窗,任务在首个失败处分区停止。
 - **脚本编码**:发布 / 验证用的 `.ps1` 必须保持纯 ASCII(本机无 BOM 的 UTF-8 脚本被按 GBK 读取会乱码)。
-- **安全刷写待真机验证**:fastboot-rs CLI 在 vivo fastbootd 逐个刷 36 分区是唯一未真机实测环节。
+- **唯一 fastboot.exe 待真机验证**:fastboot 35.0.2-eng 在 vivo fastbootd 逐个刷分区是唯一未真机实测环节。
 - **下载盘需 ~25GB 空闲且最好是 SSD**:bezzad 多分片随机写在 HDD 会停滞(staging 自动优先系统盘)。
 
 ## 相关文档
