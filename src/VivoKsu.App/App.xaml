@@ -1,4 +1,5 @@
-<Application x:Class="VivoKsu.App.App" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework">
+<Application x:Class="VivoKsu.App.App" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+             ShutdownMode="OnExplicitShutdown">
   <Application.Resources>
     <SolidColorBrush x:Key="WindowBrush" Color="#F7F9FB"/>
     <SolidColorBrush x:Key="RailBrush" Color="#FFFFFF"/>

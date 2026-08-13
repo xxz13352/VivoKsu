@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 using VivoKsu.App.Services;
@@ -8,9 +9,42 @@ public partial class App : Application
 {
     private AppComposition? composition;
 
+    private static void WriteCrashLog(Exception? exception)
+    {
+        if (exception is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "VivoKsu");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(
+                Path.Combine(directory, "crash.log"),
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {exception}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch
+        {
+            // 日志写失败忽略。
+        }
+    }
+
     protected override void OnStartup(StartupEventArgs eventArgs)
     {
         base.OnStartup(eventArgs);
+
+        // 崩溃日志(商业工具排查):记录未捕获异常到本地文件。
+        DispatcherUnhandledException += (_, e) =>
+        {
+            WriteCrashLog(e.Exception);
+            e.Handled = true;
+            MessageBox.Show("发生错误: " + e.Exception.Message, "VivoKsu", MessageBoxButton.OK, MessageBoxImage.Error);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            WriteCrashLog(e.ExceptionObject as Exception);
 
         // 登录门禁(商业工具):账号+密码验证通过才进入主界面。
         var preferences = ToolPathPreferences.CreateDefault();
@@ -42,6 +76,7 @@ public partial class App : Application
         composition = AppComposition.CreateDefault();
         composition.SetAuthToken(token!);
         var mainWindow = new MainWindow(composition);
+        mainWindow.Closed += (_, _) => Shutdown();
         MainWindow = mainWindow;
         mainWindow.Show();
     }
