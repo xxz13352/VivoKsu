@@ -48,10 +48,13 @@ npx wrangler deploy                            # 绑定 web.nwflash.cc.cd
 
 > 种子只生效一次:库内已有管理员后 `ADMIN_SEED_PASSWORD` 不再创建。稳定后可移除该 secret。
 
-## API 用户与桌面端
+## API 用户与桌面端登录
 
-在「用户管理」创建用户 → 复制 token → 桌面端 `OtaApiClient` 用 `Authorization: Bearer <token>` 调用
-`api.nwflash.cc.cd/api/rom`(不带 token 记为匿名,也可正常查询)。版本必须先在此后台启用。
+在「用户管理」创建用户时填 **登录账号 + 初始密码**(同时生成 API token,仅显示一次):
+
+- **桌面端登录**:VivoKsu 启动弹登录窗口 → 用「登录账号 + 密码」调 `api.nwflash.cc.cd/api/login` → 拿到 API token 解锁应用;勾选「记住登录」会把 token 存本地,下次启动校验 `/api/me` 有效则免登录。
+- **API 调用**:应用登录后,`/api/rom` 请求带 `Authorization: Bearer <token>`,后台日志按该用户记录。
+- 版本必须先在此后台启用,否则 `/api/rom` 返回 404。
 
 ## D1 数据
 

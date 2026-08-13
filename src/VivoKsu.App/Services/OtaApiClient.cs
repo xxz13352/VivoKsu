@@ -34,6 +34,23 @@ public sealed class OtaApiClient
     /// <summary>服务端基地址,页面允许用户修改。</summary>
     public string BaseUrl { get; set; }
 
+    /// <summary>登录后设置的 API token;设置后查询请求带 <c>Authorization: Bearer</c>。</summary>
+    public string? Token
+    {
+        get => token;
+        set
+        {
+            token = value;
+            http.DefaultRequestHeaders.Remove("Authorization");
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"Bearer {value}");
+            }
+        }
+    }
+
+    private string? token;
+
     private static HttpClient CreateLocalHostClient()
     {
         var handler = new HttpClientHandler

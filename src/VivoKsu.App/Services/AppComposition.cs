@@ -9,6 +9,7 @@ namespace VivoKsu.App.Services;
 public sealed class AppComposition
 {
     private readonly MirrorService mirrorService;
+    private readonly OtaApiClient otaClient;
     private bool stopped;
 
     private AppComposition(
@@ -61,11 +62,12 @@ public sealed class AppComposition
         var overview = new OverviewViewModel(Session, backend, LogService, Coordinator);
         var fastbootRsCli = new FastbootRsCliRunner(
             Path.Combine(AppContext.BaseDirectory, "platform-tools", "fastboot-rs.exe"));
+        otaClient = new OtaApiClient();
         var safeFlash = new SafeFlashViewModel(
             Session,
             LogService,
             backend,
-            new OtaApiClient(),
+            otaClient,
             new OtaDownloadService(),
             new FirmwarePartitionExtractor(payloadDumper),
             Coordinator,
@@ -128,6 +130,9 @@ public sealed class AppComposition
 
     public MainViewModel MainViewModel { get; }
 
+    /// <summary>登录后注入 API token,后续 ROM 查询带 Authorization:Bearer。</summary>
+    public void SetAuthToken(string token) => otaClient.Token = token;
+
     public static AppComposition CreateDefault() => new(
         FastbootRsApiFactory.CreateDefault(),
         new SystemProcessRunner());
@@ -153,5 +158,41 @@ public sealed class AppComposition
         await mirrorService.StopAsync();
         await Monitor.DisposeAsync();
         Coordinator.Dispose();
+
+        // 清理从 URL 下载的 Vivo 临时 gzip(可达数 GB)。退出时残留会无上限占用磁盘。
+        try
+        {
+            var downloadedDirectory = VivoFirmwareExtractor.DownloadedGzipDirectory;
+            if (Directory.Exists(downloadedDirectory))
+            {
+                Directory.Delete(downloadedDirectory, recursive: true);
+            }
+        }
+        catch
+        {
+            // Best effort; Windows 磁盘清理最终会回收临时目录。
+        }
+
+        // 清理安全刷写遗留的 staging(取消/强关可能留下数 GB OTA zip)。
+        try
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                if (!drive.IsReady || drive.DriveType != DriveType.Fixed)
+                {
+                    continue;
+                }
+
+                var safeFlashRoot = Path.Combine(drive.RootDirectory.FullName, "VivoKsu", "safe-flash");
+                if (Directory.Exists(safeFlashRoot))
+                {
+                    Directory.Delete(safeFlashRoot, recursive: true);
+                }
+            }
+        }
+        catch
+        {
+            // Best effort; 下次启动的 CleanupStaging 会继续处理当前 staging。
+        }
     }
 }

@@ -11,7 +11,36 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs eventArgs)
     {
         base.OnStartup(eventArgs);
+
+        // 登录门禁(商业工具):账号+密码验证通过才进入主界面。
+        var preferences = ToolPathPreferences.CreateDefault();
+        using var loginService = new LoginService();
+        string? token;
+        if (!string.IsNullOrWhiteSpace(preferences.Token))
+        {
+            // 记住登录:本地 token 有效则直接进入。
+            var name = loginService.ValidateTokenAsync(preferences.Token, CancellationToken.None).GetAwaiter().GetResult();
+            token = name is not null ? preferences.Token : null;
+        }
+        else
+        {
+            token = null;
+        }
+
+        if (token is null)
+        {
+            var login = new LoginWindow(preferences, loginService);
+            if (login.ShowDialog() != true)
+            {
+                Shutdown();
+                return;
+            }
+
+            token = login.Token;
+        }
+
         composition = AppComposition.CreateDefault();
+        composition.SetAuthToken(token!);
         var mainWindow = new MainWindow(composition);
         MainWindow = mainWindow;
         mainWindow.Show();

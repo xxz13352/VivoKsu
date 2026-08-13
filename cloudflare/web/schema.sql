@@ -18,11 +18,14 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- API 用户(调用 api.nwflash.cc.cd 的客户端,桌面应用持 token)
+-- API 用户(调用 api.nwflash.cc.cd 的客户端 / 桌面端登录账号)
 CREATE TABLE IF NOT EXISTS api_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  token TEXT UNIQUE NOT NULL,
+  username TEXT UNIQUE NOT NULL,          -- 登录 ID(桌面端登录用)
+  name TEXT NOT NULL,                     -- 显示名
+  token TEXT UNIQUE NOT NULL,             -- API token(Authorization: Bearer)
+  password TEXT,                          -- PBKDF2 密码哈希(hex)
+  salt TEXT,                              -- PBKDF2 随机盐(hex)
   enabled INTEGER NOT NULL DEFAULT 1,
   note TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))

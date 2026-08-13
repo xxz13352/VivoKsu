@@ -17,6 +17,10 @@ public sealed class ToolPathPreferences
 
     public string? ScrcpyPath => settings.ScrcpyPath;
 
+    public string? Username => settings.Username;
+
+    public string? Token => settings.Token;
+
     public static ToolPathPreferences CreateDefault()
     {
         var directory = Path.Combine(
@@ -34,6 +38,19 @@ public sealed class ToolPathPreferences
     public void ClearScrcpyPath()
     {
         settings = settings with { ScrcpyPath = null };
+        Persist();
+    }
+
+    /// <summary>保存登录凭据(记住登录)。</summary>
+    public void SaveCredentials(string username, string token)
+    {
+        settings = settings with { Username = username, Token = token };
+        Persist();
+    }
+
+    public void ClearCredentials()
+    {
+        settings = settings with { Username = null, Token = null };
         Persist();
     }
 
@@ -71,8 +88,8 @@ public sealed class ToolPathPreferences
         File.Move(temporaryPath, settingsPath, true);
     }
 
-    private sealed record ToolPathSettings(string? ScrcpyPath)
+    private sealed record ToolPathSettings(string? ScrcpyPath, string? Username, string? Token)
     {
-        public static ToolPathSettings Empty { get; } = new(ScrcpyPath: null);
+        public static ToolPathSettings Empty { get; } = new(ScrcpyPath: null, Username: null, Token: null);
     }
 }

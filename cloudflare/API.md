@@ -28,6 +28,36 @@
 
 ---
 
+### `POST /api/login`
+
+桌面端登录(商业工具门禁)。提交账号密码,成功返回该用户的 **API token**(供 `/api/rom` 用)。
+
+**请求体**
+```json
+{ "username": "demo", "password": "DemoPass123" }
+```
+
+**成功 200**
+```json
+{ "ok": true, "token": "<64位hex>", "username": "demo", "name": "演示用户" }
+```
+
+**失败**:`401 { "error": "用户名或密码错误。" }`(账号不存在 / 密码错 / 已停用);`400` 缺参数。
+
+---
+
+### `GET /api/me`
+
+校验本地 token(记住登录)。带 `Authorization: Bearer <token>`。
+
+**200**
+```json
+{ "loggedIn": true, "name": "演示用户" }
+```
+或 `{ "loggedIn": false }`(token 无效)。
+
+---
+
 ### `GET /api/rom?pd=<PD>&version=<版本>`
 
 按 **PD 码 + 版本号** 解析 OTA 下载链接。**只有后台「版本号控制」里启用**的 PD+版本才会返回链接。
@@ -129,7 +159,8 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | --- | --- |
 | 2026-08-13 | 初始部署:worker `nwflash-rom`,自定义域 `api.nwflash.cc.cd`;`/health` + `/api/rom` 代理 VOTA `resolve_url`;token 存 worker 机密;错误映射 400/401/402/403/404/429/500/502 |
 | 2026-08-13 | **接入后台系统**:共用 D1(`nwflash-db`);`/api/rom` 增加 版本号控制(未启用版本→404)、API 用户 token 认证(可选,无效→401)、按用户记访问日志。后台管理见 `web.nwflash.cc.cd`(登录 / 版本 / 用户 / 日志) |
-| (规划) | 登录系统完善、更细粒度的权限、配额限制等 |
+| 2026-08-13 | **桌面端登录(商业工具)**:api_users 加 username/password(PBKDF2);新增 `POST /api/login`(账号密码→token)与 `GET /api/me`(校验 token);VivoKsu 桌面端启动强制登录 |
+| (规划) | 配额限制、订阅计费等 |
 
 ## 管理后台
 

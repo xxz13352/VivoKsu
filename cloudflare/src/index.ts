@@ -42,6 +42,18 @@ export default {
         return json({ status: "ok", source: "VotaApiRomSource" }, 200);
       }
 
+      // 桌面端登录:账号+密码 → 返回 API token(商业工具门禁)。
+      if (url.pathname === "/api/login" && request.method === "POST") {
+        return login(env, request);
+      }
+
+      // 校验本地 token(记住登录):有效返回用户信息。
+      if (url.pathname === "/api/me") {
+        const user = await authenticateUser(env, request);
+        if (user instanceof Response) return json({ loggedIn: false }, 200);
+        return json({ loggedIn: true, name: user.name }, 200);
+      }
+
       if (url.pathname === "/api/rom") {
         const pd = url.searchParams.get("pd");
         const version = url.searchParams.get("version");
@@ -157,6 +169,54 @@ async function logAccess(
   } catch {
     // 日志写失败不阻塞解析。
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 桌面端登录                                                           */
+/* ------------------------------------------------------------------ */
+
+const PBKDF2_ITERATIONS = 100_000;
+
+/** POST /api/login { username, password } → { ok, token, username, name }。 */
+async function login(env: Env, request: Request): Promise<Response> {
+  const body = await request.json().catch(() => null);
+  const username = (body?.username as string || "").trim();
+  const password = body?.password as string || "";
+  if (!username || !password) return json({ error: "缺少用户名或密码。" }, 400);
+
+  const user = await env.DB
+    .prepare("SELECT * FROM api_users WHERE username = ? AND enabled = 1")
+    .bind(username)
+    .first<{ id: number; name: string; token: string; password: string | null; salt: string | null }>();
+  if (!user) return json({ error: "用户名或密码错误。" }, 401);
+  if (!user.password || !user.salt) return json({ error: "该账号未设置密码,请联系管理员。" }, 401);
+
+  const hash = await pbkdf2(password, user.salt);
+  if (hash !== user.password) return json({ error: "用户名或密码错误。" }, 401);
+
+  return json({ ok: true, token: user.token, username, name: user.name }, 200);
+}
+
+async function pbkdf2(password: string, saltHex: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+    key,
+    256,
+  );
+  return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function randomHex(bytes: number): string {
+  const arr = new Uint8Array(bytes);
+  crypto.getRandomValues(arr);
+  return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
 function mapError(code: string | null, error: string): number {

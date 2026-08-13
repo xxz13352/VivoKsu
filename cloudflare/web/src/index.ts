@@ -257,23 +257,32 @@ async function deleteVersion(path: string, env: Env): Promise<Response> {
 
 async function listUsers(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
-    "SELECT id, name, enabled, note, created_at FROM api_users ORDER BY id"
-  ).all<UserRow>(); // token 不回显
+    "SELECT id, username, name, enabled, note, created_at FROM api_users ORDER BY id"
+  ).all<UserRow>(); // token / password 不回显
   return json({ users: rows.results }, 200);
 }
 
 async function addUser(request: Request, env: Env): Promise<Response> {
   const body = await request.json().catch(() => null);
-  const name = (body?.name as string || "").trim();
-  if (!name) return json({ error: "缺少用户名。" }, 400);
+  const username = (body?.username as string || "").trim();
+  const name = (body?.name as string || "").trim() || username;
+  const password = body?.password as string || "";
+  if (!username) return json({ error: "缺少登录账号(username)。" }, 400);
+  if (password.length < 6) return json({ error: "初始密码至少 6 位。" }, 400);
 
-  const token = randomHex(32); // 客户端 API token
+  const exists = await env.DB.prepare("SELECT id FROM api_users WHERE username = ?").bind(username).first();
+  if (exists) return json({ error: "登录账号已存在。" }, 409);
+
+  const token = randomHex(32);
+  const salt = randomHex(16);
+  const passwordHash = await pbkdf2(password, salt);
   const note = (body?.note as string || "").trim();
-  const res = await env.DB.prepare("INSERT INTO api_users (name, token, note) VALUES (?, ?, ?)")
-    .bind(name, token, note)
+  const res = await env.DB
+    .prepare("INSERT INTO api_users (username, name, token, password, salt, note) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(username, name, token, passwordHash, salt, note)
     .run();
   const id = Number(res.meta.last_row_id);
-  return json({ ok: true, id, token }, 201); // token 只在创建时显示一次
+  return json({ ok: true, id, username, name, token }, 201); // token 只在创建时显示一次
 }
 
 async function updateUser(request: Request, path: string, env: Env): Promise<Response> {
@@ -288,6 +297,13 @@ async function updateUser(request: Request, path: string, env: Env): Promise<Res
   }
   if (typeof body?.note === "string") {
     await env.DB.prepare("UPDATE api_users SET note = ? WHERE id = ?").bind(body.note.trim(), id).run();
+  }
+  if (typeof body?.newPassword === "string" && body.newPassword.length >= 6) {
+    const salt = randomHex(16);
+    const passwordHash = await pbkdf2(body.newPassword, salt);
+    await env.DB.prepare("UPDATE api_users SET salt = ?, password = ? WHERE id = ?")
+      .bind(salt, passwordHash, id)
+      .run();
   }
   return json({ ok: true }, 200);
 }
@@ -394,6 +410,7 @@ interface VersionRow {
 
 interface UserRow {
   id: number;
+  username: string;
   name: string;
   enabled: number;
   note: string;

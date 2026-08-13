@@ -1,0 +1,161 @@
+<Window x:Class="VivoKsu.App.LoginWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="登录 VivoKsu" Width="400" Height="520"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
+        FontFamily="Microsoft YaHei UI" TextOptions.TextFormattingMode="Display"
+        ShowInTaskbar="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Ink" Color="#0A2E2B"/>
+    <SolidColorBrush x:Key="Teal" Color="#0B6E68"/>
+    <SolidColorBrush x:Key="TealDark" Color="#085B56"/>
+    <SolidColorBrush x:Key="TealSoft" Color="#E3F0EE"/>
+    <SolidColorBrush x:Key="Canvas" Color="#F4F7F6"/>
+    <SolidColorBrush x:Key="Muted" Color="#5C6E69"/>
+    <SolidColorBrush x:Key="Danger" Color="#C23B30"/>
+    <SolidColorBrush x:Key="Line" Color="#E3E9E7"/>
+    <Style x:Key="Field" TargetType="TextBox">
+      <Setter Property="Height" Value="42"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Padding" Value="12,0"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="9">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Teal}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="FieldPw" TargetType="PasswordBox">
+      <Setter Property="Height" Value="42"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Padding" Value="12,0"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="PasswordBox">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="9">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Teal}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Border Background="Transparent" Padding="20">
+    <Border Background="{StaticResource Canvas}" CornerRadius="18" BorderBrush="#D8E4E1" BorderThickness="1">
+      <Grid Margin="30,26,30,26">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 品牌 -->
+        <Grid>
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <Border Width="40" Height="40" CornerRadius="11" Background="{StaticResource Teal}">
+              <TextBlock Text="VK" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+              <TextBlock Text="VivoKsu" Foreground="{StaticResource Ink}" FontSize="17" FontWeight="SemiBold"/>
+              <TextBlock Text="rom control · api.nwflash.cc.cd" Foreground="{StaticResource Muted}" FontFamily="Cascadia Mono" FontSize="9.5" Margin="0,2,0,0"/>
+            </StackPanel>
+          </StackPanel>
+          <Button x:Name="CloseButton" Content="✕" Width="28" Height="28" HorizontalAlignment="Right" FontSize="12" Foreground="{StaticResource Muted}" Background="Transparent" BorderThickness="0" Cursor="Hand"/>
+        </Grid>
+
+        <!-- 标题 -->
+        <StackPanel Grid.Row="1" Margin="0,26,0,0">
+          <TextBlock Text="登录 VivoKsu" Foreground="{StaticResource Ink}" FontSize="23" FontWeight="Bold"/>
+          <TextBlock Text="商业工具授权。使用后台分配的账号登录后进入主界面。" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" LineHeight="20" Margin="0,7,0,0"/>
+        </StackPanel>
+
+        <!-- 账号 -->
+        <StackPanel Grid.Row="2" Margin="0,22,0,0">
+          <TextBlock Text="账号" Foreground="{StaticResource Ink}" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,6"/>
+          <TextBox x:Name="UsernameBox" Style="{StaticResource Field}" FontFamily="Cascadia Mono" FontSize="13"/>
+        </StackPanel>
+
+        <!-- 密码 -->
+        <StackPanel Grid.Row="3" Margin="0,16,0,0">
+          <TextBlock Text="密码" Foreground="{StaticResource Ink}" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,6"/>
+          <PasswordBox x:Name="PasswordBox" Style="{StaticResource FieldPw}" FontFamily="Cascadia Mono" FontSize="13"/>
+        </StackPanel>
+
+        <!-- 记住登录 -->
+        <CheckBox Grid.Row="4" x:Name="RememberBox" Content="记住登录" IsChecked="True" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,14,0,0" VerticalAlignment="Center">
+          <CheckBox.Style>
+            <Style TargetType="CheckBox">
+              <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+              <Setter Property="FontSize" Value="12"/>
+              <Style.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                  <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+                </Trigger>
+              </Style.Triggers>
+            </Style>
+          </CheckBox.Style>
+        </CheckBox>
+
+        <!-- 错误 -->
+        <TextBlock Grid.Row="5" x:Name="ErrorText" Foreground="{StaticResource Danger}" FontSize="12" Margin="0,12,0,0" TextWrapping="Wrap" MinHeight="18"/>
+
+        <!-- 登录按钮 -->
+        <Grid Grid.Row="6" Margin="0,12,0,0">
+          <Button x:Name="LoginButton" Content="登 录" Height="44" FontSize="14" FontWeight="SemiBold" Foreground="White" Background="{StaticResource Teal}" BorderThickness="0" Cursor="Hand">
+            <Button.Style>
+              <Style TargetType="Button">
+                <Setter Property="Foreground" Value="White"/>
+                <Setter Property="Background" Value="{StaticResource Teal}"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="Template">
+                  <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                      <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="9">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      </Border>
+                      <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="{StaticResource TealDark}"/></Trigger>
+                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.85"/></Trigger>
+                        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.5"/></Trigger>
+                      </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                  </Setter.Value>
+                </Setter>
+              </Style>
+            </Button.Style>
+          </Button>
+        </Grid>
+      </Grid>
+    </Border>
+  </Border>
+</Window>

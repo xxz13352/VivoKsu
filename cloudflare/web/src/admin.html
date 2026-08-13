@@ -3,173 +3,255 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nwflash.cc.cd · 后台管理</title>
+<title>nwflash · 控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{
-    --teal:#0a8c86; --teal-d:#08766e; --teal-l:#eaf7f5;
-    --ink:#22313a; --muted:#6b7a83; --line:#e3ecea;
-    --bg:#f4f8f7; --card:#ffffff; --danger:#c63b33; --ok:#0a8c86;
-    --mono:"Cascadia Mono",Consolas,monospace;
+    --canvas:#F4F7F6; --surface:#FFFFFF;
+    --ink:#0A2E2B; --ink-2:#1C3A36;
+    --teal:#0B6E68; --teal-d:#085B56; --teal-soft:#E3F0EE; --teal-line:#C4DEDA;
+    --muted:#5C6E69; --faint:#93A39E;
+    --danger:#C23B30; --danger-soft:#FBE9E7;
+    --line:#E3E9E7;
+    --rail:#0B2E2B; --rail-text:#B8CCC8; --rail-active:#0B6E68;
+    --term:#0A1F1D; --term-ok:#4FD1A8; --term-fail:#FF7A6E; --term-dim:#7C938E;
+    --display:"Space Grotesk","PingFang SC","Microsoft YaHei",sans-serif;
+    --body:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    --mono:"JetBrains Mono",Consolas,monospace;
+    --r-lg:14px; --r-md:9px; --r-sm:6px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);min-height:100vh}
-  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px}
-  h1{font-size:20px;font-weight:700;letter-spacing:.3px}
-  h1 .sub{color:var(--muted);font-weight:400;font-size:13px;margin-left:10px;font-family:var(--mono)}
-  /* 登录 */
-  .login-card{max-width:380px;margin:12vh auto;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:34px 30px;box-shadow:0 10px 30px rgba(10,140,134,.08)}
-  .login-card .logo{width:46px;height:46px;border-radius:12px;background:var(--teal);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;margin-bottom:18px}
-  .login-card h2{font-size:17px;margin-bottom:4px}
-  .login-card p{color:var(--muted);font-size:12px;margin-bottom:20px}
-  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 5px}
-  input,select{width:100%;height:36px;border:1px solid var(--line);border-radius:8px;padding:0 11px;font-size:13px;outline:none;background:#fff;color:var(--ink)}
-  input:focus,select:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(10,140,134,.12)}
-  button{height:36px;border:none;border-radius:8px;background:var(--teal);color:#fff;font-size:13px;font-weight:600;cursor:pointer;padding:0 16px}
-  button:hover{background:var(--teal-d)}
-  button.ghost{background:#fff;color:var(--teal);border:1px solid var(--teal)}
-  button.ghost:hover{background:var(--teal-l)}
-  button.danger{background:var(--danger)}
-  button.small{height:28px;padding:0 10px;font-size:12px}
-  button:disabled{opacity:.5;cursor:not-allowed}
-  .err{color:var(--danger);font-size:12px;min-height:16px;margin-top:10px}
-  /* 顶部栏 */
-  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px;flex-wrap:wrap;gap:10px}
-  .topbar .right{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}
-  /* tabs */
-  .tabs{display:flex;gap:4px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:4px;margin-bottom:18px;width:fit-content}
-  .tab{padding:8px 18px;border-radius:8px;font-size:13px;color:var(--muted);cursor:pointer;font-weight:600}
-  .tab.active{background:var(--teal);color:#fff}
-  .panel{display:none}
-  .panel.active{display:block}
-  /* 卡片 */
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
-  .card h3{font-size:14px;margin-bottom:14px;font-weight:700}
-  .form-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
-  .form-row .field{flex:1;min-width:150px}
-  .form-row .field input{height:34px}
-  /* 表格 */
+  html,body{height:100%}
+  body{font-family:var(--body);background:var(--canvas);color:var(--ink);-webkit-font-smoothing:antialiased}
+  button{font-family:inherit}
+  input,select{font-family:inherit}
+
+  /* ---------- 登录 ---------- */
+  .login{min-height:100vh;display:grid;place-items:center;padding:24px}
+  .login-card{width:100%;max-width:400px}
+  .login-brand{display:flex;align-items:center;gap:13px;margin-bottom:34px}
+  .login-mark{width:40px;height:40px;border-radius:11px;background:var(--teal);display:grid;place-items:center;color:#fff;font-family:var(--display);font-weight:700;font-size:17px;letter-spacing:.5px}
+  .login-brand .word{font-family:var(--display);font-weight:600;font-size:17px;letter-spacing:.4px}
+  .login-brand .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--teal);margin-left:7px;box-shadow:0 0 0 4px rgba(11,110,104,.15)}
+  .login-title{font-family:var(--display);font-size:27px;font-weight:700;letter-spacing:.2px;margin-bottom:8px}
+  .login-sub{color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:30px}
+  .login-sub code{font-family:var(--mono);color:var(--teal-d);background:var(--teal-soft);padding:1px 7px;border-radius:5px;font-size:12px}
+  .field{margin-bottom:18px}
+  .field label{display:block;font-size:12.5px;font-weight:600;color:var(--ink-2);margin-bottom:7px}
+  .field input{width:100%;height:42px;border:1px solid var(--line);border-radius:var(--r-md);padding:0 14px;font-size:14px;outline:none;background:var(--surface);color:var(--ink);transition:border-color .15s,box-shadow .15s}
+  .field input:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(11,110,104,.12)}
+  .btn{height:42px;border:none;border-radius:var(--r-md);padding:0 18px;font-size:13.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:background .15s,transform .05s}
+  .btn:active{transform:scale(.97)}
+  .btn-primary{background:var(--teal);color:#fff;width:100%}
+  .btn-primary:hover{background:var(--teal-d)}
+  .btn-ghost{background:transparent;color:var(--teal);border:1px solid var(--teal-line)}
+  .btn-ghost:hover{background:var(--teal-soft)}
+  .btn-danger{background:transparent;color:var(--danger);border:1px solid #EFC9C4}
+  .btn-danger:hover{background:var(--danger-soft)}
+  .btn-xs{height:28px;padding:0 11px;font-size:12px;border-radius:7px}
+  .err{color:var(--danger);font-size:12.5px;min-height:18px;margin-top:4px}
+
+  /* ---------- 应用外壳 ---------- */
+  .shell{display:grid;grid-template-columns:216px 1fr;min-height:100vh}
+  .rail{background:var(--rail);display:flex;flex-direction:column;padding:22px 14px 18px}
+  .rail-brand{display:flex;align-items:center;gap:11px;padding:2px 10px 22px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:16px}
+  .rail-mark{width:32px;height:32px;border-radius:9px;background:var(--teal);display:grid;place-items:center;color:#fff;font-family:var(--display);font-weight:700;font-size:14px}
+  .rail-brand .t{font-family:var(--display);color:#fff;font-weight:600;font-size:14.5px;letter-spacing:.4px}
+  .rail-brand .s{font-size:10.5px;color:var(--rail-text);font-family:var(--mono)}
+  .nav{display:flex;flex-direction:column;gap:2px}
+  .nav-item{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:var(--r-md);color:var(--rail-text);font-size:13.5px;font-weight:500;cursor:pointer;transition:background .12s,color .12s;border:none;background:transparent;text-align:left}
+  .nav-item:hover{background:rgba(255,255,255,.06);color:#fff}
+  .nav-item.active{background:var(--teal);color:#fff}
+  .nav-item .ic{width:18px;height:18px;display:grid;place-items:center;opacity:.85}
+  .rail-foot{margin-top:auto;padding:14px 10px 0;border-top:1px solid rgba(255,255,255,.08)}
+  .rail-user{display:flex;align-items:center;gap:10px;color:var(--rail-text);font-size:13px}
+  .rail-user .av{width:28px;height:28px;border-radius:50%;background:var(--teal-d);display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700}
+  .rail-user .out{margin-left:auto;background:none;border:none;color:var(--rail-text);cursor:pointer;font-size:12px;padding:4px 8px;border-radius:6px}
+  .rail-user .out:hover{background:rgba(255,255,255,.1);color:#fff}
+
+  .main{padding:34px 38px 48px;min-width:0}
+  .page-head{margin-bottom:26px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:2px;color:var(--teal);font-weight:600;margin-bottom:9px;display:flex;align-items:center;gap:9px}
+  .eyebrow::before{content:"";width:22px;height:1.5px;background:var(--teal)}
+  .page-title{font-family:var(--display);font-size:24px;font-weight:700;letter-spacing:.2px;margin-bottom:6px}
+  .page-desc{color:var(--muted);font-size:13.5px}
+
+  /* ---------- 组件 ---------- */
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:22px;margin-bottom:18px}
+  .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .card-title{font-family:var(--display);font-size:14.5px;font-weight:600}
+  .card-title .hint{color:var(--faint);font-size:12px;font-weight:400;margin-left:9px}
+  .form-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+  .form-row .field{flex:1;min-width:160px;margin-bottom:0}
+  .form-row .field input{height:38px}
+  .form-row .field label{margin-bottom:6px}
+
+  .tbl-wrap{overflow-x:auto}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:left;color:var(--muted);font-weight:600;font-size:12px;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
-  td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
-  tr:hover td{background:#fafdfc}
-  .mono{font-family:var(--mono);font-size:12px}
-  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
-  .pill.on{background:var(--teal-l);color:var(--teal-d)}
-  .pill.off{background:#fdeceb;color:var(--danger)}
-  .muted{color:var(--muted);font-size:12px}
-  .url-cell{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11px}
-  .token-banner{margin-top:10px;padding:10px 12px;border:1px dashed var(--teal);border-radius:8px;background:var(--teal-l);font-family:var(--mono);font-size:12px;color:var(--teal-d);word-break:break-all;display:none}
-  .pager{display:flex;gap:8px;align-items:center;margin-top:12px}
-  .empty{color:var(--muted);font-size:13px;padding:24px;text-align:center}
-  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#22313a;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none}
-  .toast.show{opacity:1}
-  code{background:var(--teal-l);color:var(--teal-d);padding:1px 6px;border-radius:5px;font-family:var(--mono);font-size:12px}
+  th{text-align:left;color:var(--faint);font-weight:600;font-size:11.5px;letter-spacing:.4px;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap;text-transform:uppercase}
+  td{padding:12px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr{transition:background .1s}
+  tbody tr:hover{background:#FAFCFB}
+  .mono{font-family:var(--mono);font-size:12.5px}
+  .strong{font-weight:600}
+  .cell-title{font-weight:600}
+  .cell-sub{display:block;color:var(--faint);font-size:11.5px;font-family:var(--mono);margin-top:2px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:600}
+  .pill.on{background:var(--teal-soft);color:var(--teal-d)}
+  .pill.off{background:var(--danger-soft);color:var(--danger)}
+  .pill.on::before,.pill.off::before{content:"";width:6px;height:6px;border-radius:50%}
+  .pill.on::before{background:var(--teal)}
+  .pill.off::before{background:var(--danger)}
+  .ops{display:flex;gap:7px;flex-wrap:wrap}
+  .url-cell{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .empty{color:var(--faint);font-size:13px;text-align:center;padding:34px 10px}
+  .empty .big{font-size:22px;display:block;margin-bottom:8px}
+  .pager{display:flex;gap:10px;align-items:center;margin-top:16px}
+  .token-banner{margin-top:14px;padding:13px 15px;border:1px dashed var(--teal-line);border-radius:var(--r-md);background:var(--teal-soft);font-family:var(--mono);font-size:12.5px;color:var(--teal-d);word-break:break-all;display:none;line-height:1.7}
+  .token-banner .lbl{font-family:var(--body);font-size:11px;letter-spacing:1px;color:var(--teal);font-weight:600;display:block;margin-bottom:4px}
+
+  /* ---------- 日志终端(签名) ---------- */
+  .terminal{background:var(--term);border-radius:var(--r-lg);padding:6px 0;font-family:var(--mono);font-size:12.5px;line-height:1.85;overflow:hidden}
+  .term-head{display:flex;align-items:center;gap:8px;padding:12px 18px;border-bottom:1px solid rgba(255,255,255,.08);color:var(--term-dim);font-size:11.5px;letter-spacing:.6px}
+  .term-head .dots{display:flex;gap:6px;margin-right:6px}
+  .term-head .dots span{width:10px;height:10px;border-radius:50%}
+  .term-head .dots span:nth-child(1){background:#E45D52}
+  .term-head .dots span:nth-child(2){background:#E0A23A}
+  .term-head .dots span:nth-child(3){background:#57B88C}
+  .term-head .title{margin-right:auto}
+  .term-head .live{color:var(--term-ok);font-size:10.5px;letter-spacing:1.5px}
+  .term-head .live::before{content:"●";margin-right:6px;animation:blink 1.6s infinite}
+  @keyframes blink{50%{opacity:.25}}
+  .term-body{max-height:430px;overflow-y:auto;padding:10px 0}
+  .term-line{display:flex;gap:12px;padding:2px 18px;white-space:nowrap}
+  .term-line .t{color:var(--term-dim);flex-shrink:0}
+  .term-line .u{color:#C7DBD6;flex-shrink:0}
+  .term-line .msg{color:#DDEBE7;overflow:hidden;text-overflow:ellipsis}
+  .term-line.ok .msg{color:var(--term-ok)}
+  .term-line.fail .msg{color:var(--term-fail)}
+  .term-empty{padding:30px;text-align:center;color:var(--term-dim);font-size:12px}
+
+  /* ---------- toast / 焦点 / 响应式 ---------- */
+  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(10px);background:var(--ink);color:#fff;padding:11px 22px;border-radius:9px;font-size:13px;opacity:0;transition:opacity .22s,transform .22s;pointer-events:none;box-shadow:0 8px 24px rgba(10,46,43,.18)}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,.nav-item:focus-visible,.tab:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+  @media (max-width:860px){ .shell{grid-template-columns:1fr} .rail{flex-direction:row;align-items:center;padding:12px 16px} .rail-brand{border:none;padding:0;margin:0} .nav{flex-direction:row;margin-left:14px;flex-wrap:wrap} .rail-foot{display:none} .main{padding:22px 18px 40px} }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <!-- 登录 -->
-  <div id="loginView" class="login-card">
-    <div class="logo">NW</div>
-    <h2>nwflash 后台管理</h2>
-    <p>api.nwflash.cc.cd · ROM 服务控制台</p>
-    <label>管理员账号</label>
-    <input id="loginUser" autocomplete="username" placeholder="admin">
-    <label>密码</label>
-    <input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••">
+
+<!-- 登录 -->
+<div id="loginView" class="login">
+  <div class="login-card">
+    <div class="login-brand"><div class="login-mark">NW</div><div class="word">nwflash <span class="dot"></span></div></div>
+    <h1 class="login-title">服务控制台</h1>
+    <p class="login-sub">管理 <code>api.nwflash.cc.cd</code> 的版本、用户与访问日志。<br>请输入管理员凭据。</p>
+    <div class="field"><label>管理员账号</label><input id="loginUser" autocomplete="username" placeholder="admin"></div>
+    <div class="field"><label>密码</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
     <div class="err" id="loginErr"></div>
-    <button id="loginBtn" style="width:100%;margin-top:16px">登 录</button>
-  </div>
-
-  <!-- 后台 -->
-  <div id="appView" style="display:none">
-    <div class="topbar">
-      <h1>nwflash.cc.cd <span class="sub">ROM 服务后台</span></h1>
-      <div class="right">
-        <span id="meLabel"></span>
-        <button class="ghost small" id="logoutBtn">退出</button>
-      </div>
-    </div>
-
-    <div class="tabs">
-      <div class="tab active" data-tab="versions">版本号控制</div>
-      <div class="tab" data-tab="users">用户管理</div>
-      <div class="tab" data-tab="logs">用户日志</div>
-      <div class="tab" data-tab="account">账号</div>
-    </div>
-
-    <!-- 版本号控制 -->
-    <div class="panel active" id="tab-versions">
-      <div class="card">
-        <h3>添加允许的版本</h3>
-        <div class="form-row">
-          <div class="field"><label>PD</label><input id="vPd" placeholder="PD2417"></div>
-          <div class="field" style="flex:2"><label>版本号</label><input id="vVer" placeholder="16.2.12.0.W10.V000L1"></div>
-          <button id="vAdd">添加</button>
-        </div>
-      </div>
-      <div class="card">
-        <h3>版本列表 <span class="muted">(API 只允许解析此处启用版本的 OTA 链接)</span></h3>
-        <table><thead><tr><th>PD</th><th>版本</th><th>状态</th><th>添加时间</th><th style="width:140px">操作</th></tr></thead>
-        <tbody id="versionBody"></tbody></table>
-        <div class="empty" id="versionEmpty" style="display:none">暂无版本记录</div>
-      </div>
-    </div>
-
-    <!-- 用户管理 -->
-    <div class="panel" id="tab-users">
-      <div class="card">
-        <h3>添加 API 用户</h3>
-        <div class="form-row">
-          <div class="field"><label>名称</label><input id="uName" placeholder="桌面端-张三"></div>
-          <div class="field" style="flex:2"><label>备注</label><input id="uNote" placeholder="可选"></div>
-          <button id="uAdd">创建用户</button>
-        </div>
-        <div class="token-banner" id="uTokenBanner"></div>
-      </div>
-      <div class="card">
-        <h3>用户列表</h3>
-        <table><thead><tr><th>ID</th><th>名称</th><th>状态</th><th>备注</th><th>创建</th><th style="width:230px">操作</th></tr></thead>
-        <tbody id="userBody"></tbody></table>
-        <div class="empty" id="userEmpty" style="display:none">暂无用户</div>
-      </div>
-    </div>
-
-    <!-- 日志 -->
-    <div class="panel" id="tab-logs">
-      <div class="card">
-        <div class="form-row">
-          <div class="field"><label>按用户过滤</label><select id="logUser"><option value="">全部用户</option></select></div>
-          <div class="field"><label>按 PD 过滤</label><input id="logPd" placeholder="PD2417"></div>
-          <button id="logRefresh">刷新</button>
-        </div>
-      </div>
-      <div class="card">
-        <h3>访问日志 <span class="muted">(每次 API 查询)</span></h3>
-        <table><thead><tr><th>时间</th><th>用户</th><th>PD</th><th>版本</th><th>状态</th><th>OTA 链接</th></tr></thead>
-        <tbody id="logBody"></tbody></table>
-        <div class="empty" id="logEmpty" style="display:none">暂无日志</div>
-        <div class="pager">
-          <button class="ghost small" id="logPrev">上一页</button>
-          <span class="muted" id="logInfo"></span>
-          <button class="ghost small" id="logNext">下一页</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 账号 -->
-    <div class="panel" id="tab-account">
-      <div class="card">
-        <h3>修改密码</h3>
-        <div class="form-row">
-          <div class="field"><label>新密码(至少 8 位)</label><input id="pwNew" type="password"></div>
-          <button id="pwSave">保存</button>
-        </div>
-        <div class="err" id="pwErr"></div>
-      </div>
-    </div>
+    <button id="loginBtn" class="btn btn-primary" style="margin-top:14px">登录</button>
   </div>
 </div>
+
+<!-- 应用 -->
+<div id="appView" class="shell" style="display:none">
+  <aside class="rail">
+    <div class="rail-brand"><div class="rail-mark">NW</div><div><div class="t">nwflash</div><div class="s">rom control</div></div></div>
+    <nav class="nav">
+      <button class="nav-item" data-tab="versions"><span class="ic">◆</span>版本号控制</button>
+      <button class="nav-item" data-tab="users"><span class="ic">◈</span>用户管理</button>
+      <button class="nav-item" data-tab="logs"><span class="ic">▤</span>访问日志</button>
+      <button class="nav-item" data-tab="account"><span class="ic">◍</span>账号</button>
+    </nav>
+    <div class="rail-foot">
+      <div class="rail-user"><div class="av" id="meAv">A</div><span id="meLabel"></span><button class="out" id="logoutBtn">退出</button></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- 版本号控制 -->
+    <section class="page" id="sec-versions">
+      <div class="page-head"><div class="eyebrow">VERSION CONTROL</div><h2 class="page-title">版本号控制</h2><p class="page-desc">只有此处启用的 PD + 版本,<span class="mono">api.nwflash.cc.cd</span> 才会返回 OTA 链接。</p></div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">添加允许的版本</span></div>
+        <div class="form-row">
+          <div class="field"><label>PD 码</label><input id="vPd" placeholder="PD2417"></div>
+          <div class="field" style="flex:2"><label>版本号</label><input id="vVer" placeholder="16.2.12.0.W10.V000L1"></div>
+          <button id="vAdd" class="btn btn-primary" style="height:38px">添加</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">版本列表</span></div>
+        <div class="tbl-wrap">
+          <table><thead><tr><th>PD</th><th>版本</th><th>状态</th><th>添加时间</th><th style="width:160px">操作</th></tr></thead>
+          <tbody id="versionBody"></tbody></table>
+        </div>
+        <div class="empty" id="versionEmpty" style="display:none"><span class="big">◇</span>还没有版本。先在左侧添加一个 PD + 版本。</div>
+      </div>
+    </section>
+
+    <!-- 用户管理 -->
+    <section class="page" id="sec-users" style="display:none">
+      <div class="page-head"><div class="eyebrow">USERS</div><h2 class="page-title">用户管理</h2><p class="page-desc">API 用户持有 token,桌面端凭 token 调用接口并按用户记录日志。</p></div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">创建 API 用户</span></div>
+        <div class="form-row">
+          <div class="field"><label>登录账号</label><input id="uUser" placeholder="zhangsan"></div>
+          <div class="field"><label>显示名称</label><input id="uName" placeholder="张三"></div>
+          <div class="field"><label>初始密码 ≥6 位</label><input id="uPass" type="password" placeholder="••••••"></div>
+          <div class="field" style="flex:.6"><label>备注</label><input id="uNote" placeholder="可选"></div>
+          <button id="uAdd" class="btn btn-primary" style="height:38px">创建用户</button>
+        </div>
+        <div class="token-banner" id="uTokenBanner"><span class="lbl">API TOKEN · 仅显示一次</span></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">用户列表</span></div>
+        <div class="tbl-wrap">
+          <table><thead><tr><th>登录账号</th><th>名称</th><th>状态</th><th>备注</th><th>创建</th><th style="width:290px">操作</th></tr></thead>
+          <tbody id="userBody"></tbody></table>
+        </div>
+        <div class="empty" id="userEmpty" style="display:none"><span class="big">◇</span>还没有用户。创建第一个 API 用户以接入桌面端。</div>
+      </div>
+    </section>
+
+    <!-- 访问日志(签名:终端) -->
+    <section class="page" id="sec-logs" style="display:none">
+      <div class="page-head"><div class="eyebrow">ACCESS LOG</div><h2 class="page-title">访问日志</h2><p class="page-desc">每次 <span class="mono">api.nwflash.cc.cd/api/rom</span> 查询的实时流水。</p></div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="terminal">
+          <div class="term-head"><div class="dots"><span></span><span></span><span></span></div><span class="title">api.nwflash.cc.cd · query tail</span><span class="live">LIVE</span></div>
+          <div class="term-body" id="termBody"><div class="term-empty">等待日志…</div></div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:14px 20px;border-top:1px solid var(--line)">
+          <select id="logUser" class="mono" style="height:34px;width:auto;min-width:150px;border:1px solid var(--line);border-radius:7px;padding:0 10px"></select>
+          <input id="logPd" placeholder="按 PD 过滤" style="height:34px;width:150px;border:1px solid var(--line);border-radius:7px;padding:0 10px;font-family:var(--mono);font-size:12px">
+          <button id="logRefresh" class="btn btn-ghost" style="height:34px">刷新</button>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <button id="logPrev" class="btn btn-ghost btn-xs">‹ 上一页</button>
+            <span id="logInfo" class="mono" style="font-size:12px;color:var(--faint)"></span>
+            <button id="logNext" class="btn btn-ghost btn-xs">下一页 ›</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 账号 -->
+    <section class="page" id="sec-account" style="display:none">
+      <div class="page-head"><div class="eyebrow">ACCOUNT</div><h2 class="page-title">账号</h2><p class="page-desc">修改管理员密码。改密后所有会话将退出,需重新登录。</p></div>
+      <div class="card" style="max-width:460px">
+        <div class="card-head"><span class="card-title">修改密码</span></div>
+        <div class="field"><label>新密码(至少 8 位)</label><input id="pwNew" type="password" placeholder="••••••••"></div>
+        <div class="err" id="pwErr"></div>
+        <button id="pwSave" class="btn btn-primary" style="margin-top:6px">保存密码</button>
+      </div>
+    </section>
+  </main>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -184,27 +266,21 @@ async function api(path, method = "GET", body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
-  if (r.status === 401 && !path.includes("/login")) {
-    showLogin();
-    throw new Error(data.error || "未登录");
-  }
+  if (r.status === 401 && !path.includes("/login")) { showLogin(); throw new Error(data.error || "未登录"); }
   if (!r.ok) throw new Error(data.error || "请求失败");
   return data;
 }
 let toastTimer;
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 2200); }
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+function time(s) { const d = new Date((s||"").replace(" ","T")+"Z"); if (isNaN(d)) return s; return d.toLocaleString("zh-CN", {hour12:false}); }
 
-/* ---- 视图切换 ---- */
-function showLogin() {
-  admin = null;
-  $("loginView").style.display = "block";
-  $("appView").style.display = "none";
-}
+/* ---- 视图 ---- */
+function showLogin() { admin = null; $("loginView").style.display = "grid"; $("appView").style.display = "none"; }
 function showApp() {
-  $("loginView").style.display = "none";
-  $("appView").style.display = "block";
-  $("meLabel").textContent = admin ? "管理员 · " + admin : "";
+  $("loginView").style.display = "none"; $("appView").style.display = "grid";
+  $("meLabel").textContent = admin || "admin";
+  $("meAv").textContent = (admin || "A").charAt(0).toUpperCase();
   loadVersions(); loadUsers(); loadLogs();
 }
 
@@ -213,9 +289,7 @@ async function doLogin() {
   const err = $("loginErr"); err.textContent = "";
   try {
     const data = await api("/api/login", "POST", { username: $("loginUser").value, password: $("loginPass").value });
-    admin = data.username;
-    showApp();
-    toast("登录成功");
+    admin = data.username; showApp(); toast("欢迎回来," + admin);
   } catch (e) { err.textContent = e.message; }
 }
 $("loginBtn").onclick = doLogin;
@@ -223,20 +297,20 @@ $("loginPass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin
 $("logoutBtn").onclick = async () => { await api("/api/logout", "POST"); showLogin(); };
 $("pwSave").onclick = async () => {
   $("pwErr").textContent = "";
-  try { await api("/api/change-password", "POST", { newPassword: $("pwNew").value }); $("pwNew").value = ""; toast("密码已修改,请重新登录"); setTimeout(() => { showLogin(); }, 600); }
+  try { await api("/api/change-password", "POST", { newPassword: $("pwNew").value }); $("pwNew").value = ""; toast("密码已修改"); setTimeout(showLogin, 700); }
   catch (e) { $("pwErr").textContent = e.message; }
 };
 
-/* ---- tabs ---- */
-document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
-  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));
-  document.querySelectorAll(".panel").forEach(p => p.classList.toggle("active", p.id === "tab-" + t.dataset.tab));
-  if (t.dataset.tab === "logs") loadLogs();
-  if (t.dataset.tab === "users") loadUsers();
-  if (t.dataset.tab === "versions") loadVersions();
+/* ---- 导航 ---- */
+document.querySelectorAll(".nav-item").forEach(n => n.onclick = () => {
+  document.querySelectorAll(".nav-item").forEach(x => x.classList.toggle("active", x === n));
+  document.querySelectorAll(".page").forEach(p => p.style.display = p.id === "sec-" + n.dataset.tab ? "block" : "none");
+  if (n.dataset.tab === "logs") loadLogs();
+  if (n.dataset.tab === "users") loadUsers();
+  if (n.dataset.tab === "versions") loadVersions();
 });
 
-/* ---- 版本号控制 ---- */
+/* ---- 版本 ---- */
 async function loadVersions() {
   try {
     const data = await api("/api/versions");
@@ -244,14 +318,14 @@ async function loadVersions() {
     $("versionEmpty").style.display = rows.length ? "none" : "block";
     $("versionBody").innerHTML = rows.map(v => `
       <tr>
-        <td><b>${esc(v.pd)}</b></td>
+        <td><span class="cell-title">${esc(v.pd)}</span></td>
         <td class="mono">${esc(v.version)}</td>
         <td><span class="pill ${v.enabled ? "on" : "off"}">${v.enabled ? "启用" : "停用"}</span></td>
-        <td class="muted">${esc(v.created_at)}</td>
-        <td>
-          <button class="ghost small" onclick="toggleVersion(${v.id}, ${!v.enabled})">${v.enabled ? "停用" : "启用"}</button>
-          <button class="danger small" onclick="delVersion(${v.id})">删除</button>
-        </td>
+        <td class="mono" style="color:var(--faint)">${esc(time(v.created_at))}</td>
+        <td><div class="ops">
+          <button class="btn btn-ghost btn-xs" onclick="toggleVersion(${v.id}, ${!v.enabled})">${v.enabled ? "停用" : "启用"}</button>
+          <button class="btn btn-danger btn-xs" onclick="delVersion(${v.id})">删除</button>
+        </div></td>
       </tr>`).join("");
   } catch (e) { toast(e.message); }
 }
@@ -262,9 +336,9 @@ $("vAdd").onclick = async () => {
   } catch (e) { toast(e.message); }
 };
 async function toggleVersion(id, enabled) { try { await api("/api/versions/" + id, "PUT", { enabled }); loadVersions(); } catch (e) { toast(e.message); } }
-async function delVersion(id) { if (!confirm("确认删除该版本?")) return; try { await api("/api/versions/" + id, "DELETE"); loadVersions(); } catch (e) { toast(e.message); } }
+async function delVersion(id) { if (!confirm("删除该版本后,此 PD+版本将不再返回 OTA 链接。确认?")) return; try { await api("/api/versions/" + id, "DELETE"); loadVersions(); } catch (e) { toast(e.message); } }
 
-/* ---- 用户管理 ---- */
+/* ---- 用户 ---- */
 async function loadUsers() {
   try {
     const data = await api("/api/users");
@@ -272,62 +346,77 @@ async function loadUsers() {
     $("userEmpty").style.display = rows.length ? "none" : "block";
     $("userBody").innerHTML = rows.map(u => `
       <tr>
-        <td class="mono">${u.id}</td>
-        <td><b>${esc(u.name)}</b></td>
+        <td class="mono">${esc(u.username)}</td>
+        <td><span class="cell-title">${esc(u.name)}</span></td>
         <td><span class="pill ${u.enabled ? "on" : "off"}">${u.enabled ? "启用" : "停用"}</span></td>
-        <td class="muted">${esc(u.note)}</td>
-        <td class="muted">${esc(u.created_at)}</td>
-        <td>
-          <button class="ghost small" onclick="rotateToken(${u.id})">换 token</button>
-          <button class="ghost small" onclick="toggleUser(${u.id}, ${!u.enabled})">${u.enabled ? "停用" : "启用"}</button>
-          <button class="danger small" onclick="delUser(${u.id})">删除</button>
-        </td>
+        <td class="muted" style="color:var(--muted)">${esc(u.note)}</td>
+        <td class="mono" style="color:var(--faint)">${esc(time(u.created_at))}</td>
+        <td><div class="ops">
+          <button class="btn btn-ghost btn-xs" onclick="resetPw(${u.id})">重置密码</button>
+          <button class="btn btn-ghost btn-xs" onclick="rotateToken(${u.id})">换 token</button>
+          <button class="btn btn-ghost btn-xs" onclick="toggleUser(${u.id}, ${!u.enabled})">${u.enabled ? "停用" : "启用"}</button>
+          <button class="btn btn-danger btn-xs" onclick="delUser(${u.id})">删除</button>
+        </div></td>
       </tr>`).join("");
   } catch (e) { toast(e.message); }
 }
 $("uAdd").onclick = async () => {
   try {
-    const data = await api("/api/users", "POST", { name: $("uName").value, note: $("uNote").value });
-    const b = $("uTokenBanner");
-    b.style.display = "block";
-    b.innerHTML = `用户已创建,API token(仅显示一次,请复制保存):<br><b>${data.token}</b>`;
-    $("uName").value = ""; $("uNote").value = ""; loadUsers();
+    const data = await api("/api/users", "POST", { username: $("uUser").value, name: $("uName").value, password: $("uPass").value, note: $("uNote").value });
+    const b = $("uTokenBanner"); b.style.display = "block";
+    b.innerHTML = `<span class="lbl">创建成功 · 登录账号 ${esc(data.username)} · API TOKEN 仅显示一次</span>${data.token}`;
+    $("uUser").value = ""; $("uName").value = ""; $("uPass").value = ""; $("uNote").value = ""; loadUsers();
   } catch (e) { toast(e.message); }
 };
+async function resetPw(id) {
+  const np = prompt("输入新的登录密码(至少 6 位):");
+  if (!np) return;
+  try { await api("/api/users/" + id, "PUT", { newPassword: np }); toast("密码已重置"); } catch (e) { toast(e.message); }
+}
 async function rotateToken(id) {
   try {
     const data = await api("/api/users/" + id + "/rotate-token", "POST");
-    const b = $("uTokenBanner");
-    b.style.display = "block";
-    b.innerHTML = `新 token(仅显示一次):<br><b>${data.token}</b>`;
+    const b = $("uTokenBanner"); b.style.display = "block"; b.innerHTML = `<span class="lbl">新 API TOKEN · 仅显示一次</span>${data.token}`;
   } catch (e) { toast(e.message); }
 }
 async function toggleUser(id, enabled) { try { await api("/api/users/" + id, "PUT", { enabled }); loadUsers(); } catch (e) { toast(e.message); } }
-async function delUser(id) { if (!confirm("确认删除该用户?")) return; try { await api("/api/users/" + id, "DELETE"); loadUsers(); } catch (e) { toast(e.message); } }
+async function delUser(id) { if (!confirm("删除该用户后,其 token 立即失效。确认?")) return; try { await api("/api/users/" + id, "DELETE"); loadUsers(); } catch (e) { toast(e.message); } }
 
-/* ---- 日志 ---- */
+/* ---- 日志(终端) ---- */
 let logPage = 0;
-const LOG_PAGE_SIZE = 50;
+const LOG_PAGE_SIZE = 60;
+function termLine(t, u, msg, cls) {
+  const div = document.createElement("div");
+  div.className = "term-line" + (cls ? " " + cls : "");
+  div.innerHTML = `<span class="t">${t}</span><span class="u">${esc(u)}</span><span class="msg">${esc(msg)}</span>`;
+  return div;
+}
 async function loadLogs() {
   try {
     const users = await api("/api/users");
-    $("logUser").innerHTML = '<option value="">全部用户</option>' + users.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
+    const sel = $("logUser");
+    const prevVal = sel.value;
+    sel.innerHTML = '<option value="">全部用户</option>' + users.users.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
+    if (prevVal) sel.value = prevVal;
+
     const q = new URLSearchParams({ limit: String(LOG_PAGE_SIZE), offset: String(logPage * LOG_PAGE_SIZE) });
-    if ($("logUser").value) q.set("userId", $("logUser").value);
+    if (sel.value) q.set("userId", sel.value);
     if ($("logPd").value) q.set("pd", $("logPd").value);
     const data = await api("/api/logs?" + q.toString());
     const rows = data.logs || [];
-    $("logEmpty").style.display = rows.length ? "none" : "block";
-    $("logBody").innerHTML = rows.map(l => `
-      <tr>
-        <td class="mono muted">${esc(l.created_at)}</td>
-        <td>${esc(l.api_user_name || "匿名")}</td>
-        <td><b>${esc(l.pd)}</b></td>
-        <td class="mono">${esc(l.version)}</td>
-        <td><span class="pill ${l.status < 400 ? "on" : "off"}">${l.status}</span></td>
-        <td class="url-cell" title="${esc(l.url || "")}">${esc(l.url || "—")}</td>
-      </tr>`).join("");
-    $("logInfo").textContent = `第 ${logPage + 1} 页`;
+    const body = $("termBody");
+    body.innerHTML = "";
+    if (!rows.length) { body.innerHTML = '<div class="term-empty">暂无日志 — 客户端发起一次查询后会出现在这里。</div>'; }
+    rows.forEach(l => {
+      const ts = new Date((l.created_at||"").replace(" ","T")+"Z");
+      const time = isNaN(ts) ? l.created_at : ts.toLocaleTimeString("zh-CN", {hour12:false});
+      const user = l.api_user_name || "anonymous";
+      const cls = l.status >= 400 ? "fail" : "ok";
+      const status = l.status >= 400 ? "FAIL" : "OKAY";
+      body.appendChild(termLine(`[${time}]`, `${user}`, `${status}  ${l.pd} ${l.version}${l.url ? "  → " + l.url : ""}`, cls));
+    });
+    $("logInfo").textContent = "第 " + (logPage + 1) + " 页";
+    body.scrollTop = body.scrollHeight;
   } catch (e) { toast(e.message); }
 }
 $("logPrev").onclick = () => { if (logPage > 0) { logPage--; loadLogs(); } };
@@ -336,13 +425,10 @@ $("logRefresh").onclick = () => { logPage = 0; loadLogs(); };
 $("logUser").onchange = () => { logPage = 0; loadLogs(); };
 $("logPd").addEventListener("keydown", e => { if (e.key === "Enter") { logPage = 0; loadLogs(); } });
 
-/* ---- 启动:检测会话 ---- */
+/* ---- 启动 ---- */
 (async () => {
-  try {
-    const me = await api("/api/me");
-    if (me.loggedIn) { admin = me.username; showApp(); }
-    else showLogin();
-  } catch { showLogin(); }
+  try { const me = await api("/api/me"); if (me.loggedIn) { admin = me.username; showApp(); } else showLogin(); }
+  catch { showLogin(); }
 })();
 </script>
 </body>
