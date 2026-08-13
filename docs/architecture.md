@@ -44,7 +44,7 @@ flowchart LR
 
     UI --> CORE
     CORE --> FB
-    UI -->|"登录 /api/login · token 校验 /api/me · ROM 查询 /api/rom"| API
+    UI -->|"登录 /api/login · ROM 查询 /api/rom"| API
     API --> DB
     API -->|"Bearer VOTA_API_TOKEN\nresolve_url / resolve_flash_url"| VOTA
     WEB --> DB
@@ -110,21 +110,16 @@ VivoKsu 工具/
 ```mermaid
 flowchart TD
     A[App.OnStartup] --> B[注册崩溃日志<br/>DispatcherUnhandledException → crash.log]
-    B --> C{本地有 token?}
-    C -->|有| D["LoginService.ValidateTokenAsync<br/>GET /api/me"]
-    D -->|有效| F
-    D -->|无效/网络错| E
-    C -->|无| E["LoginWindow.ShowDialog"]
-    E -->|成功| F["token = login.Token"]
-    E -->|取消| G["Shutdown()<br/>不进主界面"]
+    B --> C["LoginWindow.ShowDialog<br/>每次启动强制登录"]
+    C -->|登录成功| F["token = login.Token"]
+    C -->|取消/关闭| G["Shutdown()<br/>不进主界面"]
     F --> H["AppComposition.CreateDefault()<br/>composition.SetAuthToken(token)"]
     H --> I["MainWindow.Show()<br/>MainWindow.Closed → Shutdown()"]
 ```
 
 要点:
 
-- **记住登录**:本地 token 有效(`/api/me` 返回 `loggedIn:true`)直接进主界面;失效则回登录窗。
-- **`ConfigureAwait(false)` 防死锁**:启动门禁用 `GetAwaiter().GetResult()` 同步等待,若延续回到尚未跑消息泵的 Dispatcher 会死锁([LoginService.cs](src/VivoKsu.App/Services/LoginService.cs))。
+- **每次启动强制登录**:无本地免登录 —— 每次启动必弹登录窗,`/api/login` 通过才进主界面;token 不持久化,仅本次会话注入 `OtaApiClient`([LoginService.cs](src/VivoKsu.App/Services/LoginService.cs) 用 `ConfigureAwait(false)`,不依赖 UI 上下文)。
 - **退出清理**:`OnExit` 用 `DispatcherFrame` 泵消息最多 5s 等 `composition.StopAsync()` 完成 —— 清理下载的 Vivo 临时 gzip 与各盘 `VivoKsu\safe-flash` staging,并停监视/镜像进程。
 - **崩溃日志**:未捕获异常写 `%LOCALAPPDATA%\VivoKsu\crash.log`(商业工具排查用)。
 - **登录后程序消失修复**:`ShowDialog` 关闭触发 `OnLastWindowClose` 退出 —— 改为主窗口显式 `Closed += Shutdown()`。
@@ -349,7 +344,7 @@ flowchart TD
 | --- | --- | --- |
 | `/health` | GET | 健康检查 |
 | `/api/login` | POST | 账号密码 → API token(桌面端登录) |
-| `/api/me` | GET | 校验本地 token(记住登录) |
+| `/api/me` | GET | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
 | `/api/rom?pd=&version=` | GET | 解析 OTA 直链(强制登录 + 版本控制 + 记日志) |
 
 ### 4.2 认证与授权模型
@@ -368,7 +363,7 @@ flowchart TD
 ```
 
 - **桌面端登录**(`/api/login`):`api_users.username` + PBKDF2-SHA256(100k 迭代)校验密码,成功返回该用户 token;封禁 / 停用 / 未设密码分别报错。
-- **`/api/me`**:token → `{loggedIn, name}`(记住登录校验)。
+- **`/api/me`**:token → `{loggedIn, name}`(校验 token;桌面端已改为每次强制登录,不再调用它免登录)。
 - **`/api/rom`**:强制 token;**封禁用户 403**,版本未启用 404,成功 200 并记日志。
 
 ### 4.3 D1 数据模型(`nwflash-db`)

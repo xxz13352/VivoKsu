@@ -19,7 +19,7 @@ VivoKsu 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 | --- | --- |
 | `GET /health` | 健康检查 |
 | `POST /api/login` | 账号密码 → API token(桌面端登录门禁) |
-| `GET /api/me` | 校验本地 token(记住登录) |
+| `GET /api/me` | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
 | `GET /api/rom?pd=X&version=Y` | 解析 OTA 直链(**强制登录** + 版本控制 + 记日志) |
 
 错误映射:NOT_FOUND/`not found`→404, AUTH_FAIL→401, INSUFFICIENT_CREDITS→402, FORBIDDEN→403, RATE_LIMITED→429, 其它→502。

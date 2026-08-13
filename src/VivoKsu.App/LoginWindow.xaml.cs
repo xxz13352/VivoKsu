@@ -4,27 +4,16 @@ using VivoKsu.App.Services;
 
 namespace VivoKsu.App;
 
-/// <summary>启动登录门禁:账号+密码验证通过才进入主界面。</summary>
+/// <summary>启动登录门禁:每次启动强制账号+密码登录,验证通过才进入主界面。</summary>
 public partial class LoginWindow : Window
 {
-    private readonly ToolPathPreferences preferences;
     private readonly LoginService loginService;
 
-    public LoginWindow(ToolPathPreferences preferences, LoginService loginService)
+    public LoginWindow(LoginService loginService)
     {
         InitializeComponent();
-        this.preferences = preferences;
         this.loginService = loginService;
-
-        UsernameBox.Text = preferences.Username ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(UsernameBox.Text))
-        {
-            UsernameBox.Focus();
-        }
-        else
-        {
-            PasswordBox.Focus();
-        }
+        UsernameBox.Focus();
 
         LoginButton.Click += async (_, _) => await LoginAsync();
         PasswordBox.KeyDown += (_, e) =>
@@ -58,6 +47,10 @@ public partial class LoginWindow : Window
         };
     }
 
+    /// <summary>密码显示/隐藏:眼睛按钮勾选则明文,取消则恢复 ●。Click 触发时 IsChecked 已是新值。</summary>
+    private void OnPasswordToggleClick(object sender, RoutedEventArgs e)
+        => PasswordBox.PasswordChar = PasswordToggleButton.IsChecked == true ? '\0' : '●';
+
     /// <summary>登录成功后的 API token(供 App 传给 OtaApiClient)。</summary>
     public string? Token { get; private set; }
 
@@ -73,22 +66,15 @@ public partial class LoginWindow : Window
             return;
         }
 
+        // 登录中:禁用交互 + 覆盖层提示,防止重复提交。
         LoginButton.IsEnabled = false;
-        ErrorText.Text = "正在登录…";
+        ErrorText.Text = string.Empty;
+        BusyOverlay.Visibility = Visibility.Visible;
         try
         {
             var result = await loginService.LoginAsync(username, password, CancellationToken.None);
             Token = result.Token;
             Username = result.Username;
-            if (RememberBox.IsChecked == true)
-            {
-                preferences.SaveCredentials(result.Username, result.Token);
-            }
-            else
-            {
-                preferences.ClearCredentials();
-            }
-
             DialogResult = true;
         }
         catch (LoginFailedException exception)
@@ -97,11 +83,13 @@ public partial class LoginWindow : Window
         }
         catch (Exception)
         {
-            ErrorText.Text = "无法连接服务器,请检查网络后重试。";
+            ErrorText.Text = "无法连接服务器，请检查网络后重试。";
         }
         finally
         {
+            BusyOverlay.Visibility = Visibility.Collapsed;
             LoginButton.IsEnabled = true;
+            PasswordBox.Focus();
         }
     }
 }

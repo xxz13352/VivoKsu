@@ -46,32 +46,16 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             WriteCrashLog(e.ExceptionObject as Exception);
 
-        // 登录门禁(商业工具):账号+密码验证通过才进入主界面。
-        var preferences = ToolPathPreferences.CreateDefault();
+        // 登录门禁(商业工具):每次启动强制账号+密码登录,验证通过才进入主界面。
         using var loginService = new LoginService();
-        string? token;
-        if (!string.IsNullOrWhiteSpace(preferences.Token))
+        var login = new LoginWindow(loginService);
+        if (login.ShowDialog() != true)
         {
-            // 记住登录:本地 token 有效则直接进入。
-            var name = loginService.ValidateTokenAsync(preferences.Token, CancellationToken.None).GetAwaiter().GetResult();
-            token = name is not null ? preferences.Token : null;
-        }
-        else
-        {
-            token = null;
+            Shutdown();
+            return;
         }
 
-        if (token is null)
-        {
-            var login = new LoginWindow(preferences, loginService);
-            if (login.ShowDialog() != true)
-            {
-                Shutdown();
-                return;
-            }
-
-            token = login.Token;
-        }
+        var token = login.Token;
 
         composition = AppComposition.CreateDefault();
         composition.SetAuthToken(token!);
