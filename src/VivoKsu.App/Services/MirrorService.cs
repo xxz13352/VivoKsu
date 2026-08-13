@@ -1,3 +1,4 @@
+using System.IO;
 using VivoKsu.App.Models;
 using VivoKsu.App.ViewModels;
 
@@ -46,7 +47,7 @@ public sealed class MirrorService
         trackedSession = session;
         if (AutoMirrorEnabled && !deliberateStop && session.ConnectionState == DeviceConnectionState.AdbConnected && !IsMirroring)
         {
-            await StartCoreAsync(session, cancellationToken);
+            await StartCoreAsync(session, cancellationToken, requireAutoEnabled: true);
         }
     }
 
@@ -55,7 +56,7 @@ public sealed class MirrorService
         trackedSession = session;
         deliberateStop = false;
         consecutiveRestartFailures = 0;
-        return StartCoreAsync(session, cancellationToken);
+        return StartCoreAsync(session, cancellationToken, requireAutoEnabled: false);
     }
 
     public void ClearDeliberateStop()
@@ -82,7 +83,7 @@ public sealed class MirrorService
         return Task.CompletedTask;
     }
 
-    private async Task StartCoreAsync(DeviceSessionViewModel session, CancellationToken cancellationToken)
+    private async Task StartCoreAsync(DeviceSessionViewModel session, CancellationToken cancellationToken, bool requireAutoEnabled)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -102,10 +103,26 @@ public sealed class MirrorService
             return;
         }
 
+        // 自动投屏路径:下载/准备 scrcpy 期间用户可能已关闭开关,启动前必须复查,
+        // 否则 in-flight 流程会在开关已关后仍拉起 scrcpy。手动 StartAsync 不受开关约束。
+        if (requireAutoEnabled && (!AutoMirrorEnabled || deliberateStop))
+        {
+            return;
+        }
+
         try
         {
             var executable = scrcpyToolLocator.ExecutablePath!;
-            process = processRunner.Start(executable, ["--serial", session.Serial, "--stay-awake"]);
+            var adbPath = Path.Combine(AppContext.BaseDirectory, "platform-tools", "adb.exe");
+            var arguments = new List<string> { "--serial", session.Serial, "--stay-awake" };
+            if (File.Exists(adbPath))
+            {
+                // 统一用 platform-tools/adb.exe,避免依赖 scrcpy 包自带的 adb(发布已删除)。
+                arguments.Add("--adb-path");
+                arguments.Add(adbPath);
+            }
+
+            process = processRunner.Start(executable, arguments);
             process.Exited += OnProcessExited;
             logs.Write(OperationLogLevel.Success, $"ADB 投屏已启动: {session.Serial}。");
             NotifyStateChanged();

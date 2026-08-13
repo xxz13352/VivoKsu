@@ -29,6 +29,41 @@ if (-not (Test-Path -LiteralPath $bundledScrcpyExecutable) -or -not (Test-Path -
 }
 
 $manifestPath = Join-Path $outputPath "SHA256SUMS.txt"
+
+# ---- Release size reduction ----
+# 1. Remove WinForms assemblies (pure WPF app does not need them)
+$winFormsAssemblies = @(
+    "System.Windows.Forms.dll",
+    "System.Windows.Forms.Design.dll",
+    "System.Windows.Forms.Design.Editors.dll",
+    "System.Windows.Forms.Primitives.dll",
+    "Accessibility.dll"
+)
+foreach ($assembly in $winFormsAssemblies) {
+    $winFormsPath = Join-Path $outputPath $assembly
+    if (Test-Path -LiteralPath $winFormsPath) {
+        Remove-Item -LiteralPath $winFormsPath -Force
+    }
+}
+
+# 2. Trim satellite language packs: keep only Chinese/English
+$keepLanguages = @("zh-Hans", "zh-Hant")
+Get-ChildItem $outputPath -Directory |
+    Where-Object { $_.Name -match '^[a-z]{2}(-[A-Za-z]+)?$' -and $_.Name -notin $keepLanguages } |
+    Remove-Item -Recurse -Force
+
+# 3. Remove scrcpy-bundled adb (app passes --adb-path to platform-tools\adb.exe)
+$scrcpyRedundant = @(
+    (Join-Path $outputPath "scrcpy\adb.exe"),
+    (Join-Path $outputPath "scrcpy\AdbWinApi.dll"),
+    (Join-Path $outputPath "scrcpy\AdbWinUsbApi.dll")
+)
+foreach ($asset in $scrcpyRedundant) {
+    if (Test-Path -LiteralPath $asset) {
+        Remove-Item -LiteralPath $asset -Force
+    }
+}
+
 $obsoleteReleaseAssets = @(
     (Join-Path $outputPath "apk\Sukisu.APK"),
     (Join-Path $outputPath "platform-tools\ksud.exe"),

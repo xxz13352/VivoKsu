@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- 发布瘦身:只保留中英文 satellite 语言包(减少 ~11MB) -->
+    <SatelliteResourceLanguages>zh-Hans;zh-Hant;en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <Target Name="EnsureBundledScrcpy" BeforeTargets="Publish">
