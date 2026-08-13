@@ -15,8 +15,8 @@ Vivo 手机刷机 / Root 工具箱 —— Windows WPF 桌面应用(.NET 8)。
 | **文件管理** | ADB Root 通道的文件浏览 / 上传 / 下载 / 删除 |
 | **可视刷写** | 读取全量分区表,卡片式列表勾选后依序执行**备份 / 写入 / 擦除**;支持 Fastboot 与 ADB Root 双通道 |
 | **固件提取** | 解包 `payload.bin` / OTA zip;或粘贴云端直链,通过 HTTP Range **按需下载**镜像(不下载整个包),带实时进度与速度 |
-| **线刷准备** | 读设备 PD/版本 → 查 `VivoKsu.Server` 拿 OTA 链接 → **多分片并行下载**(bezzad/Downloader)→ 解压出 Preload.bin(解包分区镜像为后续阶段) |
-| **操作日志** | 按级别(信息 / 成功 / 警告 / 错误)记录所有操作 |
+| **安全刷写** | 一键刷机:adb 读设备 PD/版本 → 查 `api.nwflash.cc.cd` 拿 OTA 链接 → 多分片下载 → 解压解包 payload → **跳过 preloader/lk** → 自动重启 fastbootd 逐个刷入其余分区 → 重启。也可选择本地 .zip / payload.bin 走同流程 |
+| **操作日志** | 按级别(信息 / 成功 / 警告 / 错误)记录所有操作,`[HH:mm:ss]` 时间戳 + 消息的刷机工具式单行显示 |
 
 ## 技术栈
 
@@ -24,7 +24,7 @@ Vivo 手机刷机 / Root 工具箱 —— Windows WPF 桌面应用(.NET 8)。
 - **CommunityToolkit.Mvvm** 8.4 —— `[ObservableProperty]` / `[RelayCommand]`
 - **HandyControl** 3.5.1 —— UI 控件库
 - **SharpCompress** 0.37.2、**ZstdSharp.Port** 0.8.1 —— 压缩 / zstd 解压
-- **xunit** + **FluentAssertions** —— 单元测试(当前 **217** 个用例全绿)
+- **xunit** + **FluentAssertions** —— 单元测试(当前 **249** 个应用用例 + **7** 个服务端用例全绿)
 
 ## 目录结构
 
@@ -42,7 +42,8 @@ VivoKsu 工具/
 │  │  ├─ platform-tools/            # adb / fastboot
 │  │  ├─ root-tools/                # magiskboot.so
 │  │  └─ scrcpy/                    # scrcpy(发布时由脚本自动补齐)
-│  └─ VivoKsu.Server/               # 独立 Web 服务:从 VOTA API 获取 OTA 链接
+│  └─ VivoKsu.Server/               # 旧 .NET 服务端(已由 Cloudflare Worker 取代,作本地回退)
+├─ cloudflare/                      # Cloudflare Worker:VivoKsu ROM 代理(api.nwflash.cc.cd)
 ├─ tests/
 │  ├─ VivoKsu.App.Tests/            # 桌面应用单元测试
 │  └─ VivoKsu.Server.Tests/         # 服务端单元与端到端测试
@@ -82,42 +83,47 @@ VivoKsu 工具/
 
 **实时进度(重点)**:payload_dumper 不输出流式进度,且其网络读取(Rust reqwest 走 IOCP/AFD)不计入进程 `ReadTransferCount`;实际验证可靠信号是**进程写入字节数 `WriteTransferCount`** —— 后台每 200ms 采样 `GetProcessIoCounters`,按分区 `size_in_bytes` 作分母,得到真实连续的进度条与速度。Vivo gzip 路径则以已解压字节 / gzip 总量直接报连续进度。
 
+### 安全刷写
+
+一键刷机链路(详见 [docs/safeflash-ota.md](docs/safeflash-ota.md)):
+
+- **OTA 下载** `OtaDownloadService`:bezzad/Downloader 多分片,含 1 字节 bug / 失败假成功 / 磁盘预检等修复;staging 优先系统 SSD。
+- **解压解包** `FirmwarePartitionExtractor`:自动分流 payload OTA(PD2417)/ 直接镜像 zip(PD2057)/ firmware-update 镜像,过滤 `preloader*` 与 `lk`。
+- **刷写** `FastbootRsCliRunner`:调 fastboot-rs 命令行 EXE(可读错误),`adb reboot fastboot` 进 fastbootd,`getvar partition-type` 预检跳过设备缺失分区,逐个 flash 后 `fastboot reboot`。
+- 操作日志按 `[HH:mm:ss] 消息` 单行等宽显示刷机进度,自动滚动。
+
 ### UI 现代化
 
 参考 taste-skill 审美原则迭代:统一 teal 配色、圆角卡片分区列表(固件提取与可视刷写同款)、表单式页面头部、双进度条底栏(当前分区 + 总进度百分比 + 速度 / 耗时)。
 
-## 服务端(VivoKsu.Server)
+## 服务端(Cloudflare Worker —— api.nwflash.cc.cd)
 
-独立 ASP.NET Core Web 服务,凭据放在服务端,桌面应用只需用 **PD + 版本号** 查询即可拿到 OTA 下载链接。上游为 [VOTA API](https://api.otau.cc.cd)(HTTPS,POST + JSON)。
+ROM OTA 链接代理已部署到 **Cloudflare Workers**,地址 **`https://api.nwflash.cc.cd`**(`nwflash.cc.cd` 域名的自定义域)。桌面应用只连这个地址;上游 [VOTA API](https://api.otau.cc.cd) 完全不动。
 
 | 端点 | 说明 |
 | --- | --- |
-| `GET /health` | 健康检查,返回当前数据源(真实 / 演示) |
-| `GET /api/rom?pd=PD2417&version=16.2.10.0.W10.V000L1` | 按 PD + 版本号返回 OTA 下载链接 |
+| `GET /health` | 健康检查,返回 `{status, source}` |
+| `GET /api/rom?pd=PD2417&version=16.2.12.0.W10.V000L1` | 按 PD + 版本号返回 OTA 下载链接 |
 
-默认调用 VOTA `resolve_url`(OTA 全量包,-1 信用点);可在配置里改用 `resolve_flash_url`(线刷包,-3)或 `dev_resolve`(设备端,用 `device_id` 鉴权,无需 user/pass)。VOTA 返回 `ok:false` 时按错误码映射 HTTP 状态(`NOT_FOUND`→404、`INSUFFICIENT_CREDITS`→402、`AUTH_FAIL`→401、`RATE_LIMITED`→429 等)。
+**凭据隔离**:VOTA API Token 以 Worker 机密(`wrangler secret put VOTA_API_TOKEN`)存在 `api.nwflash.cc.cd` 上,**不进入 VivoKsu 桌面端**。VivoKsu 代码里没有任何 `api.otau.cc.cd` / token 信息,只连 `api.nwflash.cc.cd`。
 
-**配置**:`src/VivoKsu.Server/appsettings.json` 的 `VotaApi` 段填入凭据后即切到真实数据源;留空时退回演示数据源(返回占位链接),便于先联调客户端。
+**代码**:`cloudflare/`(TypeScript Worker + wrangler.toml),worker 名 `nwflash-rom`。非机密项在 `wrangler.toml [vars]`:`VOTA_BASE_URL`(默认 `https://api.otau.cc.cd`)、`VOTA_ACTION`(`resolve_url` OTA / `resolve_flash_url` 线刷)、`VOTA_VER`(`0.1.0`)。
 
-```json
-"VotaApi": {
-  "BaseUrl": "https://api.otau.cc.cd",
-  "User": "你的用户名",
-  "Pass": "你的密码",
-  "Ver": "1.0.0",
-  "DeviceId": "",
-  "Action": "resolve_url"
-}
-```
-
-**运行**:
+**部署**:
 
 ```bash
-cd src/VivoKsu.Server
-dotnet run
+cd cloudflare
+npm install
+npx wrangler login                    # 浏览器登录 Cloudflare 账户
+npx wrangler secret put VOTA_API_TOKEN   # 粘贴 VOTA 的 API Token(机密,不进代码)
+npx wrangler deploy                   # 部署并绑定自定义域 api.nwflash.cc.cd
 ```
 
-默认 HTTPS `https://localhost:7243`、HTTP `http://localhost:5143`。测试:`dotnet test tests/VivoKsu.Server.Tests`。
+**错误映射**(与 .NET 版一致):`NOT_FOUND`/`not found`→404、`AUTH_FAIL`→401、`INSUFFICIENT_CREDITS`→402、`FORBIDDEN`→403、`RATE_LIMITED`→429、其它→502。
+
+**后续规划**:登录系统、后台系统等将加在 `api.nwflash.cc.cd`(Worker)上。
+
+**旧 .NET 服务端**(`src/VivoKsu.Server/`)已由 Worker 取代,保留作本地开发回退(无凭据时返回演示链接);真实 token 已从配置移除,只存在 Worker 机密里。
 
 ## 构建与测试
 
@@ -161,3 +167,10 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 - **payload 分区内部百分比无法测量**:payload_dumper 预分配输出文件且不流式输出进度,分区内的进度条按进程写入字节驱动(真实但以分区为单位),分区内更细的百分比受工具二进制限制无法获得。
 - **分区操作有真实设备风险**:写入 / 擦除会修改设备分区,执行前有确认弹窗,任务在首个失败处分区停止。
 - **脚本编码**:发布 / 验证用的 `.ps1` 必须保持纯 ASCII(本机无 BOM 的 UTF-8 脚本被按 GBK 读取会乱码)。
+- **安全刷写待真机验证**:fastboot-rs CLI 在 vivo fastbootd 逐个刷 36 分区是唯一未真机实测环节。
+- **下载盘需 ~25GB 空闲且最好是 SSD**:bezzad 多分片随机写在 HDD 会停滞(staging 自动优先系统盘)。
+
+## 相关文档
+
+- [docs/safeflash-ota.md](docs/safeflash-ota.md) —— 安全刷写流程、OTA 格式、下载/刷写内部细节与踩坑。
+- [cloudflare/README.md](cloudflare/README.md) —— Cloudflare Worker(api.nwflash.cc.cd)部署说明。
