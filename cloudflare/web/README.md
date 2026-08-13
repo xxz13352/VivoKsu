@@ -56,6 +56,8 @@ npx wrangler deploy                            # 绑定 web.nwflash.cc.cd
 - **API 调用**:应用登录后,`/api/rom` 请求带 `Authorization: Bearer <token>`,后台日志按该用户记录。
 - 版本必须先在此后台启用,否则 `/api/rom` 返回 404。
 
+> **商业模型**:账号授权制 —— 用户登录即可查询,不对用户扣点 / 限制次数;上游 VOTA 信用点为运营方成本。
+
 ## D1 数据
 
 | 表 | 用途 |

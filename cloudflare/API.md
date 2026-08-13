@@ -107,7 +107,7 @@
 | `401` | `API token 无效或已停用。` | token 无效 / 账号被停用 |
 | `403` | `账号已被封禁。` | 账号被封禁(后台操作) |
 | `401` | `AUTH_FAIL` 文本 | VOTA 认证失败(worker 的 token 无效 / 被吊销) |
-| `402` | `INSUFFICIENT_CREDITS` 文本 | 账户信用点不足(每次成功查询扣信用点) |
+| `402` | `INSUFFICIENT_CREDITS` 文本 | 运营方(VOTA)账户信用点不足 —— 仅影响该版本解析,非用户计费 |
 | `403` | `FORBIDDEN` 文本 | VOTA 拒绝(VOTA_VER 不在白名单等) |
 | `404` | `该版本未授权或不存在。` | **该 PD+版本未在后台「版本号控制」启用**(最常见) |
 | `404` | `record not found` | 版本已启用但 VOTA 平台无记录 |
@@ -125,9 +125,9 @@ curl "https://api.nwflash.cc.cd/api/rom?pd=PD2417&version=99.99"
 # → 404 {"error":"record not found"}
 ```
 
-## 计费 / 信用点
+## 上游计费 / 信用点(运营方成本,不向用户收费)
 
-每次成功调用 `resolve_url` 扣 **1 信用点**;`resolve_flash_url`(线刷包)扣 **3 信用点**。信用点归属 worker 所持 token 的账户。`record not found` / 参数错误不扣点。当前余额可在 VOTA 平台查看。
+每次成功调用 `resolve_url` 扣 **1 信用点**;`resolve_flash_url`(线刷包)扣 **3 信用点**。信用点归属 **worker 所持 token 的账户(运营方)** —— 这是 VivoKsu 运营方在上游 VOTA 的成本,由开发者承担,**不对 VivoKsu 用户做任何扣点 / 按次计费**。用户只要登录即可查询,不限制次数。`record not found` / 参数错误不扣点。当前余额可在 VOTA 平台查看。
 
 ## 配置
 
@@ -163,7 +163,7 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | 2026-08-13 | **接入后台系统**:共用 D1(`nwflash-db`);`/api/rom` 增加 版本号控制(未启用版本→404)、API 用户 token 认证(可选,无效→401)、按用户记访问日志。后台管理见 `web.nwflash.cc.cd`(登录 / 版本 / 用户 / 日志) |
 | 2026-08-13 | **桌面端登录(商业工具)**:api_users 加 username/password(PBKDF2);新增 `POST /api/login`(账号密码→token)与 `GET /api/me`(校验 token);VivoKsu 桌面端启动强制登录 |
 | 2026-08-13 | **强制登录 + 封禁**:`/api/rom` 必须携带 token(无→401 请先登录);api_users 加 `banned`,封禁用户禁止登录与查询(登录 401 / 查询 403);后台支持封禁/解封 |
-| (规划) | 配额限制、订阅计费等 |
+| 2026-08-13 | 明确商业模型:账号授权制 —— 用户登录即可查询、不按次计费;上游 VOTA 信用点由运营方承担 |
 
 ## 管理后台
 

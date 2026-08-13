@@ -1,8 +1,18 @@
 # VivoKsu
 
-Vivo 手机刷机 / Root 工具箱 —— Windows WPF 桌面应用(.NET 8)。
+Vivo 手机刷机 / Root 工具箱 —— **商业付费工具**,Windows WPF 桌面应用(.NET 8)。
 
 提供 ADB / Fastboot 设备检测、分区可视刷写、快速刷写(KernelSU)、payload 解包与云端提取、ADB 投屏、文件管理等能力,全程中文界面、teal 主题。
+
+## 项目定位与商业模式
+
+VivoKsu 是**商业付费工具**:
+
+- **登录授权**:桌面端启动必须用后台创建的账号登录,未登录不可进入主界面(登录门禁)。账号由 `web.nwflash.cc.cd` 后台「用户管理」创建。
+- **服务端全在 Cloudflare,零自有服务器**:API `api.nwflash.cc.cd`(Worker `nwflash-rom`)+ 后台 `web.nwflash.cc.cd`(Worker `nwflash-web`)+ 数据库 D1 `nwflash-db`,认证、版本授权、审计、后台管理全在 Cloudflare Edge。
+- **商业模式 = 账号授权制**:用户登录即可使用,**不对用户按次扣点 / 限制次数**。拿 ROM 的链路是 `api.nwflash.cc.cd` 从上游 VOTA 取链接返回给工具,中间不涉及对用户账号的任何扣点计费。
+- **上游信用点 = 运营方成本**:VOTA 的信用点扣的是 Worker 所持 token 账户(运营方),由开发者承担,不进客户端、不向用户收。
+- **授权与控制**:版本在后台「版本号控制」启用才可查(未启用 → 404);封禁 / 停用即时生效(登录 401 / 查询 403);每次查询按用户记入访问日志。
 
 ## 功能页面
 
@@ -15,7 +25,7 @@ Vivo 手机刷机 / Root 工具箱 —— Windows WPF 桌面应用(.NET 8)。
 | **文件管理** | ADB Root 通道的文件浏览 / 上传 / 下载 / 删除 |
 | **可视刷写** | 读取全量分区表,卡片式列表勾选后依序执行**备份 / 写入 / 擦除**;支持 Fastboot 与 ADB Root 双通道 |
 | **固件提取** | 解包 `payload.bin` / OTA zip;或粘贴云端直链,通过 HTTP Range **按需下载**镜像(不下载整个包),带实时进度与速度 |
-| **安全刷写** | 一键刷机:adb 读设备 PD/版本 → 查 `api.nwflash.cc.cd` 拿 OTA 链接 → 多分片下载 → 解压解包 payload → **跳过 preloader/lk** → 自动重启 fastbootd 逐个刷入其余分区 → 重启。也可选择本地 .zip / payload.bin 走同流程 |
+| **VIVO 线刷** | 一键刷机:adb 读设备 PD/版本 → 查 `api.nwflash.cc.cd` 拿 OTA 链接 → 多分片下载 → 解压解包 payload → **跳过 preloader/lk** → 自动重启 fastbootd 逐个刷入其余分区 → 重启。也可选择本地 .zip / payload.bin 走同流程 |
 | **操作日志** | 按级别(信息 / 成功 / 警告 / 错误)记录所有操作,`[HH:mm:ss]` 时间戳 + 消息的刷机工具式单行显示 |
 
 ## 技术栈
@@ -24,7 +34,7 @@ Vivo 手机刷机 / Root 工具箱 —— Windows WPF 桌面应用(.NET 8)。
 - **CommunityToolkit.Mvvm** 8.4 —— `[ObservableProperty]` / `[RelayCommand]`
 - **HandyControl** 3.5.1 —— UI 控件库
 - **SharpCompress** 0.37.2、**ZstdSharp.Port** 0.8.1 —— 压缩 / zstd 解压
-- **xunit** + **FluentAssertions** —— 单元测试(当前 **249** 个应用用例 + **7** 个服务端用例全绿)
+- **xunit** + **FluentAssertions** —— 单元测试(当前 **253** 个应用用例 + **8** 个服务端用例全绿)
 
 ## 目录结构
 
@@ -83,7 +93,7 @@ VivoKsu 工具/
 
 **实时进度(重点)**:payload_dumper 不输出流式进度,且其网络读取(Rust reqwest 走 IOCP/AFD)不计入进程 `ReadTransferCount`;实际验证可靠信号是**进程写入字节数 `WriteTransferCount`** —— 后台每 200ms 采样 `GetProcessIoCounters`,按分区 `size_in_bytes` 作分母,得到真实连续的进度条与速度。Vivo gzip 路径则以已解压字节 / gzip 总量直接报连续进度。
 
-### 安全刷写
+### VIVO 线刷(安全刷写)
 
 一键刷机链路(详见 [docs/safeflash-ota.md](docs/safeflash-ota.md)):
 
@@ -96,9 +106,9 @@ VivoKsu 工具/
 
 参考 taste-skill 审美原则迭代:统一 teal 配色、圆角卡片分区列表(固件提取与可视刷写同款)、表单式页面头部、双进度条底栏(当前分区 + 总进度百分比 + 速度 / 耗时)。
 
-## 服务端(Cloudflare Worker —— api.nwflash.cc.cd)
+## 服务端(Cloudflare —— api.nwflash.cc.cd / web.nwflash.cc.cd)
 
-ROM OTA 链接代理已部署到 **Cloudflare Workers**,地址 **`https://api.nwflash.cc.cd`**(`nwflash.cc.cd` 域名的自定义域)。桌面应用只连这个地址;上游 [VOTA API](https://api.otau.cc.cd) 完全不动。
+**整个后端全部托管在 Cloudflare,无自有服务器**:API(Worker `nwflash-rom`)、后台管理(Worker,`web.nwflash.cc.cd`)、数据库(D1 `nwflash-db`)都在 Cloudflare Edge。桌面应用只连 `api.nwflash.cc.cd`;上游 [VOTA API](https://api.otau.cc.cd) 完全不动。
 
 | 端点 | 说明 |
 | --- | --- |
@@ -106,6 +116,8 @@ ROM OTA 链接代理已部署到 **Cloudflare Workers**,地址 **`https://api.nw
 | `GET /api/rom?pd=PD2417&version=16.2.12.0.W10.V000L1` | 按 PD + 版本号返回 OTA 下载链接 |
 
 **凭据隔离**:VOTA API Token 以 Worker 机密(`wrangler secret put VOTA_API_TOKEN`)存在 `api.nwflash.cc.cd` 上,**不进入 VivoKsu 桌面端**。VivoKsu 代码里没有任何 `api.otau.cc.cd` / token 信息,只连 `api.nwflash.cc.cd`。
+
+**计费**:上游 VOTA 的信用点由**运营方**(Worker 所持 token 账户)承担,**不对用户扣点计费** —— 用户登录即可查询,不限制次数。
 
 **代码**:`cloudflare/`(TypeScript Worker + wrangler.toml),worker 名 `nwflash-rom`。非机密项在 `wrangler.toml [vars]`:`VOTA_BASE_URL`(默认 `https://api.otau.cc.cd`)、`VOTA_ACTION`(`resolve_url` OTA / `resolve_flash_url` 线刷)、`VOTA_VER`(`0.1.0`)。
 
@@ -121,7 +133,7 @@ npx wrangler deploy                   # 部署并绑定自定义域 api.nwflash.
 
 **错误映射**(与 .NET 版一致):`NOT_FOUND`/`not found`→404、`AUTH_FAIL`→401、`INSUFFICIENT_CREDITS`→402、`FORBIDDEN`→403、`RATE_LIMITED`→429、其它→502。
 
-**后续规划**:登录系统、后台系统等将加在 `api.nwflash.cc.cd`(Worker)上。
+**已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁,均已在 Cloudflare 上。**商业模型**:账号授权制 —— 登录即用,不对用户按次扣点 / 限制次数;上游 VOTA 信用点为运营方成本。
 
 **旧 .NET 服务端**(`src/VivoKsu.Server/`)已由 Worker 取代,保留作本地开发回退(无凭据时返回演示链接);真实 token 已从配置移除,只存在 Worker 机密里。
 
@@ -172,7 +184,8 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 
 ## 相关文档
 
-- [docs/safeflash-ota.md](docs/safeflash-ota.md) —— 安全刷写流程、OTA 格式、下载/刷写内部细节与踩坑。
+- [docs/architecture.md](docs/architecture.md) —— **项目架构文档**(系统总览 / 桌面端模块 / Worker / D1 / 数据流 / 设计决策)。
+- [docs/safeflash-ota.md](docs/safeflash-ota.md) —— VIVO 线刷(安全刷写)流程、OTA 格式、下载/刷写内部细节与踩坑。
 - [cloudflare/API.md](cloudflare/API.md) —— **api.nwflash.cc.cd 接口契约**(端点、参数、响应、错误码、计费、功能记录)。
 - [cloudflare/README.md](cloudflare/README.md) —— Cloudflare Worker(api.nwflash.cc.cd)部署说明。
 - [cloudflare/web/README.md](cloudflare/web/README.md) —— **web.nwflash.cc.cd 后台管理**(登录/版本控制/用户/日志/安全)。
