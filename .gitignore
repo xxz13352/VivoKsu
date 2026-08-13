@@ -1,0 +1,27 @@
+# ---- .NET ----
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+
+# ---- Cloudflare Worker ----
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/.dev.vars
+
+# ---- Rust (fastboot-rs) ----
+target/
+
+# ---- 应用运行时产物 ----
+临时/
+logs/
+*.log
+
+# ---- 其它 ----
+.DS_Store
+Thumbs.db
+
+# ---- 本地工具状态(Superpowers brainstorm 的 token/port 等) ----
+.superpowers/

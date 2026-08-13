@@ -1,0 +1,136 @@
+[package]
+name = "fastboot"
+version = "0.1.0"
+edition = "2021"
+authors = ["Fastboot Rust Port"]
+description = "Android Fastboot tool rewritten in Rust"
+license = "BSD-3-Clause"
+
+# 编译出来就是 fastboot.exe (Windows) 或 fastboot (Linux/macOS)
+[[bin]]
+name = "fastboot"
+path = "src/main.rs"
+
+[dependencies]
+# 错误处理
+thiserror = "1.0"
+
+# 命令行解析
+clap = { version = "4.4", features = ["derive"] }
+
+# USB 通信
+rusb = "0.9"
+
+# 异步运行时
+tokio = { version = "1.35", features = ["full", "sync", "io-util", "fs"] }
+
+# 异步
+async-channel = "2.1"
+
+# futures
+futures = "0.3"
+
+# ZIP 文件处理 - update 命令
+zip = "0.6"
+
+# 进度
+indicatif = "0.17"
+
+# 字节序转换
+byteorder = "1.5"
+
+# 志日
+log = "0.4"
+env_logger = "0.10"
+
+# 十六进制转换
+hex = "0.4"
+
+# RSA加密认真
+rsa = { version = "0.9", features = ["sha1"] }
+signature = "2.2"
+rand = "0.8"
+sha1 = "0.10"
+base64 = "0.21"
+num-bigint = "0.4"
+num-traits = "0.2"
+
+# 操作目录
+walkdir = "2.4"
+dirs = "5.0"
+
+# 零拷贝解析 - 直接把字节切片当结构体用，省掉大量内存拷贝
+zerocopy = { version = "0.7", features = ["derive"] }
+
+# 内存映射 - 大文件直接映射到内存，不用一块块读
+memmap2 = "0.9"
+
+# bytes 库 - 高效的字节缓冲区，避免不必要的拷贝
+bytes = "1.5"
+
+# parking_lot - 比标准库的锁更快
+parking_lot = "0.12"
+
+# pin-project - 异步流需要
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+# 属性测试 - 质量保证的关键
+proptest = "1.4"
+
+# Mock - 测试传输层用
+mockall = "0.12"
+
+# 临时文件 - 测试 sparse 文件用
+tempfile = "3.10"
+
+[profile.release]
+# 优化体积
+opt-level = "z"      # 优化体积而非速度
+lto = true           # 链接时优化，消除死代码
+codegen-units = 1    # 单代码生成单元，更好的优化
+strip = true         # 移除符号表
+panic = "abort"      # 不生成 panic 展开代码
+
+[profile.release-min]
+# 极限压缩体积
+inherits = "release"
+opt-level = "z"
+lto = "fat"          # 更激进的 LTO
+strip = "symbols"    # 只保留调试信息
+
+# 开发时的 release 配置，编译快一点
+[profile.release-dev]
+inherits = "release"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = false
+
+# 平台特定依赖
+[target.'cfg(windows)'.dependencies]
+# Windows 需要这个来处理控制台和 USB
+# winusbio 用于 WinUSB 结构体定义，ioapiset 是 USB 通信的核心，devguid 用于设备枚举
+winapi = { version = "0.3", features = [
+    "setupapi", "handleapi", "fileapi", "winnt", "minwindef", "guiddef",
+    "winerror", "consoleapi", "wincon", "winbase", "ioapiset", "winusbio",
+    "usbiodef", "devguid", "errhandlingapi", "synchapi", "winusb", "usbspec",
+    "processenv"
+] }
+
+[target.'cfg(unix)'.dependencies]
+# Unix 系统的信号处理
+libc = "0.2"
+
+# 构建脚本配置
+[build-dependencies]
+# 如果需要构建时生成代码可以用这个
+# built = "0.7"
+
+# 特性开关
+[features]
+default = []
+# 启用 rusb 作为备选 USB 后端
+rusb-backend = []
+# 启用详细日志
+verbose-logging = []

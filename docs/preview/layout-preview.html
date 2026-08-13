@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>VivoKsu 布局预览</title>
+<style>
+  :root {
+    /* 整体变窄:窗口缩小,中间列随之变小,边距紧凑不浪费 */
+    --nav-w: 160px;
+    --log-w: 286px;
+    --content-margin: 12px;   /* 中间内容左右边距 —— 铺满留一点边框 */
+    --win-w: 1240px;
+    --win-h: 700px;
+    --teal: #0A8F85;
+    --teal-soft: #E8F4F2;
+    --text: #1F2A2E;
+    --muted: #7A8A90;
+    --edge: #D9E3E2;
+    --canvas: #F7FAFA;
+    --rail: #F0F6F5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+  body { background: #E5EBEA; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+  .app {
+    width: var(--win-w); height: var(--win-h);
+    background: var(--canvas);
+    display: grid;
+    grid-template-rows: 64px 1fr;
+    grid-template-columns: var(--nav-w) 1fr var(--log-w);
+    box-shadow: 0 12px 40px rgba(16,47,68,.18);
+    border-radius: 8px; overflow: hidden;
+    position: relative;
+  }
+  /* 顶栏 */
+  .titlebar {
+    grid-column: 1 / -1;
+    background: #fff;
+    border-bottom: 1px solid var(--edge);
+    display: flex; align-items: center; padding: 0 24px;
+  }
+  .titlebar .logo { width: 36px; height: 36px; background: #102F44; color: #fff; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+  .titlebar .brand { margin-left: 12px; }
+  .titlebar .brand .name { font-size: 18px; font-weight: bold; }
+  .titlebar .brand .sub { font-size: 8px; color: var(--muted); font-family: monospace; }
+  .titlebar .right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); }
+
+  /* 左导航 */
+  .nav {
+    grid-row: 2; grid-column: 1;
+    background: var(--rail);
+    border-right: 1px solid var(--edge);
+    padding: 25px 12px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .nav .group { font-size: 9px; color: var(--muted); font-family: monospace; font-weight: 600; margin: 0 13px 12px; }
+  .nav .item {
+    padding: 10px 13px; border-radius: 6px; color: var(--text); font-size: 13px;
+    border-left: 3px solid transparent; cursor: pointer;
+  }
+  .nav .item.active { background: var(--teal-soft); border-left-color: var(--teal); color: var(--teal); font-weight: 600; }
+  .nav .item.normal:hover { background: #E9F2F0; }
+
+  /* 中间内容 */
+  .content {
+    grid-row: 2; grid-column: 2;
+    background: var(--canvas);
+    padding: var(--content-margin) 0;
+    overflow: auto;
+    display: flex; justify-content: center;
+  }
+  .content-inner { width: 100%; }
+  .content .page-head { padding: 30px var(--content-margin) 0; }
+  .content .eyebrow { font-size: 9px; color: var(--teal); font-family: monospace; font-weight: 600; }
+  .content .title { font-size: 27px; font-weight: 600; margin-top: 5px; }
+  .content .subtitle { font-size: 12px; color: var(--muted); margin-top: 7px; }
+  .content .toolbar {
+    margin: 18px var(--content-margin) 0;
+    background: #F6FAFA; border: 1px solid var(--edge); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .content .toolbar .row { display: flex; gap: 10px; align-items: center; }
+  .content .toolbar .row + .row { margin-top: 10px; }
+  .content .btn {
+    background: var(--teal); color: #fff; border: none; border-radius: 6px;
+    padding: 7px 14px; font-size: 12px; cursor: pointer;
+  }
+  .content .btn.ghost { background: #fff; color: var(--text); border: 1px solid var(--edge); }
+  .content .sep {
+    margin: 18px var(--content-margin) 10px;
+    display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px;
+  }
+  .content .sep .line { flex: 1; height: 1px; background: var(--edge); }
+  /* 分区卡片 */
+  .content .cards { padding: 0 var(--content-margin); display: flex; flex-direction: column; gap: 6px; }
+  .content .card {
+    background: #fff; border: 1px solid var(--edge); border-radius: 8px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 10px; font-size: 12px;
+  }
+  .content .card .name { font-family: monospace; font-weight: 600; min-width: 70px; }
+  .content .card .size { color: var(--muted); font-family: monospace; font-size: 10px; min-width: 55px; }
+  .content .card .chip { font-size: 9px; padding: 2px 8px; border-radius: 10px; }
+  .content .card .chip.high { background: #FBEAE7; color: #C85B46; }
+  .content .card .chip.mount { background: #FBF1DF; color: #C85B46; }
+  .content .card .state { color: var(--muted); font-size: 11px; min-width: 34px; }
+  .content .card .img { color: var(--muted); font-family: monospace; font-size: 10px; flex: 1; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* 右日志 */
+  .log {
+    grid-row: 2; grid-column: 3;
+    background: var(--rail); border-left: 1px solid var(--edge);
+    display: flex; flex-direction: column;
+  }
+  .log .log-status { background: #fff; border-bottom: 1px solid var(--edge); padding: 14px 18px; }
+  .log .log-head { padding: 18px; border-bottom: 1px solid var(--edge); }
+  .log .log-head .t { font-size: 17px; font-weight: bold; margin-top: 2px; }
+  .log .log-body { flex: 1; overflow: auto; padding: 12px; }
+  .log .entry { padding: 12px 7px; border-bottom: 1px solid var(--edge); font-size: 12px; }
+  .log .entry .meta { font-size: 9px; color: var(--muted); font-family: monospace; }
+  .log .foot { background: #F2F8F7; border-top: 1px solid var(--edge); padding: 14px 18px; font-size: 9px; color: var(--muted); font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="titlebar">
+    <div class="logo">V</div>
+    <div class="brand"><div class="name">VivoKsu</div><div class="sub">ANDROID DEVICE WORKBENCH</div></div>
+    <div class="right">
+      <span class="status-dot"></span><span style="font-size:11px;color:var(--teal);font-weight:600">Fastboot 已连接</span>
+      <button class="btn ghost" style="padding:5px 12px">刷新设备</button>
+    </div>
+  </div>
+
+  <div class="nav">
+    <div class="group">WORKSPACE</div>
+    <div class="item normal">设备概览</div>
+    <div class="item normal">快速刷写</div>
+    <div class="item normal">ADB 投屏</div>
+    <div class="item normal">Vivo 专用</div>
+    <div class="item normal">文件管理</div>
+    <div class="item active">可视刷写</div>
+    <div class="item normal">固件提取</div>
+  </div>
+
+  <div class="content">
+    <div class="content-inner">
+      <div class="page-head">
+        <div class="eyebrow">PARTITION / WORKSPACE</div>
+        <div class="title">可视刷写</div>
+        <div class="subtitle">读取全量分区，按当前通道执行备份、写入或擦除</div>
+      </div>
+      <div class="toolbar">
+        <div class="row">
+          <span style="font-size:11px;color:var(--muted)">传输通道</span>
+          <button class="btn ghost">自动</button>
+          <button class="btn ghost">ADB Root</button>
+          <button class="btn ghost">Fastboot</button>
+          <span style="flex:1"></span>
+          <button class="btn ghost">载入镜像</button>
+          <button class="btn">读取分区表</button>
+        </div>
+        <div class="row">
+          <input style="flex:1;height:30px;border:1px solid var(--edge);border-radius:6px;padding:0 10px;font-size:12px" placeholder="筛选分区名">
+          <span style="font-size:10px;color:var(--muted);font-family:monospace">135 个分区 · 已选 0 · 已映射 0</span>
+        </div>
+      </div>
+      <div class="sep"><span>分区表 · 135 个分区</span><div class="line"></div></div>
+      <div class="cards">
+        <div class="card"><input type="checkbox"><span class="name">abl_a</span><span class="size">1.0 MB</span><span class="chip high">高风险</span><span class="state">等待</span><span class="img">未选择镜像</span></div>
+        <div class="card"><input type="checkbox"><span class="name">aop_a</span><span class="size">512.0 KB</span><span class="chip mount">已挂载</span><span class="state">等待</span><span class="img">未选择镜像</span></div>
+        <div class="card"><input type="checkbox"><span class="name">boot_a</span><span class="size">192.0 MB</span><span class="chip high">高风险</span><span class="state">等待</span><span class="img">D:\firmware\boot.img</span></div>
+        <div class="card"><input type="checkbox"><span class="name">super</span><span class="size">8.0 GB</span><span class="chip mount">已挂载</span><span class="state">等待</span><span class="img">未选择镜像</span></div>
+        <div class="card"><input type="checkbox"><span class="name">vendor_boot_a</span><span class="size">96.0 MB</span><span class="chip high">高风险</span><span class="state">等待</span><span class="img">未选择镜像</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="log">
+    <div class="log-status">
+      <div style="font-size:9px;color:var(--muted);font-family:monospace;font-weight:600">DEVICE STATUS</div>
+      <div style="font-size:15px;font-weight:600;margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Fastboot 已连接</div>
+      <div style="display:flex;align-items:center;margin-top:6px;gap:8px">
+        <span class="status-dot"></span><span style="font-size:12px;color:var(--teal);font-weight:600">Fastboot</span>
+      </div>
+      <div style="height:1px;background:var(--edge);margin:11px 0 9px"></div>
+      <div style="font-size:10px;color:var(--muted);font-family:monospace">SN&nbsp;&nbsp;b8d2de49</div>
+      <div style="font-size:10px;color:var(--muted);font-family:monospace;margin-top:6px">OS&nbsp;&nbsp;Android 14&nbsp;&nbsp;BAT&nbsp;&nbsp;87%</div>
+    </div>
+    <div class="log-head"><div style="font-size:9px;color:var(--teal);font-family:monospace;font-weight:600">ACTIVITY LOG</div><div class="t">操作日志</div></div>
+    <div class="log-body">
+      <div class="entry"><div class="meta">21:09:41 · 信息</div>正在通过 Fastboot 读取分区表。</div>
+      <div class="entry"><div class="meta">21:09:42 · 成功</div>分区表已更新，共 135 个分区。</div>
+    </div>
+    <div class="foot">实时记录当前会话的设备操作</div>
+  </div>
+</div>
+</body>
+</html>

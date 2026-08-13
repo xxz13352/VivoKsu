@@ -1,0 +1,4 @@
+This directory ships the offline Android platform-tools runtime used by VivoKsu.
+
+fastboot-rs builds should place fastboot.dll here before publishing.
+Verify shipped file hashes against PLATFORM_TOOLS.SHA256 after packaging.

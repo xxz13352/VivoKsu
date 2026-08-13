@@ -1,0 +1,14 @@
+target/
+**/*.rs.bk
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+.env
+*.env
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

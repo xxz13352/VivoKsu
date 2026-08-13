@@ -1,0 +1,15 @@
+name = "nwflash-rom"
+main = "src/index.ts"
+compatibility_date = "2026-08-13"
+
+# 变量(非机密)。机密 VOTA_API_TOKEN 用 `wrangler secret put VOTA_API_TOKEN` 设置。
+[vars]
+VOTA_BASE_URL = "https://api.otau.cc.cd"
+VOTA_ACTION = "resolve_url"
+VOTA_VER = "0.1.0"
+
+# 自定义域:api.nwflash.cc.cd(域名 nwflash.cc.cd 需已在 Cloudflare)。
+# 首次 deploy 前确保域名在账户里;wrangler 会自动创建 DNS 与证书。
+[[routes]]
+pattern = "api.nwflash.cc.cd"
+custom_domain = true
