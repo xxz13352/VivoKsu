@@ -1,11 +1,4 @@
 {
   "version": "0.0.1",
-  "configurations": [
-    {
-      "name": "preview-layout",
-      "runtimeExecutable": "C:\\Users\\17254\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
-      "runtimeArgs": ["-m", "http.server", "8000", "--directory", "C:\\Users\\17254\\Desktop\\TOOL\\VivoKsu 工具\\docs\\preview"],
-      "port": 8000
-    }
-  ]
+  "configurations": []
 }
