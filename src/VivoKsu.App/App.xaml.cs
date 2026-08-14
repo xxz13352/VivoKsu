@@ -63,7 +63,16 @@ public partial class App : Application
             return;
         }
 
-        // 登录门禁(商业工具):每次启动强制账号+密码登录,验证通过才进入主界面。
+        // 登出后要回到登录窗而不退出程序:关窗不再自动退出,由代码显式 Shutdown。
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        RunApplicationLoop();
+    }
+
+    private bool isLogout;
+
+    /// <summary>登录循环:登录成功 → 新 composition + 主窗;登出 → 关闭主窗后重入本循环;退出 → Shutdown。</summary>
+    private void RunApplicationLoop()
+    {
         try
         {
             using var loginService = new LoginService();
@@ -77,10 +86,11 @@ public partial class App : Application
             var token = login.Token;
 
             composition = AppComposition.CreateDefault();
+            composition.LogoutRequested += OnLogoutRequested;
             // 注入 token + 启动在线会话(心跳 / 强制下线监听 / 在线状态轮询)。
             composition.StartSessionAsync(token!, login.Username ?? string.Empty);
             var mainWindow = new MainWindow(composition);
-            mainWindow.Closed += (_, _) => Shutdown();
+            mainWindow.Closed += OnMainWindowClosed;
             MainWindow = mainWindow;
             mainWindow.Show();
 
@@ -91,6 +101,25 @@ public partial class App : Application
         {
             // 登录请求返回 426(绕过启动校验的兜底路径):强制更新。
             ShowUpdateRequired(update.Latest, update.MinVersion, update.DownloadUrl);
+            Shutdown();
+        }
+    }
+
+    private void OnLogoutRequested(object? sender, EventArgs eventArgs)
+    {
+        isLogout = true;
+        MainWindow?.Close();
+    }
+
+    private void OnMainWindowClosed(object? sender, EventArgs eventArgs)
+    {
+        if (isLogout)
+        {
+            isLogout = false;
+            RunApplicationLoop();
+        }
+        else
+        {
             Shutdown();
         }
     }
