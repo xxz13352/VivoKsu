@@ -75,6 +75,48 @@ public class OtaDownloadServiceTests
     }
 
     [Fact]
+    public void BuildConfiguration_bounds_the_memory_buffer_to_prevent_unbounded_queue_growth()
+    {
+        // 回归:MaximumMemoryBufferBytes<=0 时 bezzad 把缓冲视为无上限,8 分片在网速
+        // 快于磁盘时会无界堆积 1MB 的 Packet 直至 OOM(实测下载 1GB 包峰值内存 6.6GB)。
+        var remote = new RemoteFileInfo { FileSize = 8_340_325_251, SupportsRange = true };
+
+        var config = OtaDownloadService.BuildConfiguration(remote);
+
+        config.MaximumMemoryBufferBytes.Should().BeGreaterThan(0);
+        config.MaximumMemoryBufferBytes.Should().Be(OtaDownloadService.MaxMemoryBufferBytes);
+    }
+
+    [Fact]
+    public void ShouldReportProgress_reports_when_the_interval_has_elapsed()
+    {
+        long last = 0;
+        var e = new DownloadProgressChangedEventArgs("id") { ReceivedBytesSize = 10, TotalBytesToReceive = 100 };
+
+        OtaDownloadService.ShouldReportProgress(ref last, e, 100).Should().BeTrue();
+    }
+
+    [Fact]
+    public void ShouldReportProgress_suppresses_events_within_the_interval()
+    {
+        long last = Environment.TickCount64;
+        var e = new DownloadProgressChangedEventArgs("id") { ReceivedBytesSize = 10, TotalBytesToReceive = 100 };
+
+        // 用极大间隔确保"距上次上报"必然小于阈值,事件被节流。
+        OtaDownloadService.ShouldReportProgress(ref last, e, long.MaxValue).Should().BeFalse();
+    }
+
+    [Fact]
+    public void ShouldReportProgress_always_reports_the_completing_event()
+    {
+        long last = Environment.TickCount64;
+        var completed = new DownloadProgressChangedEventArgs("id") { ReceivedBytesSize = 100, TotalBytesToReceive = 100 };
+
+        // 完成事件(已收 ≥ 总量)不受节流影响,保证最终 100% 进度必定到达界面。
+        OtaDownloadService.ShouldReportProgress(ref last, completed, long.MaxValue).Should().BeTrue();
+    }
+
+    [Fact]
     public void EnsureDiskSpace_throws_when_disk_is_too_small()
     {
         var path = Path.Combine(Path.GetTempPath(), "ota.bin");

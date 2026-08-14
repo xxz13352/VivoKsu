@@ -12,6 +12,12 @@ namespace VivoKsu.App.Services;
 /// </summary>
 public sealed class OtaDownloadService : IDisposable
 {
+    /// <summary>bezzad 分片下载的内存缓冲上限(字节)。必须 >0,否则无界堆积导致 OOM,见 BuildConfiguration 注释。</summary>
+    internal const long MaxMemoryBufferBytes = 256L * 1024 * 1024;
+
+    /// <summary>进度上报最小间隔:高速下载时事件可达每秒上千次,节流后界面按 ~10Hz 刷新。</summary>
+    internal const long ProgressReportIntervalMs = 100;
+
     private readonly int chunkCount;
 
     public OtaDownloadService(int chunkCount = 8)
@@ -45,6 +51,24 @@ public sealed class OtaDownloadService : IDisposable
             e.BytesPerSecondSpeed);
 
     /// <summary>
+    /// 进度节流:下载完成(已收字节 ≥ 总量)必须上报;否则只有距上次上报超过
+    /// <paramref name="minIntervalMs"/> 时才上报并刷新计时,避免高速下载时把
+    /// 数以千计的进度事件灌进 UI 线程队列造成卡死。
+    /// </summary>
+    internal static bool ShouldReportProgress(ref long lastReportTicks, DownloadProgressChangedEventArgs e, long minIntervalMs)
+    {
+        var now = Environment.TickCount64;
+        var isComplete = e.TotalBytesToReceive > 0 && e.ReceivedBytesSize >= e.TotalBytesToReceive;
+        if (!isComplete && now - lastReportTicks < minIntervalMs)
+        {
+            return false;
+        }
+
+        lastReportTicks = now;
+        return true;
+    }
+
+    /// <summary>
     /// 根据服务端信息构建下载配置。
     /// 注意 bezzad 5.9.5 的坑:开 <c>RangeDownload=true</c> 时若不显式设置
     /// <c>RangeHigh</c>,<c>SetRangedSizes</c> 会把 TotalFileSize 算成
@@ -62,10 +86,12 @@ public sealed class OtaDownloadService : IDisposable
             RangeDownload = remote.SupportsRange,
             MinimumSizeOfChunking = 1 << 20, // 小于 1MB 不分片,直接单流
             BufferBlockSize = 1 << 20,
-            // 缓冲无上限(默认 0):下载前已用 EnsureDiskSpace 确认磁盘放得下,
-            // 健康磁盘上 watcher 会持续落盘,内存占用平稳;实测设上限反而会在
-            // 磁盘写入跟不上时触发背压死锁,下载停滞。
-            MaximumMemoryBufferBytes = 0,
+            // 内存缓冲必须有上限:bezzad 的 ConcurrentPacketBuffer 在参数 <=0 时视为
+            // 无上限(BufferSize=long.MaxValue),8 分片在网速快于磁盘写入时会无界堆积
+            // 1MB 的 Packet——实测下载 1GB 包峰值内存冲到 6.6GB,真实 3-6GB OTA 必然
+            // OOM 闪退 + GC 停顿卡死。设 256MB 上限后,队列被背压钳在几百 MB 量级
+            // (与包大小无关),健康磁盘上 watcher 持续落盘,不触发下载停滞。
+            MaximumMemoryBufferBytes = MaxMemoryBufferBytes,
             MaxTryAgainOnFailure = 3,
             FileExistPolicy = FileExistPolicy.Delete,
             ClearPackageOnCompletionWithFailure = true,
@@ -106,7 +132,23 @@ public sealed class OtaDownloadService : IDisposable
 
         // 每次下载新建 DownloadService,避免复用一个实例残留上次的包状态。
         using var service = new DownloadService(BuildConfiguration(remote, chunkCount));
-        var handler = new EventHandler<DownloadProgressChangedEventArgs>((_, e) => progress?.Report(MapProgress(e)));
+
+        // 高速下载时 bezzad 每个 1MB 分片读取都触发一次进度事件(8 分片可达每秒数千次),
+        // 直接经 Progress<T> 转发会把 UI 线程的 Dispatcher 消息队列冲爆,界面卡死。
+        // 按 ~100ms 节流,只在间隔足够或事件已到达总量(下载完成)时上报。
+        long lastProgressReportTicks = 0;
+        var handler = new EventHandler<DownloadProgressChangedEventArgs>((_, e) =>
+        {
+            if (progress is null)
+            {
+                return;
+            }
+
+            if (ShouldReportProgress(ref lastProgressReportTicks, e, ProgressReportIntervalMs))
+            {
+                progress.Report(MapProgress(e));
+            }
+        });
         AsyncCompletedEventArgs? completed = null;
         var completionHandler = new EventHandler<AsyncCompletedEventArgs>((_, e) => completed = e);
         service.DownloadProgressChanged += handler;
