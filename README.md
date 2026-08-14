@@ -182,6 +182,8 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 
 ## 相关文档
 
+> 📚 **项目索引**:[docs/index.md](docs/index.md) —— 所有文档 / 代码 / 服务 / 数据的导航地图,从此出发。
+
 - [docs/architecture.md](docs/architecture.md) —— **项目架构文档**(系统总览 / 桌面端模块 / Worker / D1 / 数据流 / 设计决策)。
 - [docs/safeflash-ota.md](docs/safeflash-ota.md) —— VIVO 线刷(安全刷写)流程、OTA 格式、下载/刷写内部细节与踩坑。
 - [cloudflare/API.md](cloudflare/API.md) —— **api.nwflash.cc.cd 接口契约**(端点、参数、响应、错误码、计费、功能记录)。

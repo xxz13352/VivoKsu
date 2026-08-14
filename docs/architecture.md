@@ -540,6 +540,7 @@ sequenceDiagram
 
 ## 相关文档
 
+- [index.md](index.md) —— **项目索引**(所有文档 / 代码 / 服务 / 数据的导航地图)。
 - [safeflash-ota.md](safeflash-ota.md) —— 安全刷写流程、OTA 格式、下载/刷写内部细节与踩坑。
 - [cloudflare/API.md](../cloudflare/API.md) —— **api.nwflash.cc.cd 接口契约**(端点 / 参数 / 错误码 / 计费 / 功能记录)。
 - [cloudflare/README.md](../cloudflare/README.md) —— Cloudflare Worker 部署说明。
