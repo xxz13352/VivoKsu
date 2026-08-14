@@ -14,6 +14,7 @@ public partial class FileManagerViewModel : ObservableObject
     private readonly AdbFileService files;
     private readonly OperationLogService logs;
     private readonly IOperationCoordinator? coordinator;
+    private readonly Func<string, string, string?>? saveLocationPicker;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(GoUpLocalCommand))]
@@ -45,12 +46,14 @@ public partial class FileManagerViewModel : ObservableObject
         DeviceSessionViewModel session,
         AdbFileService files,
         OperationLogService logs,
-        IOperationCoordinator? coordinator = null)
+        IOperationCoordinator? coordinator = null,
+        Func<string, string, string?>? saveLocationPicker = null)
     {
         this.session = session;
         this.files = files;
         this.logs = logs;
         this.coordinator = coordinator;
+        this.saveLocationPicker = saveLocationPicker;
         RefreshCommand = new AsyncRelayCommand(RefreshAsync, CanUseAdb);
         NavigateLocalCommand = new RelayCommand<DeviceFileEntry?>(NavigateLocal, entry => entry is { IsDirectory: true });
         NavigateRemoteCommand = new AsyncRelayCommand<DeviceFileEntry?>(NavigateRemoteAsync, entry => entry is { IsDirectory: true } && CanUseAdb());
@@ -294,29 +297,64 @@ public partial class FileManagerViewModel : ObservableObject
             return;
         }
 
+        var selected = SelectedRemote;
+        var destination = PickSaveLocation(selected.Name);
+        if (destination is null)
+        {
+            return; // 用户取消保存对话框,不下载。
+        }
+
         if (coordinator is not null)
         {
-            var selected = SelectedRemote;
             await RunCoordinatedAsync(OperationKind.Transferring, $"正在下载 {selected.Name}", async (context, cancellationToken) =>
             {
-                await files.DownloadAsync(session.Serial, selected, CurrentLocalPath, cancellationToken, context);
-                RefreshLocal();
+                await files.DownloadToFileAsync(session.Serial, selected, destination, cancellationToken, context);
+                FollowDownloadedLocation(destination);
             });
             return;
         }
 
-        session.BeginOperation(OperationKind.Transferring, $"正在下载 {SelectedRemote.Name}");
+        session.BeginOperation(OperationKind.Transferring, $"正在下载 {selected.Name}");
         try
         {
-            await files.DownloadAsync(session.Serial, SelectedRemote, CurrentLocalPath, CancellationToken.None);
+            await files.DownloadToFileAsync(session.Serial, selected, destination, CancellationToken.None);
             session.CompleteOperation("文件下载完成");
-            RefreshLocal();
+            FollowDownloadedLocation(destination);
         }
         catch (Exception exception)
         {
             session.FailOperation("文件下载失败");
             logs.Write(OperationLogLevel.Error, exception.Message);
         }
+    }
+
+    private string? PickSaveLocation(string defaultFileName)
+    {
+        if (saveLocationPicker is not null)
+        {
+            return saveLocationPicker(CurrentLocalPath, defaultFileName);
+        }
+
+        var dialog = new SaveFileDialog
+        {
+            FileName = defaultFileName,
+            InitialDirectory = CurrentLocalPath,
+            Filter = "所有文件 (*.*)|*.*",
+            Title = "选择保存位置"
+        };
+        return dialog.ShowDialog() == true ? dialog.FileName : null;
+    }
+
+    private void FollowDownloadedLocation(string destinationFilePath)
+    {
+        var directory = Path.GetDirectoryName(destinationFilePath);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        CurrentLocalPath = directory;
+        RefreshLocal();
     }
 
     private void RequestDelete()

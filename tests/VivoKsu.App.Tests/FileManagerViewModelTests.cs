@@ -248,6 +248,48 @@ public class FileManagerViewModelTests
         Assert.Equal("/sdcard", viewModel.CurrentRemotePath);
     }
 
+    [Fact]
+    public async Task Download_uses_the_injected_save_location_and_follows_the_chosen_directory()
+    {
+        var session = new DeviceSessionViewModel();
+        session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.AdbConnected, "ADB001", "ADB 已连接"));
+        var downloadDir = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(downloadDir);
+        var chosen = Path.Combine(downloadDir, "update.zip");
+        string? pickerInitialDir = null;
+        var viewModel = new FileManagerViewModel(
+            session,
+            new AdbFileService(new FastbootRsBackend(new EmptyNativeApi()), new OperationLogService()),
+            new OperationLogService(),
+            saveLocationPicker: (initialDir, defaultName) => { pickerInitialDir = initialDir; return chosen; });
+        viewModel.CurrentLocalPath = downloadDir;
+        viewModel.SelectedRemote = new DeviceFileEntry("update.zip", "/sdcard/update.zip", false, 1024);
+
+        await viewModel.DownloadCommand.ExecuteAsync(null);
+
+        Assert.Equal(downloadDir, pickerInitialDir);
+        Assert.Equal(downloadDir, viewModel.CurrentLocalPath);
+        Assert.Equal(OperationKind.Completed, session.OperationKind);
+    }
+
+    [Fact]
+    public async Task Download_does_not_download_when_the_save_dialog_is_cancelled()
+    {
+        var session = new DeviceSessionViewModel();
+        session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.AdbConnected, "ADB001", "ADB 已连接"));
+        var viewModel = new FileManagerViewModel(
+            session,
+            new AdbFileService(new FastbootRsBackend(new EmptyNativeApi()), new OperationLogService()),
+            new OperationLogService(),
+            saveLocationPicker: (_, _) => null);
+        viewModel.SelectedRemote = new DeviceFileEntry("update.zip", "/sdcard/update.zip", false, 1024);
+
+        await viewModel.DownloadCommand.ExecuteAsync(null);
+
+        Assert.Equal(OperationKind.Idle, session.OperationKind);
+        Assert.False(session.IsBusy);
+    }
+
     private static FileManagerViewModel CreateViewModel(DeviceSessionViewModel session, IFastbootRsNativeApi native)
     {
         var logs = new OperationLogService();
