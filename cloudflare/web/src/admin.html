@@ -3,129 +3,165 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>nwflash · 固件登记簿</title>
+<meta name="color-scheme" content="dark">
+<title>Nwflash · 控制中心</title>
 <style>
   /* ============================================================
-     nwflash 固件登记簿 —— Nwflash ROM 服务后台
-     一份装订的固件登记簿:机加工纸面 + 发丝刻线 + 单一账簿蓝。
-     设计方向(评审胜出):Firmware Register;融合
-     OKAY/FAIL 协议回显、服务健康带、撕口 token 凭证。
+     NWF 控制中心 —— Nwflash(奶娃Flash) ROM 服务后台
+     黑曜玻璃飞行甲板:深色画布 + 玻璃拟态 + 去饱和青磷光 + 数据仪表。
+     设计方向(3 方向 + 3 对抗评审合成):OBSIDIAN DECK 黑曜仪表台。
+     签名:头带 + 健康带融合为一块连续玻璃仪表台;LEDGER BEAM
+     荧光终端流水;强制下线 = 红色磷光急停。辉光只在非文字层。
      ============================================================ */
   :root{
-    --paper:#E9ECEE;            /* 画布 —— 干爽机加工纸面 */
-    --folio:#FCFDFC;            /* 账页表面(表/表单/读出口) */
-    --lead:#23272E;             /* 主墨 —— 标题、启用条目、主操作 */
-    --grey:#5A636E;             /* 次级文字、表头、说明 */
-    --faint:#626B75;            /* 时间戳、提示(AA:5.2:1 folio / 4.5:1 paper) */
-    --blue:#3E5C74;             /* 唯一强调 —— 激活页签/焦点/LIVE/登记 */
-    --blue-deep:#334F66;        /* 主操作悬停 */
-    --blue-soft:#EDF1F4;        /* 强调淡底 */
-    --green:#4A6B54;            /* OKAY / 启用 */
-    --red:#A23E33;              /* FAIL / 封禁 / 删除 */
-    --red-soft:#F7EBEA;         /* 危险淡底 */
-    --rule:#C9CFD4;             /* 细行线(装饰) */
-    --rule2:#AEB7BE;            /* 模块分隔 */
-    --rule3:#87939D;            /* 结构线/列标尺/表头(≥3:1) */
+    /* 画布与表面 */
+    --bg0:#0A0E16;            /* 画布顶部(垂直渐变到 --bg1) */
+    --bg1:#070A11;            /* 画布底部 */
+    --glass:#141B27;          /* 表面实色回退(玻璃叠于画布之上) */
+    --line:rgba(151,170,193,.14);   /* 发丝细线(装饰) */
+    --line2:rgba(151,170,193,.26);  /* 结构线 */
+    --ctl:rgba(151,170,193,.55);    /* 交互控件描边(合成 ≈3.2:1,WCAG 1.4.11) */
+    /* 文字(全部在真实暗底核算 AA) */
+    --lead:#E8EEF5;           /* 主文字(glass 上 ≈13.7:1) */
+    --grey:#93A2B5;           /* 次级文字(≈6.6:1) */
+    --faint:#7C8B9E;          /* 时间戳/提示(≈5.0:1) */
+    /* 语义色(字形+文字,非纯色) */
+    --blue:#2FD6C8;           /* 唯一强调=去饱和青磷光:激活/焦点/LIVE/链接/OKAY/启用 */
+    --blue-deep:#7BE3D9;      /* 主操作悬停(亮青) */
+    --blue-soft:rgba(47,214,200,.12);
+    --violet:#8F7CF8;         /* 品牌/眉标/页签序号(≈5.5:1 文字安全) */
+    --green:#2FD6C8;          /* OKAY/启用(与强调同色,靠字形+词区分) */
+    --red:#EF6A68;            /* 失败/封禁/删除/强制下线(≈5.9:1) */
+    --red-soft:rgba(239,106,104,.14);
     --display:"Segoe UI Variable","Segoe UI",-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
     --mono:"Cascadia Mono","JetBrains Mono","Cascadia Code",Consolas,"SF Mono",Menlo,monospace;
-    --r:7px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
   html,body{height:100%}
-  body{font-family:var(--display);background:var(--paper);color:var(--lead);-webkit-font-smoothing:antialiased;font-size:14px}
+  body{
+    font-family:var(--display);color:var(--lead);
+    background:
+      radial-gradient(900px 380px at 12% -8%, rgba(47,214,200,.05), transparent 60%),
+      radial-gradient(900px 420px at 90% 110%, rgba(143,124,248,.05), transparent 60%),
+      linear-gradient(180deg,var(--bg0),var(--bg1) 70%);
+    background-attachment:fixed;
+    -webkit-font-smoothing:antialiased;font-size:14px;
+  }
   button{font-family:inherit}
   input,select{font-family:inherit}
   .mono{font-family:var(--mono);font-feature-settings:"tnum"}
+  ::selection{background:rgba(47,214,200,.25)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:rgba(151,170,193,.28);border-radius:5px;border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-track{background:transparent}
 
   a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
 
   /* ---------- 按钮 ---------- */
-  .btn{height:30px;border:1px solid var(--rule3);border-radius:5px;padding:0 12px;background:var(--folio);color:var(--lead);font-size:12.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:background .13s,border-color .13s,color .13s}
-  .btn:hover{background:#F0F3F4;border-color:#6E7A86}
+  .btn{height:30px;border:1px solid var(--ctl);border-radius:6px;padding:0 12px;background:rgba(20,27,39,.7);color:var(--lead);font-size:12.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:background .13s,border-color .13s,color .13s,box-shadow .13s}
+  .btn:hover{border-color:var(--blue);color:var(--blue)}
   .btn:active{transform:translateY(.5px)}
-  .btn-primary{background:var(--blue);border-color:var(--blue);color:#fff}
-  .btn-primary:hover{background:var(--blue-deep);border-color:var(--blue-deep)}
-  .btn-ghost{background:transparent;color:var(--blue);border-color:var(--rule3)}
-  .btn-ghost:hover{background:var(--blue-soft);border-color:#6E7A86}
-  .btn-danger{background:transparent;color:var(--red);border-color:#B06A61}
-  .btn-danger:hover{background:var(--red-soft);border-color:var(--red)}
-  .btn-sm{height:24px;padding:0 8px;font-size:11.5px;border-radius:4px;font-weight:600}
+  .btn-primary{background:var(--blue);border-color:var(--blue);color:#071014;box-shadow:0 0 0 0 rgba(47,214,200,0)}
+  .btn-primary:hover{background:var(--blue-deep);border-color:var(--blue-deep);color:#071014;box-shadow:0 0 14px rgba(47,214,200,.35)}
+  .btn-ghost{background:transparent;color:var(--blue);border-color:var(--ctl)}
+  .btn-ghost:hover{background:var(--blue-soft);border-color:var(--blue)}
+  .btn-danger{background:transparent;color:var(--red);border-color:rgba(239,106,104,.68)}
+  .btn-danger:hover{background:var(--red-soft);border-color:var(--red);box-shadow:0 0 12px rgba(239,106,104,.22)}
+  .btn-sm{height:24px;padding:0 8px;font-size:11.5px;border-radius:5px;font-weight:600}
   .btn-block{width:100%}
-  .btn[disabled]{opacity:.5;cursor:not-allowed}
+  .btn[disabled]{opacity:.45;cursor:not-allowed}
+
+  /* 强制下线 = 红色磷光急停(⟠ 字形 + 文字,非纯色) */
+  .kick{color:var(--red);border-color:rgba(239,106,104,.68);font-weight:600}
+  .kick:hover{background:var(--red);border-color:var(--red);color:#1A0B0B;box-shadow:0 0 16px rgba(239,106,104,.45)}
 
   /* ---------- 输入 ---------- */
   .field{margin-bottom:14px}
   .field label{display:block;font-size:12px;font-weight:600;color:var(--grey);margin-bottom:6px;letter-spacing:.2px}
-  .field input,select{width:100%;height:34px;border:1px solid var(--rule3);border-radius:5px;padding:0 10px;font-size:13px;background:var(--folio);color:var(--lead);outline:none;transition:border-color .13s,box-shadow .13s}
-  .field input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(62,92,116,.13)}
+  .field input,select{width:100%;height:34px;border:1px solid var(--ctl);border-radius:6px;padding:0 10px;font-size:13px;background:rgba(10,14,22,.55);color:var(--lead);transition:border-color .13s,box-shadow .13s}
+  .field input::placeholder,select::placeholder{color:var(--faint)}
+  .field input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(47,214,200,.14)}
   .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
 
   /* ---------- 登录 ---------- */
-  .login{min-height:100vh;display:grid;place-items:center;padding:24px;background:
-      radial-gradient(900px 400px at 50% -10%, rgba(62,92,116,.06), transparent 60%), var(--paper)}
-  .login-card{width:100%;max-width:400px}
-  .login-brand{display:flex;align-items:center;gap:12px;margin-bottom:30px}
-  .brand-mark{width:34px;height:34px;border-radius:7px;background:var(--blue);color:#fff;display:grid;place-items:center;font-family:var(--mono);font-weight:600;font-size:13px;letter-spacing:.5px}
+  .login{min-height:100vh;display:grid;place-items:center;padding:24px;position:relative}
+  .login::before{content:"";position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(560px 320px at 50% 26%, rgba(47,214,200,.08), transparent 65%)}
+  .login-card{width:100%;max-width:400px;position:relative}
+  .login-brand{display:flex;align-items:center;gap:12px;margin-bottom:28px}
+  .brand-mark{width:34px;height:34px;border-radius:8px;background:linear-gradient(135deg,#2FD6C8,#1A8FA7);color:#071014;display:grid;place-items:center;font-family:var(--mono);font-weight:700;font-size:13px;letter-spacing:.5px;box-shadow:0 0 18px rgba(47,214,200,.3)}
   .login-brand .word{font-size:16px;font-weight:700;letter-spacing:.3px}
-  .login-brand .sub{display:block;font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:1px;margin-top:1px}
-  .login-eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:2.5px;color:var(--blue);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
-  .login-eyebrow::before{content:"";width:20px;height:1px;background:var(--blue)}
+  .login-brand .sub{display:block;font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:1.2px;margin-top:2px}
+  .login-eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:2.5px;color:var(--violet);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .login-eyebrow::before{content:"";width:20px;height:1px;background:var(--violet)}
   .login-title{font-size:24px;font-weight:700;margin-bottom:7px}
   .login-sub{color:var(--grey);font-size:13px;line-height:1.65;margin-bottom:26px}
   .login-sub code{font-family:var(--mono);color:var(--blue);background:var(--blue-soft);padding:1px 6px;border-radius:4px;font-size:11.5px}
-  .login-card .panel{background:var(--folio);border:1px solid var(--rule);border-radius:9px;padding:22px 22px 18px;box-shadow:0 1px 2px rgba(35,39,46,.03),0 6px 20px rgba(35,39,46,.05)}
+  .login-card .panel{background:rgba(20,27,39,.72);border:1px solid var(--line2);border-radius:12px;padding:24px 24px 20px;backdrop-filter:blur(8px);position:relative}
+  .login-card .panel::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;border-radius:12px 12px 0 0;background:linear-gradient(90deg,transparent,var(--blue),transparent);opacity:.5}
   .err{color:var(--red);font-size:12.5px;min-height:18px;margin:2px 0 8px}
 
-  /* ---------- 装订头带 ---------- */
-  .bindery{background:var(--folio);border-bottom:1px solid var(--rule3);position:sticky;top:0;z-index:20}
+  /* ---------- 玻璃仪表台(头带 + 健康带融合为一块) ---------- */
+  .deck{position:relative;border-bottom:1px solid var(--line2)}
+  .deck::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;pointer-events:none;z-index:1;
+    background:linear-gradient(90deg,transparent 2%, rgba(47,214,200,.8), rgba(143,124,248,.55) 55%, transparent 98%)}
+  .bindery{background:rgba(13,18,28,.82);backdrop-filter:blur(10px)}
   .bindery-in{max-width:1180px;margin:0 auto;padding:12px 26px;display:flex;align-items:center;gap:18px}
   .bindery .brand{display:flex;align-items:center;gap:11px}
   .bindery .brand .t{font-size:15px;font-weight:700;letter-spacing:.3px}
-  .bindery .brand .s{font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:.8px;margin-top:1px}
+  .bindery .brand .s{font-family:var(--mono);font-size:10.5px;color:var(--violet);letter-spacing:1.2px;margin-top:2px}
   .bindery .env{margin-left:auto;display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11.5px;color:var(--grey)}
-  .bindery .env .sep{width:1px;height:16px;background:var(--rule2)}
+  .bindery .env .sep{width:1px;height:16px;background:var(--line2)}
+  .bindery .env .live{display:inline-flex;align-items:center;gap:5px;color:var(--blue);letter-spacing:1.5px}
+  .bindery .env .live .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);animation:beat 2.4s ease-in-out infinite;box-shadow:0 0 8px rgba(47,214,200,.8)}
   .bindery .who{display:flex;align-items:center;gap:8px}
-  .bindery .who .av{width:24px;height:24px;border-radius:50%;background:var(--blue);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:700}
+  .bindery .who .av{width:24px;height:24px;border-radius:6px;background:linear-gradient(135deg,#2FD6C8,#1A8FA7);color:#071014;display:grid;place-items:center;font-size:11px;font-weight:700}
   .bindery .who .nm{font-size:12.5px;font-weight:600}
   .bindery .who .op{display:flex;gap:6px}
 
-  /* ---------- 页签(登记册索引) ---------- */
-  .tabs{max-width:1180px;margin:0 auto;padding:0 26px;display:flex;gap:4px;overflow-x:auto}
-  .tab{appearance:none;border:none;background:transparent;padding:12px 16px 11px;font-size:13px;font-weight:600;color:var(--grey);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;display:flex;align-items:center;gap:8px;transition:color .13s}
-  .tab:hover{color:var(--lead)}
-  .tab.active{color:var(--blue);border-bottom-color:var(--blue)}
-  .tab .n{font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:1px}
-  .tab .cnt{font-family:var(--mono);font-size:10.5px;color:var(--faint);background:var(--paper);border:1px solid var(--rule);border-radius:8px;padding:1px 6px}
-  .tab .live{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--green)}
-  .tab .live .dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:beat 2.2s ease-in-out infinite}
-  @keyframes beat{0%,100%{opacity:1}50%{opacity:.3}}
-
-  /* ---------- 服务健康带 ---------- */
-  .health{max-width:1180px;margin:0 auto;padding:14px 26px 4px;display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--rule)}
-  .health .cell{padding:2px 16px 12px;border-right:1px solid var(--rule2)}
+  /* 服务健康带(仪表簇):玻璃格 + 读数 + 迷你数据条 */
+  .health{max-width:1180px;margin:0 auto;padding:6px 26px 12px;display:grid;grid-template-columns:repeat(5,1fr);position:relative}
+  .health .cell{padding:8px 16px 10px;border-right:1px solid var(--line);position:relative}
   .health .cell:first-child{padding-left:0}
   .health .cell:last-child{border-right:none}
-  .health .cell .k{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--faint);font-weight:600;margin-bottom:5px;display:flex;align-items:center;gap:6px}
-  .health .cell .v{font-family:var(--mono);font-size:19px;font-weight:600;color:var(--lead);font-feature-settings:"tnum"}
-  .health .cell .v small{font-size:11px;color:var(--faint);font-weight:400;margin-left:3px}
+  .health .cell .k{font-family:var(--mono);font-size:10px;letter-spacing:1.6px;color:var(--faint);font-weight:600;margin-bottom:5px;display:flex;align-items:center;gap:6px}
+  .health .cell .v{font-family:var(--mono);font-size:19px;font-weight:600;color:var(--lead);font-feature-settings:"tnum";display:flex;align-items:baseline;gap:3px}
+  .health .cell .v small{font-size:11px;color:var(--faint);font-weight:400}
   .health .cell.danger .v{color:var(--red)}
-  .health .live-note{font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:1px;display:flex;align-items:center;gap:6px;margin:0 auto;padding-bottom:12px}
+  .health .bar{display:flex;align-items:flex-end;gap:1.5px;height:12px;margin-top:7px}
+  .health .bar i{display:block;background:linear-gradient(180deg,var(--blue),rgba(47,214,200,.25));border-radius:1.5px;flex:1;min-width:1px}
+  .health .bar i.rose{background:linear-gradient(180deg,var(--red),rgba(239,106,104,.25))}
+  .health .bar i.dim{background:rgba(151,170,193,.22)}
+
+  /* ---------- 页签(命令轨,sticky) ---------- */
+  .tabs{position:sticky;top:0;z-index:30;display:flex;gap:2px;overflow-x:auto;background:rgba(10,14,22,.82);backdrop-filter:blur(8px);border-bottom:1px solid var(--line2)}
+  .tabs-in{max-width:1180px;margin:0 auto;padding:0 26px;display:flex;gap:2px;width:100%}
+  .tab{appearance:none;border:none;background:transparent;padding:12px 15px 11px;font-size:13px;font-weight:600;color:var(--grey);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;display:flex;align-items:center;gap:8px;transition:color .13s}
+  .tab:hover{color:var(--lead)}
+  .tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+  .tab .n{font-family:var(--mono);font-size:10px;color:var(--violet);letter-spacing:1px}
+  .tab .cnt{font-family:var(--mono);font-size:10.5px;color:var(--faint);background:rgba(20,27,39,.7);border:1px solid var(--line2);border-radius:8px;padding:1px 6px}
+  .tab .live{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--blue)}
+  .tab .live .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);animation:beat 2.4s ease-in-out infinite;box-shadow:0 0 8px rgba(47,214,200,.8)}
+  @keyframes beat{0%,100%{opacity:1}50%{opacity:.25}}
 
   /* ---------- 主区 ---------- */
   .main{max-width:1180px;margin:0 auto;padding:26px 26px 72px}
   .page-head{margin-bottom:20px}
-  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:2.5px;color:var(--blue);font-weight:600;margin-bottom:9px;display:flex;align-items:center;gap:8px}
-  .eyebrow::before{content:"";width:20px;height:1px;background:var(--blue)}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:2.5px;color:var(--violet);font-weight:600;margin-bottom:9px;display:flex;align-items:center;gap:8px}
+  .eyebrow::before{content:"";width:20px;height:1px;background:var(--violet)}
   .page-title{font-size:23px;font-weight:700;letter-spacing:.2px;margin-bottom:6px}
   .page-desc{color:var(--grey);font-size:13px}
   .page-desc code{font-family:var(--mono);color:var(--blue);font-size:11.5px}
 
-  /* ---------- 面板(账页) ---------- */
-  .panel{background:var(--folio);border:1px solid var(--rule);border-radius:9px;padding:20px 22px;margin-bottom:22px}
+  /* ---------- 玻璃面板 ---------- */
+  .panel{background:rgba(20,27,39,.66);border:1px solid var(--line2);border-radius:11px;padding:20px 22px;margin-bottom:22px;position:relative;backdrop-filter:blur(8px)}
+  .panel::before{content:"";position:absolute;top:0;left:14px;right:14px;height:1px;pointer-events:none;
+    background:linear-gradient(90deg,transparent,rgba(47,214,200,.45),transparent);opacity:.6}
   .panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;gap:12px}
   .panel-title{font-size:13.5px;font-weight:700;display:flex;align-items:center;gap:9px}
-  .panel-title::before{content:"";width:3px;height:14px;background:var(--blue);border-radius:2px}
+  .panel-title::before{content:"";width:3px;height:14px;background:var(--blue);border-radius:2px;box-shadow:0 0 8px rgba(47,214,200,.6)}
   .panel-title .hint{font-family:var(--mono);font-size:10.5px;color:var(--faint);font-weight:400;letter-spacing:.5px}
   .form-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
   .form-row .field{flex:1;min-width:150px;margin-bottom:0}
@@ -136,14 +172,14 @@
   .form-row .field.w-user{flex:0 0 170px}
   .form-row .field.w-note{flex:0 0 150px}
 
-  /* ---------- 登记册表格 ---------- */
+  /* ---------- 表格 ---------- */
   .tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
   table{width:100%;border-collapse:collapse;font-size:13px;min-width:720px}
-  th{text-align:left;color:var(--grey);font-weight:600;font-size:11px;letter-spacing:.6px;padding:8px 12px;border-bottom:1px solid var(--rule3);white-space:nowrap}
+  th{text-align:left;color:var(--grey);font-weight:600;font-size:11px;letter-spacing:.6px;padding:8px 12px;border-bottom:1px solid var(--line2);white-space:nowrap}
   th .mono-lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:1px;color:var(--faint)}
-  td{padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:middle}
+  td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
   tbody tr{transition:background .1s}
-  tbody tr:hover{background:#F3F5F6}
+  tbody tr:hover{background:rgba(47,214,200,.06)}
   tbody tr:last-child td{border-bottom:none}
   td.num{font-family:var(--mono);color:var(--faint);font-size:12px;width:52px}
   td .pn{font-weight:600;letter-spacing:.6px;font-size:13px}
@@ -152,16 +188,16 @@
   td .url-cell{max-width:260px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--blue);vertical-align:middle}
   .ops{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 
-  /* 双墨状态标记(形+色,非纯色) */
+  /* 状态标记(形+色,非纯色) */
   .mark{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;white-space:nowrap}
   .mark .glyph{font-size:11px;line-height:1}
   .mark.on{color:var(--green)}
-  .mark.off{color:var(--grey)}
+  .mark.off{color:var(--faint)}
   .mark.ban{color:var(--red)}
   .mark .sub{font-size:10.5px;color:var(--faint);font-weight:400;font-family:var(--mono)}
 
-  /* 登记册页脚(活结算) */
-  .tally{display:flex;align-items:center;gap:14px;margin-top:14px;padding-top:12px;border-top:1px solid var(--rule2);font-family:var(--mono);font-size:12px;color:var(--grey);flex-wrap:wrap}
+  /* 结算条 */
+  .tally{display:flex;align-items:center;gap:14px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line2);font-family:var(--mono);font-size:12px;color:var(--grey);flex-wrap:wrap}
   .tally b{color:var(--lead);font-weight:600}
   .tally .right{margin-left:auto;color:var(--faint)}
   .tally .right .recent{color:var(--blue)}
@@ -169,52 +205,59 @@
   .empty{color:var(--faint);font-size:13px;text-align:center;padding:30px 10px;font-family:var(--mono)}
   .empty .big{font-size:20px;display:block;margin-bottom:8px;opacity:.6}
 
-  /* 一次性 token 凭证(撕口) */
-  .coupon{margin-top:16px;border:1px dashed var(--rule3);border-radius:7px;background:#F5F7F8;padding:14px 16px;display:none;position:relative}
+  /* 一次性 token 凭证(撕口玻璃条) */
+  .coupon{margin-top:16px;border:1px dashed rgba(47,214,200,.5);border-radius:8px;background:rgba(10,14,22,.5);padding:14px 16px;display:none;position:relative}
   .coupon::after{content:"";position:absolute;left:8px;right:8px;top:-5px;height:7px;background:
-    radial-gradient(circle 3px at 8px 8px, transparent 3px, var(--folio) 3.5px) 0 0/14px 7px repeat-x}
-  .coupon .lbl{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--blue);font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:8px}
-  .coupon .lbl::before{content:"";width:16px;height:1px;background:var(--blue)}
+    radial-gradient(circle 3px at 8px 8px, transparent 3px, #0A0E16 3.5px) 0 0/14px 7px repeat-x}
+  .coupon .lbl{font-family:var(--mono);font-size:10px;letter-spacing:2px;color:var(--violet);font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .coupon .lbl::before{content:"";width:16px;height:1px;background:var(--violet)}
   .coupon .row{display:flex;align-items:center;gap:12px}
-  .coupon .val{font-family:var(--mono);font-size:13px;color:var(--lead);word-break:break-all;line-height:1.5;flex:1;min-width:0}
+  .coupon .val{font-family:var(--mono);font-size:13px;color:var(--blue);word-break:break-all;line-height:1.5;flex:1;min-width:0}
   .coupon .meta{font-size:11px;color:var(--faint);margin-top:6px;font-family:var(--mono)}
 
-  /* ---------- 查询流水(读出口) ---------- */
-  .ledger{background:var(--folio);border:1px solid var(--rule);border-radius:9px;overflow:hidden;margin-bottom:22px}
-  .ledger-head{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid var(--rule2);font-size:13px;font-weight:700}
+  /* ---------- 荧光终端账页(LEDGER BEAM) ---------- */
+  .ledger{background:rgba(13,18,28,.78);border:1px solid var(--line2);border-radius:11px;overflow:hidden;margin-bottom:22px;position:relative;backdrop-filter:blur(8px)}
+  .ledger-head{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line2);font-size:13px;font-weight:700}
   .ledger-head .scope{font-family:var(--mono);font-size:11px;color:var(--faint);font-weight:400;margin-left:auto}
-  .ledger-head .live{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--green);display:inline-flex;align-items:center;gap:5px}
-  .ledger-head .live .dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:beat 2.2s ease-in-out infinite}
-  .ruler{display:flex;gap:10px;padding:7px 20px;border-bottom:1px solid var(--rule);background:#F5F7F8}
+  .ledger-head .live{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;color:var(--blue);display:inline-flex;align-items:center;gap:5px}
+  .ledger-head .live .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);animation:beat 2.4s ease-in-out infinite;box-shadow:0 0 8px rgba(47,214,200,.8)}
+  .ruler{display:flex;gap:10px;padding:7px 20px;border-bottom:1px solid var(--line);background:rgba(10,14,22,.4)}
   .ruler span{font-family:var(--mono);font-size:9.5px;letter-spacing:1px;color:var(--faint);position:relative}
-  .ruler span::after{content:"";position:absolute;left:0;bottom:-7px;width:1px;height:5px;background:var(--rule3)}
-  .term-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-height:440px;overflow-y:auto;min-width:0}
+  .ruler span::after{content:"";position:absolute;left:0;bottom:-7px;width:1px;height:5px;background:rgba(47,214,200,.5)}
+  .term-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-height:440px;overflow-y:auto;min-width:0;position:relative}
   .term-body{padding:6px 0;min-width:860px;font-family:var(--mono);font-size:12.5px}
-  .term-line{display:flex;gap:10px;padding:2.5px 20px;white-space:nowrap}
+  .term-line{display:flex;gap:10px;padding:2.5px 20px;white-space:nowrap;position:relative}
   .term-line .t{flex:0 0 76px;color:var(--faint)}
   .term-line .u{flex:0 0 120px;color:var(--grey);overflow:hidden;text-overflow:ellipsis}
-  .term-line .st{flex:0 0 54px;font-weight:600}
+  .term-line .st{flex:0 0 72px;font-weight:600}
   .term-line .st.ok{color:var(--green)}
   .term-line .st.fail{color:var(--red)}
   .term-line .st.info{color:var(--grey)}
   .term-line .p{flex:0 0 84px;color:var(--lead);font-weight:500}
   .term-line .v{flex:0 0 200px;color:var(--grey);overflow:hidden;text-overflow:ellipsis}
-  .term-line .url{flex:1;min-width:0;color:#5A6B7A;overflow:hidden;text-overflow:ellipsis}
+  .term-line .url{flex:1;min-width:0;color:#7FA3B8;overflow:hidden;text-overflow:ellipsis}
   .term-line .url .arr{color:var(--faint);margin-right:5px}
   .term-line .dur{flex:0 0 76px;color:var(--faint);font-family:var(--mono)}
   .term-line .kind{flex:0 0 120px;color:var(--blue);font-weight:600;overflow:hidden;text-overflow:ellipsis}
-  .term-line:hover{background:#F3F5F6}
+  .term-line:hover{background:rgba(47,214,200,.05)}
   .term-empty{padding:34px;text-align:center;color:var(--faint);font-size:12px;min-width:0}
-  .ledger-foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:13px 20px;border-top:1px solid var(--rule2)}
-  .ledger-foot select,.ledger-foot input{height:30px;border:1px solid var(--rule3);border-radius:5px;padding:0 10px;font-size:12px;font-family:var(--mono);background:var(--folio);color:var(--lead);outline:none}
+  .ledger-foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:13px 20px;border-top:1px solid var(--line2);background:rgba(10,14,22,.4)}
+  .ledger-foot select,.ledger-foot input{height:30px;border:1px solid var(--ctl);border-radius:6px;padding:0 10px;font-size:12px;font-family:var(--mono);background:rgba(10,14,22,.55);color:var(--lead);outline:none}
   .ledger-foot select:focus-visible,.ledger-foot input:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-color:var(--blue)}
   .ledger-foot select{min-width:150px}
   .ledger-foot input{width:150px}
   .ledger-foot .pg{margin-left:auto;display:flex;align-items:center;gap:8px}
   .ledger-foot .pg .info{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
 
-  /* ---------- 协议回显 toast ---------- */
-  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(8px);background:var(--folio);border:1px solid var(--rule3);border-left:3px solid var(--blue);border-radius:7px;padding:10px 18px;font-family:var(--mono);font-size:12.5px;color:var(--lead);display:flex;align-items:center;gap:10px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;box-shadow:0 6px 22px rgba(35,39,46,.10);max-width:min(92vw,720px)}
+  /* 荧光光束:LIVE 账页右侧的「流量在流动」装饰(文字层之下,reduced-motion 冻结) */
+  .beam{position:absolute;top:37px;bottom:44px;right:6px;width:3px;pointer-events:none;opacity:.5;
+    background:linear-gradient(180deg,transparent 0%, rgba(47,214,200,.45) 45%, rgba(47,214,200,.9) 50%, rgba(47,214,200,.45) 55%, transparent 100%);
+    background-size:100% 38%;background-repeat:no-repeat;
+    animation:beamflow 6s linear infinite}
+  @keyframes beamflow{0%{background-position:0 -120%}100%{background-position:0 220%}}
+
+  /* ---------- 协议回显 toast(玻璃 pill) ---------- */
+  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(8px);background:rgba(20,27,39,.88);border:1px solid var(--line2);border-left:3px solid var(--blue);border-radius:9px;padding:11px 18px;font-family:var(--mono);font-size:12.5px;color:var(--lead);display:flex;align-items:center;gap:10px;opacity:0;transition:opacity .18s,transform .18s;pointer-events:none;box-shadow:0 8px 28px rgba(0,0,0,.5),0 0 0 1px rgba(47,214,200,.08);backdrop-filter:blur(10px);max-width:min(92vw,720px);z-index:50}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .toast .p-t{color:var(--faint);flex-shrink:0}
   .toast .p-k{font-weight:600;flex-shrink:0}
@@ -225,22 +268,25 @@
 
   @media (prefers-reduced-motion:reduce){
     *{animation:none!important;transition:none!important}
-    .tab .live .dot,.ledger-head .live .dot{animation:none;opacity:1}
+    .tab .live .dot,.ledger-head .live .dot,.bindery .env .live .dot,.health .cell .v{animation:none;opacity:1;box-shadow:none}
+    .beam{opacity:.22}
   }
   @media (max-width:820px){
     .bindery-in{padding:10px 16px;flex-wrap:wrap;gap:10px}
-    .bindery .env{margin-left:0;order:3;width:100%;justify-content:flex-start;border-top:1px solid var(--rule);padding-top:8px}
+    .bindery .env{margin-left:0;order:3;width:100%;justify-content:flex-start;border-top:1px solid var(--line);padding-top:8px}
     .bindery .who{margin-left:auto}
-    .tabs{padding:0 12px}
-    .health{grid-template-columns:1fr 1fr;padding:12px 16px 0}
-    .health .cell{padding:2px 14px 12px;border-right:1px solid var(--rule2)}
-    .health .cell:nth-child(2){border-right:none}
+    .tabs-in{padding:0 12px}
+    .health{grid-template-columns:1fr 1fr;padding:10px 16px 12px}
+    .health .cell{padding:6px 14px 10px;border-right:1px solid var(--line)}
+    .health .cell:nth-child(2),.health .cell:nth-child(4){border-right:none}
+    .health .cell:nth-child(5){grid-column:1/-1}
     .form-grid{grid-template-columns:1fr}
     .main{padding:20px 16px 64px}
     .panel{padding:16px 16px}
     .form-row .field.w-pd,.form-row .field.w-user,.form-row .field.w-note{flex:1 1 100%}
     .coupon .row{flex-wrap:wrap}
     .ledger-foot .pg{margin-left:0;width:100%;justify-content:flex-end}
+    .beam{display:none}
   }
 </style>
 </head>
@@ -251,15 +297,15 @@
   <div class="login-card">
     <div class="login-brand">
       <div class="brand-mark">NWF</div>
-      <div><div class="word">nwflash · 固件登记簿</div><div class="sub">ROM SERVICE REGISTER</div></div>
+      <div><div class="word">Nwflash · 控制中心</div><div class="sub">ROM SERVICE NOC</div></div>
     </div>
     <div class="panel">
-      <div class="login-eyebrow">SERVICE CONSOLE</div>
+      <div class="login-eyebrow">SECURE CONSOLE</div>
       <h1 class="login-title">服务控制台</h1>
       <p class="login-sub">管理 <code>api.nwflash.cc.cd</code> 的版本、用户与访问日志。<br>请输入管理员凭据。</p>
       <div class="field"><label for="loginUser">管理员账号</label><input id="loginUser" autocomplete="username" placeholder="admin"></div>
       <div class="field"><label for="loginPass">密码</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
-      <div class="err" id="loginErr"></div>
+      <div class="err" id="loginErr" role="alert"></div>
       <button id="loginBtn" class="btn btn-primary btn-block">登录</button>
     </div>
   </div>
@@ -267,52 +313,56 @@
 
 <!-- 应用 -->
 <div id="appView" style="display:none">
-  <!-- 装订头带 -->
-  <header class="bindery">
-    <div class="bindery-in">
-      <div class="brand"><div class="brand-mark">NWF</div><div><div class="t">nwflash</div><div class="s">固件登记簿 · rom control</div></div></div>
-      <div class="env">
-        <span>env:prod</span><span class="sep"></span><span>api.nwflash.cc.cd</span>
-      </div>
-      <div class="who">
-        <div class="av" id="meAv">A</div>
-        <span class="nm" id="meLabel"></span>
-        <div class="op">
-          <button class="btn btn-sm btn-ghost" id="openAccountBtn">改密</button>
-          <button class="btn btn-sm btn-danger" id="logoutBtn">退出</button>
+  <h1 class="sr-only">Nwflash 控制中心</h1>
+  <!-- 玻璃仪表台:头带 + 健康带融合为一块 -->
+  <div class="deck">
+    <header class="bindery">
+      <div class="bindery-in">
+        <div class="brand"><div class="brand-mark">NWF</div><div><div class="t">Nwflash</div><div class="s">奶娃Flash · ROM SERVICE NOC</div></div></div>
+        <div class="env">
+          <span>env:prod</span><span class="sep"></span><span>api.nwflash.cc.cd</span><span class="sep"></span><span class="live"><span class="dot"></span>LIVE</span>
+        </div>
+        <div class="who">
+          <div class="av" id="meAv">A</div>
+          <span class="nm" id="meLabel"></span>
+          <div class="op">
+            <button class="btn btn-sm btn-ghost" id="openAccountBtn">改密</button>
+            <button class="btn btn-sm btn-danger" id="logoutBtn">退出</button>
+          </div>
         </div>
       </div>
+    </header>
+    <!-- 服务健康带(仪表簇) -->
+    <div class="health" id="healthStrip">
+      <div class="cell"><div class="k">NWFLASH 版本</div><div class="v" id="kpiVer">—<small>当前</small></div><div class="bar" id="barVer"></div></div>
+      <div class="cell"><div class="k">API 用户</div><div class="v" id="kpiUsr">—<small>户</small></div><div class="bar" id="barUsr"></div></div>
+      <div class="cell"><div class="k">在线</div><div class="v" id="kpiOnline">—<small>人</small></div><div class="bar" id="barOnline"></div></div>
+      <div class="cell"><div class="k">查询 · 近24h</div><div class="v" id="kpiQry">—<small>次</small></div><div class="bar" id="barQry"></div></div>
+      <div class="cell danger"><div class="k">失败 · 近24h</div><div class="v" id="kpiFail">—<small>次</small></div><div class="bar" id="barFail"></div></div>
     </div>
-  </header>
-
-  <!-- 登记册索引(四页签) -->
-  <nav class="tabs" id="tabList" role="tablist" aria-label="管理页签">
-    <button class="tab active" id="tab-versions" data-tab="versions" role="tab" aria-controls="sec-versions" aria-selected="true" tabindex="0"><span class="n">01</span>版本号控制 <span class="cnt" id="tabCntVer"></span></button>
-    <button class="tab" id="tab-users" data-tab="users" role="tab" aria-controls="sec-users" aria-selected="false" tabindex="-1"><span class="n">02</span>用户管理 <span class="cnt" id="tabCntUsr"></span></button>
-    <button class="tab" id="tab-logs" data-tab="logs" role="tab" aria-controls="sec-logs" aria-selected="false" tabindex="-1"><span class="n">03</span>访问日志 <span class="live"><span class="dot"></span>LIVE</span></button>
-    <button class="tab" id="tab-online" data-tab="online" role="tab" aria-controls="sec-online" aria-selected="false" tabindex="-1"><span class="n">04</span>在线状态 <span class="live"><span class="dot"></span>LIVE</span><span class="cnt" id="tabCntOnline"></span></button>
-    <button class="tab" id="tab-usage" data-tab="usage" role="tab" aria-controls="sec-usage" aria-selected="false" tabindex="-1"><span class="n">05</span>使用日志 <span class="cnt" id="tabCntUsage"></span></button>
-  </nav>
-
-  <!-- 服务健康带(活结算) -->
-  <div class="health" id="healthStrip">
-    <div class="cell"><div class="k">Nwflash 版本</div><div class="v" id="kpiVer">—<small>当前</small></div></div>
-    <div class="cell"><div class="k">API 用户</div><div class="v" id="kpiUsr">—<small>户</small></div></div>
-    <div class="cell"><div class="k">在线</div><div class="v" id="kpiOnline">—<small>人</small></div></div>
-    <div class="cell"><div class="k">查询 · 近 24h</div><div class="v" id="kpiQry">—<small>次</small></div></div>
-    <div class="cell"><div class="k">失败 · 近 24h</div><div class="v danger" id="kpiFail">—<small>次</small></div></div>
   </div>
+
+  <!-- 命令页签轨(sticky) -->
+  <nav class="tabs" id="tabList" role="tablist" aria-label="管理页签">
+    <div class="tabs-in">
+      <button class="tab active" id="tab-versions" data-tab="versions" role="tab" aria-controls="sec-versions" aria-selected="true" tabindex="0"><span class="n">01</span>版本控制 <span class="cnt" id="tabCntVer"></span></button>
+      <button class="tab" id="tab-users" data-tab="users" role="tab" aria-controls="sec-users" aria-selected="false" tabindex="-1"><span class="n">02</span>用户管理 <span class="cnt" id="tabCntUsr"></span></button>
+      <button class="tab" id="tab-logs" data-tab="logs" role="tab" aria-controls="sec-logs" aria-selected="false" tabindex="-1"><span class="n">03</span>访问日志 <span class="live"><span class="dot"></span>LIVE</span></button>
+      <button class="tab" id="tab-online" data-tab="online" role="tab" aria-controls="sec-online" aria-selected="false" tabindex="-1"><span class="n">04</span>在线状态 <span class="live"><span class="dot"></span>LIVE</span><span class="cnt" id="tabCntOnline"></span></button>
+      <button class="tab" id="tab-usage" data-tab="usage" role="tab" aria-controls="sec-usage" aria-selected="false" tabindex="-1"><span class="n">05</span>使用日志 <span class="cnt" id="tabCntUsage"></span></button>
+    </div>
+  </nav>
 
   <main class="main">
     <!-- Nwflash 版本控制 -->
     <section class="page" id="sec-versions" role="tabpanel" aria-labelledby="tab-versions">
       <div class="page-head">
-        <div class="eyebrow">VIVO KSU VERSION</div>
+        <div class="eyebrow">APP VERSION · FORCE UPDATE</div>
         <h2 class="page-title">Nwflash 版本控制</h2>
         <p class="page-desc">控制 Nwflash 客户端版本与强制更新。客户端版本低于「最低版本」→ 服务端 426 拦截;<code>X-Nwflash-Version</code> 每个请求校验。启用的版本中最高者为当前版本。</p>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">登记版本 <span class="hint">· 新版本号 · 最低版本默认 0.0.0</span></span></div>
+        <div class="panel-head"><h3 class="panel-title">登记版本 <span class="hint">· 新版本号 · 最低版本默认 0.0.0</span></h3></div>
         <div class="form-row">
           <div class="field w-pd"><label for="aVer">版本号</label><input id="aVer" placeholder="1.2.0" class="mono"></div>
           <div class="field w-user"><label for="aMin">最低版本</label><input id="aMin" placeholder="1.0.0" class="mono"></div>
@@ -322,7 +372,7 @@
         </div>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">版本登记册 <span class="hint">· release register</span></span></div>
+        <div class="panel-head"><h3 class="panel-title">版本登记册 <span class="hint">· release register</span></h3></div>
         <div class="tbl-scroll">
           <table>
             <thead><tr><th class="mono-lbl">№</th><th>版本</th><th>最低版本</th><th>下载地址</th><th>状态</th><th>登记时间</th><th style="width:170px;text-align:right">操作</th></tr></thead>
@@ -342,7 +392,7 @@
         <p class="page-desc">API 用户持有 token;桌面端凭账号密码登录后以 token 调用接口,日志按用户记录。</p>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">创建 API 用户 <span class="hint">· token 仅显示一次</span></span></div>
+        <div class="panel-head"><h3 class="panel-title">创建 API 用户 <span class="hint">· token 仅显示一次</span></h3></div>
         <div class="form-grid">
           <div class="field"><label for="uUser">登录账号</label><input id="uUser" placeholder="zhangsan" class="mono"></div>
           <div class="field"><label for="uName">显示名称</label><input id="uName" placeholder="张三"></div>
@@ -357,7 +407,7 @@
         </div>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">用户登记簿 <span class="hint">· holder register</span></span></div>
+        <div class="panel-head"><h3 class="panel-title">用户登记簿 <span class="hint">· holder register</span></h3></div>
         <div class="tbl-scroll">
           <table>
             <thead><tr><th>登录账号</th><th>名称</th><th>状态</th><th>备注</th><th>创建</th><th style="width:320px;text-align:right">操作</th></tr></thead>
@@ -368,7 +418,7 @@
       </div>
     </section>
 
-    <!-- 访问日志(读出口) -->
+    <!-- 访问日志(荧光终端) -->
     <section class="page" id="sec-logs" role="tabpanel" aria-labelledby="tab-logs" style="display:none">
       <div class="page-head">
         <div class="eyebrow">ACCESS LOG</div>
@@ -376,18 +426,19 @@
         <p class="page-desc">每次 <code>api.nwflash.cc.cd/api/rom</code> 查询的流水。</p>
       </div>
       <div class="ledger">
-        <div class="ledger-head">
+        <h3 class="ledger-head">
           <span>查询流水</span>
           <span class="scope">query · access.log</span>
           <span class="live"><span class="dot"></span>LIVE</span>
-        </div>
+        </h3>
         <div class="ruler"><span>时间</span><span>用户</span><span>状态</span><span>PD</span><span>版本</span><span>URL</span></div>
         <div class="term-scroll">
+          <div class="beam" aria-hidden="true"></div>
           <div class="term-body" id="termBody"><div class="term-empty">等待日志…</div></div>
         </div>
         <div class="ledger-foot">
-          <select id="logUser"></select>
-          <input id="logPd" placeholder="按 PD 过滤" class="mono">
+          <select id="logUser" aria-label="按用户筛选"></select>
+          <input id="logPd" placeholder="按 PD 过滤" class="mono" aria-label="按 PD 过滤">
           <button id="logRefresh" class="btn btn-sm btn-ghost">刷新</button>
           <div class="pg">
             <button id="logPrev" class="btn btn-sm btn-ghost">‹ 上一页</button>
@@ -406,7 +457,7 @@
         <p class="page-desc">实时查看客户端在线会话与时长。<code>强制下线</code> 后客户端在下一个心跳(≤5s)收到 <code>force_exit</code> 并退出进程;会话行在客户端退出或超时后过期。</p>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">在线会话 <span class="hint">· 最近 2 分钟内活跃</span></span></div>
+        <div class="panel-head"><h3 class="panel-title">在线会话 <span class="hint">· 最近 2 分钟内活跃</span></h3></div>
         <div class="tbl-scroll">
           <table>
             <thead><tr><th>用户</th><th>版本</th><th>IP</th><th>上线时间</th><th>最后心跳</th><th>在线时长</th><th style="width:150px;text-align:right">操作</th></tr></thead>
@@ -426,18 +477,19 @@
         <p class="page-desc">客户端每次用户操作(刷写 / 重启 / 传输 / ROOT…)在运行前经服务端许可;执行后按 <code>operation_kind</code> 分类上传。封禁 / 停用用户在操作前即被拒绝。</p>
       </div>
       <div class="ledger">
-        <div class="ledger-head">
+        <h3 class="ledger-head">
           <span>操作流水</span>
           <span class="scope">usage · 按操作分类</span>
           <span class="live"><span class="dot"></span>LIVE</span>
-        </div>
+        </h3>
         <div class="ruler"><span>时间</span><span>用户</span><span>操作分类</span><span>标题</span><span>状态</span><span>耗时</span></div>
         <div class="term-scroll">
+          <div class="beam" aria-hidden="true"></div>
           <div class="term-body" id="usageBody"><div class="term-empty">等待日志…</div></div>
         </div>
         <div class="ledger-foot">
-          <select id="usageKind"></select>
-          <select id="usageStatus">
+          <select id="usageKind" aria-label="操作分类"></select>
+          <select id="usageStatus" aria-label="状态">
             <option value="">全部状态</option>
             <option value="success">成功</option>
             <option value="failed">失败</option>
@@ -461,16 +513,16 @@
         <p class="page-desc">修改管理员密码。改密后所有会话将退出,需重新登录。</p>
       </div>
       <div class="panel" style="max-width:460px">
-        <div class="panel-title" style="margin-bottom:16px">修改密码</div>
+        <h3 class="panel-title" style="margin-bottom:16px">修改密码</h3>
         <div class="field"><label for="pwNew">新密码(至少 8 位)</label><input id="pwNew" type="password" placeholder="••••••••"></div>
-        <div class="err" id="pwErr"></div>
+        <div class="err" id="pwErr" role="alert"></div>
         <button id="pwSave" class="btn btn-primary">保存密码</button>
       </div>
     </section>
   </main>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" aria-live="polite"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -518,8 +570,7 @@ function showApp() {
   $("loginView").style.display = "none"; $("appView").style.display = "block";
   $("meLabel").textContent = admin || "admin";
   $("meAv").textContent = (admin || "A").charAt(0).toUpperCase();
-  switchTab("versions");
-  loadHealth();
+  switchTab("versions"); // → loadAppVersions → loadHealth(健康带一次拉取)
 }
 
 /* ---------- 登录 / 登出 / 改密 ---------- */
@@ -532,9 +583,11 @@ async function doLogin() {
 }
 $("loginBtn").onclick = doLogin;
 $("loginPass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+$("loginUser").addEventListener("keydown", e => { if (e.key === "Enter") $("loginPass").focus(); });
 $("logoutBtn").onclick = async () => { try { await api("/api/logout", "POST"); } catch (e) { /* 会话已过期则直接回登录页 */ } showLogin(); };
 $("openAccountBtn").onclick = () => {
   currentTab = "";
+  stopOnlinePoll(); // 离开在线页后不再轮询(否则隐藏状态下每 10s 发请求)
   setTabState();
   document.querySelectorAll(".page").forEach(p => p.style.display = "none");
   $("sec-account").style.display = "block";
@@ -571,16 +624,39 @@ function switchTab(tab) {
 }
 document.querySelectorAll(".tab").forEach(n => n.onclick = () => switchTab(n.dataset.tab));
 $("tabList").addEventListener("keydown", (e) => {
-  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") return;
   e.preventDefault();
   const tabs = Array.from(document.querySelectorAll(".tab"));
-  const idx = tabs.findIndex(t => t.dataset.tab === currentTab);
-  const next = (idx + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  let next;
+  if (e.key === "Home") next = 0;
+  else if (e.key === "End") next = tabs.length - 1;
+  else {
+    const idx = tabs.findIndex(t => t.dataset.tab === currentTab);
+    next = (idx + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  }
   tabs[next].focus();
   switchTab(tabs[next].dataset.tab);
 });
 
-/* ---------- 服务健康带 ---------- */
+/* ---------- 服务健康带(仪表簇 + 数据条) ---------- */
+/** 24 桶近 24h 趋势条(真实数据):每桶高度 ∝ 数量。 */
+function trendBars(logs, cutoffMs, nowMs, rose) {
+  const slots = new Array(24).fill(0);
+  const span = Math.max(1, nowMs - cutoffMs);
+  logs.forEach(l => {
+    const t = new Date((l.created_at || "").replace(" ","T") + "Z").getTime();
+    if (isNaN(t) || t < cutoffMs) return;
+    const idx = Math.min(23, Math.max(0, Math.floor((t - cutoffMs) / span * 24)));
+    slots[idx]++;
+  });
+  const max = Math.max(1, ...slots);
+  return slots.map(n => `<i class="${rose ? "rose" : ""}" style="height:${Math.max(2, Math.round(3 + (n / max) * 9))}px"></i>`).join("");
+}
+/** 单条填充条(版本/用户/在线):宽度 ∝ 值/上限。 */
+function fillBar(ratio) {
+  const pct = Math.max(0, Math.min(1, Number(ratio) || 0));
+  return `<i style="height:100%;width:${Math.round(pct * 100)}%;max-width:100%"></i>`;
+}
 async function loadHealth() {
   try {
     const [v, u, onl] = await Promise.all([api("/api/app-versions"), api("/api/users"), api("/api/online")]);
@@ -588,16 +664,24 @@ async function loadHealth() {
     const users = u.users || [];
     const currentVer = versions.filter(x => x.enabled).sort((a, b) => cmpVersion(b.version, a.version))[0];
     $("kpiVer").innerHTML = currentVer ? `${esc(currentVer.version)}<small> 当前</small>` : `<span style="color:var(--faint)">—</span><small>未设置</small>`;
+    $("barVer").innerHTML = currentVer ? fillBar(1) : `<i class="dim" style="height:100%"></i>`;
     $("kpiUsr").innerHTML = `${users.length}<small> 户</small>`;
+    $("barUsr").innerHTML = fillBar(users.length / 200);
     $("kpiOnline").innerHTML = `${onl.count || 0}<small> 在线</small>`;
+    $("barOnline").innerHTML = fillBar((onl.count || 0) / 100);
     $("tabCntVer").textContent = versions.length + " 版";
     $("tabCntUsr").textContent = users.length + " 户";
     $("tabCntOnline").textContent = (onl.count || 0) + " 在线";
+    const usage = await api("/api/usage-logs?limit=1");
+    $("tabCntUsage").textContent = (usage.total || 0) + " 条";
     const logs = (await api("/api/logs?limit=500")).logs || [];
     const cutoff = Date.now() - 24 * 3600 * 1000;
+    const nowMs = Date.now();
     const recent = logs.filter(l => { const t = new Date((l.created_at || "").replace(" ","T") + "Z").getTime(); return !isNaN(t) && t >= cutoff; });
     $("kpiQry").innerHTML = `${recent.length}<small> 次</small>`;
+    $("barQry").innerHTML = trendBars(recent, cutoff, nowMs, false);
     $("kpiFail").innerHTML = `${recent.filter(l => l.status >= 400).length}<small> 次</small>`;
+    $("barFail").innerHTML = trendBars(recent.filter(l => l.status >= 400), cutoff, nowMs, true);
     $("healthStrip").title = "近 24h 统计基于最近 500 条日志,为 best-effort 估算。";
   } catch (e) { /* 静默:健康带不是关键路径 */ }
 }
@@ -754,7 +838,7 @@ async function delUser(id) {
   catch (e) { toast(e.message, "fail"); }
 }
 
-/* ---------- 日志(读出口) ---------- */
+/* ---------- 日志(荧光终端) ---------- */
 let logPage = 0;
 const LOG_PAGE_SIZE = 60;
 async function loadLogs() {
@@ -794,7 +878,7 @@ async function loadLogs() {
     });
     $("logInfo").textContent = "第 " + (logPage + 1) + " 页";
     const sc = body.closest(".term-scroll");
-    sc.scrollTop = sc.scrollHeight;
+    sc.scrollTop = 0; // 行最新在前(ORDER BY id DESC),停在顶部
   } catch (e) { toast(e.message, "fail"); }
 }
 $("logPrev").onclick = () => { if (logPage > 0) { logPage--; loadLogs(); } };
@@ -839,7 +923,7 @@ async function loadOnline() {
         <td><span class="time">${fmtClock(s.last_seen_at)}</span></td>
         <td><span class="ver" style="color:var(--lead)">${fmtDur(s.duration_seconds)}</span></td>
         <td><div class="ops">
-          <button class="btn btn-sm btn-danger" onclick="kickSessionIndex(${i})">强制下线</button>
+          <button class="btn btn-sm kick" onclick="kickSessionIndex(${i})">⟠ 强制下线</button>
         </div></td>
       </tr>`).join("");
     $("onlineTally").innerHTML = `<span>在线 <b>${data.count || 0}</b> 会话</span><span class="right">每 ${ONLINE_POLL_MS / 1000}s 刷新 · 强制下线后客户端 ≤5s 退出</span>`;
