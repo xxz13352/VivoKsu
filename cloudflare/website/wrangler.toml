@@ -1,6 +1,6 @@
 name = "nwflash-site"
 main = "src/index.ts"
-compatibility_date = "2026-08-15"
+compatibility_date = "2026-08-13"
 
 # 让 worker 能把 index.html 当作纯文本导入
 rules = [
