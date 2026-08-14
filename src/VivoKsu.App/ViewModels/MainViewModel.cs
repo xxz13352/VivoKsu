@@ -117,7 +117,11 @@ public partial class MainViewModel : ObservableObject
         Online = online ?? new OnlineViewModel(fallbackOtaClient, new HeartbeatService(fallbackOtaClient));
         Software = software ?? new SoftwareViewModel();
         this.onLogout = onLogout;
-        LogoutCommand = new AsyncRelayCommand(LogoutAsync);
+        LogoutCommand = new AsyncRelayCommand(LogoutAsync, CanLogout);
+        if (coordinator is not null)
+        {
+            coordinator.StateChanged += (_, _) => LogoutCommand.NotifyCanExecuteChanged();
+        }
         // 纯单测环境(无 WPF Application)不启动时钟,避免 DispatcherTimer 泄漏。
         if (Application.Current is not null)
         {
@@ -138,6 +142,9 @@ public partial class MainViewModel : ObservableObject
             await onLogout();
         }
     }
+
+    /// <summary>运行中的操作(刷写/传输等)未结束前禁用登出,避免打断设备操作后仍拆线。</summary>
+    private bool CanLogout() => coordinator is null || !coordinator.IsBusy;
 
     public void StopClock() => clockTimer?.Stop();
 

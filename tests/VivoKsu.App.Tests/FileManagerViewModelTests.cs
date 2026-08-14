@@ -253,7 +253,10 @@ public class FileManagerViewModelTests
     {
         var session = new DeviceSessionViewModel();
         session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.AdbConnected, "ADB001", "ADB 已连接"));
-        var downloadDir = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        var startDir = Path.Combine(root, "start");
+        var downloadDir = Path.Combine(root, "target");
+        Directory.CreateDirectory(startDir);
         Directory.CreateDirectory(downloadDir);
         var chosen = Path.Combine(downloadDir, "update.zip");
         string? pickerInitialDir = null;
@@ -262,12 +265,12 @@ public class FileManagerViewModelTests
             new AdbFileService(new FastbootRsBackend(new EmptyNativeApi()), new OperationLogService()),
             new OperationLogService(),
             saveLocationPicker: (initialDir, defaultName) => { pickerInitialDir = initialDir; return chosen; });
-        viewModel.CurrentLocalPath = downloadDir;
+        viewModel.CurrentLocalPath = startDir;
         viewModel.SelectedRemote = new DeviceFileEntry("update.zip", "/sdcard/update.zip", false, 1024);
 
         await viewModel.DownloadCommand.ExecuteAsync(null);
 
-        Assert.Equal(downloadDir, pickerInitialDir);
+        Assert.Equal(startDir, pickerInitialDir);
         Assert.Equal(downloadDir, viewModel.CurrentLocalPath);
         Assert.Equal(OperationKind.Completed, session.OperationKind);
     }

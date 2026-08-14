@@ -86,6 +86,33 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public async Task LogoutCommand_is_disabled_while_the_coordinator_is_busy()
+    {
+        var session = new DeviceSessionViewModel();
+        var coordinator = new OperationCoordinator(session, new OperationLogService());
+        var viewModel = new MainViewModel(session, coordinator: coordinator);
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        // RunAsync 会同步进入操作体直到首个真正的挂起点,而操作体会阻塞等待 release;
+        // 需在后台线程跑协调器,让断言线程得以检查命令可用性。
+        var run = Task.Run(async () =>
+            await coordinator.RunAsync(OperationKind.Flashing, "test", async (_, _) =>
+            {
+                started.Set();
+                release.Wait(TimeSpan.FromSeconds(5));
+                await Task.CompletedTask;
+            }));
+
+        Assert.True(started.Wait(TimeSpan.FromSeconds(5)));
+        Assert.False(viewModel.LogoutCommand.CanExecute(null));
+
+        release.Set();
+        await run;
+
+        Assert.True(viewModel.LogoutCommand.CanExecute(null));
+    }
+
+    [Fact]
     public void AccountName_is_settable()
     {
         var viewModel = new MainViewModel(new DeviceSessionViewModel());

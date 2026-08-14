@@ -38,7 +38,7 @@ Nwflash 是**商业付费工具**:
 - **CommunityToolkit.Mvvm** 8.4 —— `[ObservableProperty]` / `[RelayCommand]`
 - **HandyControl** 3.5.1 —— UI 控件库
 - **SharpCompress** 0.37.2、**ZstdSharp.Port** 0.8.1 —— 压缩 / zstd 解压
-- **xunit** + **FluentAssertions** —— 单元测试(当前 **253** 个应用用例 + **8** 个服务端用例全绿)
+- **xunit** + **FluentAssertions** —— 单元测试(当前 **350** 个应用用例全绿)
 
 ## 目录结构
 

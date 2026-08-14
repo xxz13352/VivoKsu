@@ -1504,6 +1504,7 @@
                         <Condition Binding="{Binding SafeFlash.IsBusy}" Value="False"/>
                         <Condition Binding="{Binding FirmwareExtract.IsPayloadBusy}" Value="False"/>
                         <Condition Binding="{Binding DeviceSession.IsBusy}" Value="False"/>
+                        <Condition Binding="{Binding PartitionWorkspace.IsRefreshing}" Value="False"/>
                       </MultiDataTrigger.Conditions>
                       <Setter Property="Visibility" Value="Visible"/>
                     </MultiDataTrigger>

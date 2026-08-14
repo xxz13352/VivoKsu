@@ -119,11 +119,14 @@ public class AdbFileServiceTests
     public async Task DownloadToFileAsync_rejects_unsafe_device_file_names(string remoteName)
     {
         var destination = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"), remoteName);
-        var service = new AdbFileService(new FastbootRsBackend(new FileNativeApi()), new OperationLogService());
+        var native = new FileNativeApi();
+        var service = new AdbFileService(new FastbootRsBackend(native), new OperationLogService());
         var remoteFile = new DeviceFileEntry(remoteName, $"/sdcard/{remoteName}", false, 1);
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
             service.DownloadToFileAsync("RF8", remoteFile, destination, CancellationToken.None));
+
+        Assert.False(native.PullCalled);
     }
 
     private sealed class FileNativeApi : IFastbootRsNativeApi
