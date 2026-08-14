@@ -5,7 +5,9 @@
 
 ## 一、这是什么
 
-**奶娃Flash(代码名 NWflash)** —— Vivo 手机刷机 / Root 商业付费工具。Windows WPF 桌面应用(.NET 8)+ **100% Cloudflare 托管后端**(Workers + D1,零自有服务器)。**客户端统一显示「奶娃Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**。
+**奶娃Flash(代码名 NWflash)** —— Vivo 手机刷机 / Root 商业付费工具。Windows WPF 桌面应用(.NET 8)+ **100% Cloudflare 托管后端**(Workers + D1,零自有服务器)。
+
+> **命名约定**:客户端 UI 统一显示 **「奶娃Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**,域名 `nwflash.cc.cd`,API 版本头 `X-Nwflash-Version`。详见 [架构文档 §命名约定](architecture.md#命名约定2026-08-14定稿)。
 
 - 桌面端启动**强制登录**(账号由后台创建),登录后即可使用,不对用户扣点 / 限次。
 - 拿 ROM 链路:`api.nwflash.cc.cd`(Worker)持 VOTA 凭据 → 版本授权校验 → 返回 OTA 直链 → 桌面端下载解包刷写。
