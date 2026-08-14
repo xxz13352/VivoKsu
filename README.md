@@ -61,8 +61,6 @@ VivoKsu 工具/
 │  ├─ Publish-Release.ps1           # 一键发布 self-contained 版本
 │  ├─ Ensure-Scrcpy.ps1             # 发布前自动获取 scrcpy
 │  └─ verify-*.ps1                  # UI 自动化验证脚本(启动→UIA 导航→截图)
-├─ docs/superpowers/                # 设计与计划文档
-└─ third_party/                     # fastboot-rs 源码参考
 ```
 
 ## 架构与关键设计

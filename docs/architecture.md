@@ -107,7 +107,6 @@ VivoKsu 工具/
 │  ├─ Ensure-Scrcpy.ps1             # 发布前自动获取 scrcpy
 │  └─ verify-*.ps1                  # UI 自动化验证脚本(UIA 导航 + 截图像素采样)
 ├─ docs/                            # architecture.md(本文) / safeflash-ota.md
-└─ third_party/                     # fastboot-rs 源码参考(fastboot_flash 错误码来源)
 ```
 
 ---

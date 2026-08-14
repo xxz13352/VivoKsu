@@ -23,7 +23,6 @@
 | **后台文档** | `web.nwflash.cc.cd`「固件登记簿」界面、安全、部署、功能记录 | [../cloudflare/web/README.md](../cloudflare/web/README.md) |
 | **线刷文档** | VIVO 安全刷写流程、三种 OTA 格式、下载 / 解包 / 刷写细节 | [safeflash-ota.md](safeflash-ota.md) |
 | **Worker 部署** | `cloudflare/` 部署、机密、变量 | [../cloudflare/README.md](../cloudflare/README.md) |
-| 设计与计划 | 早期 UI 设计 / 计划草稿(历史) | [superpowers/](superpowers/) |
 
 ## 三、代码地图
 
