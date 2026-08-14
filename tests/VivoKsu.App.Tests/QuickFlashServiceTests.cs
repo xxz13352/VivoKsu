@@ -55,6 +55,30 @@ public class QuickFlashServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task FlashImagesAsync_matches_a_fastbootd_device_when_target_is_fastbootd()
+    {
+        // VIVO 刷写目标为 fastbootd:仅当设备 getvar is-userspace=yes(userspace fastboot)
+        // 时匹配,避免误连 bootloader 模式的 fastboot 设备。
+        await File.WriteAllBytesAsync(imagePath, [0x01]);
+        var fake = new FakeFastbootCliRunner
+        {
+            GetVarHandler = variable => variable == "is-userspace" ? "yes" : string.Empty
+        };
+        var service = CreateService(fake);
+        var session = new DeviceSessionViewModel();
+
+        await service.FlashImagesAsync(
+            session,
+            [new(QuickFlashPartition.Boot, new FlashImageInfo(imagePath, 1))],
+            new(FastbootTarget.Fastbootd, true, false, false, true),
+            CancellationToken.None);
+
+        Assert.Equal([("FAST123", "boot", imagePath)], fake.FlashRequests);
+        Assert.Contains("FAST123", fake.Rebooted);
+        Assert.Equal(OperationKind.Completed, session.OperationKind);
+    }
+
+    [Fact]
     public async Task FlashAsync_marks_the_device_session_as_canceled_when_waiting_is_cancelled()
     {
         await File.WriteAllBytesAsync(imagePath, [0x01]);

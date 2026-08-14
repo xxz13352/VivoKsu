@@ -10,6 +10,9 @@ namespace VivoKsu.App.ViewModels;
 
 public partial class RootViewModel : ObservableObject
 {
+    /// <summary>全自动 ROOT 等待设备进入 fastboot 的超时;Root 页没有手动取消入口,必须有时限。</summary>
+    private static readonly TimeSpan FastbootWaitTimeout = TimeSpan.FromSeconds(180);
+
     private readonly DeviceSessionViewModel session;
     private readonly QuickFlashService imageInspector;
     private readonly OperationLogService logs;
@@ -81,6 +84,12 @@ public partial class RootViewModel : ObservableObject
         InstallManagerCommand = new AsyncRelayCommand(InstallManagerAsync, CanInstallManager);
         ResolveKmiCommand = new AsyncRelayCommand(ResolveKmiAsync, CanResolveKmi);
         RunAutomaticRootCommand = new AsyncRelayCommand(RunAutomaticRootAsync, CanRunAutomaticRoot);
+        StopCommand = new RelayCommand(Stop, CanStop);
+        if (coordinator is not null)
+        {
+            coordinator.StateChanged += OnCoordinatorStateChanged;
+        }
+
         session.PropertyChanged += OnSessionPropertyChanged;
     }
 
@@ -100,7 +109,19 @@ public partial class RootViewModel : ObservableObject
 
     public IAsyncRelayCommand RunAutomaticRootCommand { get; }
 
+    public IRelayCommand StopCommand { get; }
+
     public IOperationCoordinator? Coordinator => coordinator;
+
+    private bool CanStop() => coordinator?.IsBusy == true;
+
+    private void Stop()
+    {
+        // 全自动 ROOT 等待 fastboot / 刷写期间,用户可从此页取消,释放 operationGate。
+        coordinator?.CancelCurrent();
+    }
+
+    private void OnCoordinatorStateChanged(object? sender, EventArgs eventArgs) => StopCommand.NotifyCanExecuteChanged();
 
     public IReadOnlyList<string> KmiOptions => VivoRootResourceService.SupportedKmis;
 
@@ -555,11 +576,14 @@ public partial class RootViewModel : ObservableObject
                     await PatchImagesCoreAsync(cancellationToken, context);
 
                     var images = BuildRootFlashImages();
-                    context.ReportStage("ROOT 自动流程: 正在重启至 bootloader", OperationKind.Rebooting);
-                    await backend.RebootAsync(session.Serial, "bootloader", cancellationToken);
+                    // VIVO root 必须进 fastbootd(adb reboot fastboot),bootloader 模式刷不了启动分区。
+                    context.ReportStage("ROOT 自动流程: 正在重启至 fastbootd", OperationKind.Rebooting);
+                    await backend.RebootAsync(session.Serial, "fastboot", cancellationToken);
 
                     context.ReportStage("ROOT 自动流程: 正在等待并刷写 ROOT 镜像", OperationKind.Flashing);
-                    await imageInspector.FlashRootImagesAsync(session, images, FastbootTarget.Fastboot, cancellationToken, context);
+                    await imageInspector.FlashRootImagesAsync(
+                        session, images, FastbootTarget.Fastbootd, cancellationToken, context,
+                        waitTimeout: FastbootWaitTimeout, expectedSerial: session.Serial);
                 });
             }
             finally
@@ -582,10 +606,12 @@ public partial class RootViewModel : ObservableObject
 
             var images = BuildRootFlashImages();
 
-            session.BeginOperation(OperationKind.Rebooting, "ROOT 自动流程: 正在重启至 bootloader");
-            logs.Write(OperationLogLevel.Info, "ROOT 自动流程正在重启设备至 bootloader。 ");
-            await backend.RebootAsync(session.Serial, "bootloader", CancellationToken.None);
-            await imageInspector.FlashRootImagesAsync(session, images, FastbootTarget.Fastboot, CancellationToken.None);
+            session.BeginOperation(OperationKind.Rebooting, "ROOT 自动流程: 正在重启至 fastbootd");
+            logs.Write(OperationLogLevel.Info, "ROOT 自动流程正在重启设备至 fastbootd。 ");
+            await backend.RebootAsync(session.Serial, "fastboot", CancellationToken.None);
+            await imageInspector.FlashRootImagesAsync(
+                session, images, FastbootTarget.Fastbootd, CancellationToken.None,
+                waitTimeout: FastbootWaitTimeout, expectedSerial: session.Serial);
         }
         catch (Exception exception)
         {

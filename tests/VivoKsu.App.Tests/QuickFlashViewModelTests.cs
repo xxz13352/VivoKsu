@@ -158,6 +158,19 @@ public class QuickFlashViewModelTests
     }
 
     [Fact]
+    public void Confirmed_plans_always_target_fastbootd()
+    {
+        // VIVO 刷写一律 fastbootd:VM 不再暴露 Fastboot/bootloader 选择,
+        // 批量与单分区生成的计划都必须恒定 Fastbootd。
+        var viewModel = CreateViewModel();
+        Find(viewModel, QuickFlashPartition.Boot).SelectedImage = new("C:\\images\\boot.img", 10);
+
+        viewModel.RequestBatchFlashCommand.Execute(null);
+
+        Assert.Equal(FastbootTarget.Fastbootd, viewModel.PendingPlan!.Options.Target);
+    }
+
+    [Fact]
     public void Confirmation_summary_describes_the_frozen_dual_slot_plan()
     {
         var viewModel = CreateViewModel();
@@ -205,7 +218,11 @@ public class QuickFlashViewModelTests
         var logs = new OperationLogService();
         var session = new DeviceSessionViewModel();
         var native = new RecordingFlashNativeApi();
-        var fake = new FakeFastbootCliRunner();
+        // 快速刷写目标为 fastbootd:等待目标匹配读 cliRunner.getvar is-userspace,须返回 "yes"。
+        var fake = new FakeFastbootCliRunner
+        {
+            GetVarHandler = variable => variable == "is-userspace" ? "yes" : string.Empty
+        };
         var viewModel = new QuickFlashViewModel(
             session,
             new QuickFlashService(new FastbootRsBackend(native), fake, logs),

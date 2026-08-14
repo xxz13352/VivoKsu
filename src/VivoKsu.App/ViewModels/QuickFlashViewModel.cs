@@ -9,6 +9,8 @@ using VivoKsu.App.Services;
 
 namespace VivoKsu.App.ViewModels;
 
+/// <summary>快速刷写:预设分区选择镜像后按 fastbootd 刷入(完成可选自动重启/双槽)。</summary>
+/// <remarks>VIVO 刷写一律在 fastbootd(userspace fastboot)进行,不再提供 Fastboot/bootloader 选择。</remarks>
 public partial class QuickFlashViewModel : ObservableObject
 {
     private readonly DeviceSessionViewModel session;
@@ -19,9 +21,6 @@ public partial class QuickFlashViewModel : ObservableObject
 
     [ObservableProperty]
     private QuickFlashPartition selectedPartition = QuickFlashPartition.Boot;
-
-    [ObservableProperty]
-    private FastbootTarget selectedTarget = FastbootTarget.Fastboot;
 
     // Retained for existing ROOT handoff callers while the quick-flash UI uses Presets.
     [ObservableProperty]
@@ -100,7 +99,9 @@ public partial class QuickFlashViewModel : ObservableObject
         RequestBatchFlashCommand = new RelayCommand(RequestBatchFlash, CanRequestBatchFlash);
         ConfirmFlashCommand = new AsyncRelayCommand(ConfirmFlashAsync, CanConfirmFlash);
         CancelFlashCommand = new RelayCommand(CancelConfirmation);
-        CancelActiveFlashCommand = new RelayCommand(CancelActiveFlash, () => IsFlashOperationActive);
+        CancelActiveFlashCommand = new RelayCommand(
+            CancelActiveFlash,
+            () => IsFlashOperationActive || coordinator?.IsBusy == true);
     }
 
     public IAsyncRelayCommand BrowseImageCommand { get; }
@@ -141,7 +142,6 @@ public partial class QuickFlashViewModel : ObservableObject
         SelectedPartition = partition;
         SelectedImage = image;
         Presets.Single(item => item.Partition == partition).SelectedImage = image;
-        SelectedTarget = FastbootTarget.Fastboot;
         PendingPlan = null;
         IsConfirmationVisible = false;
     }
@@ -298,7 +298,9 @@ public partial class QuickFlashViewModel : ObservableObject
         return new QuickFlashExecutionPlan(
             requests,
             new QuickFlashOptions(
-                SelectedTarget,
+                // VIVO 刷写一律走 fastbootd(userspace fastboot),bootloader 模式刷不了
+                // init_boot/vendor_boot 等分区;不向用户提供选择。
+                FastbootTarget.Fastbootd,
                 WaitForDevice,
                 FlashBothSlots,
                 SwitchSlotAfterFlash,
@@ -376,7 +378,7 @@ public partial class QuickFlashViewModel : ObservableObject
 
         return new QuickFlashExecutionPlan(
             [new QuickFlashRequest(SelectedPartition, SelectedImage)],
-            new QuickFlashOptions(SelectedTarget, WaitForDevice, FlashBothSlots, SwitchSlotAfterFlash, AutoReboot));
+            new QuickFlashOptions(FastbootTarget.Fastbootd, WaitForDevice, FlashBothSlots, SwitchSlotAfterFlash, AutoReboot));
     }
 
     private void CancelConfirmation()

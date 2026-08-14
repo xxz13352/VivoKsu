@@ -144,7 +144,12 @@ public sealed class RootViewModelTests
         var native = new AutomaticRootNativeApi();
         var backend = new FastbootRsBackend(native);
         var coordinator = new OperationCoordinator(session, logs);
-        var fake = new FakeFastbootCliRunner();
+        var fake = new FakeFastbootCliRunner
+        {
+            // VIVO root 走 fastbootd:等待目标匹配读的是 cliRunner.getvar is-userspace,
+            // 必须是 "yes"(userspace fastboot)设备才能刷写。
+            GetVarHandler = variable => variable == "is-userspace" ? "yes" : string.Empty
+        };
         var artifacts = new RootPatchArtifactService(() => directory);
         var root = new RootViewModel(
             session,
@@ -162,7 +167,7 @@ public sealed class RootViewModelTests
         {
             await root.RunAutomaticRootCommand.ExecuteAsync(null);
 
-            Assert.Contains(("ADB123", "bootloader"), native.Reboots);
+            Assert.Contains(("ADB123", "fastboot"), native.Reboots);
             Assert.Contains(
                 ("ADB123", "init_boot", Path.Combine(directory, RootPatchArtifactService.OutputFolderName, "init_boot_vivoksu_patched.img")),
                 fake.FlashRequests);
@@ -232,7 +237,7 @@ public sealed class RootViewModelTests
         public void Reboot(string? serial, string target)
         {
             Reboots.Add((serial ?? string.Empty, target));
-            if (target == "bootloader")
+            if (target == "fastboot")
             {
                 isFastboot = true;
             }

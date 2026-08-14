@@ -484,7 +484,7 @@
           <StackPanel>
             <TextBlock Text="FLASH / PRESET" Style="{StaticResource PageEyebrowStyle}"/>
             <TextBlock Text="快速刷写" Style="{StaticResource PageTitleStyle}"/>
-            <TextBlock Text="受控分区写入，完成后自动重启设备" Style="{StaticResource PageSubtitleStyle}"/>
+            <TextBlock Text="fastbootd 受控分区写入，完成后自动重启设备" Style="{StaticResource PageSubtitleStyle}"/>
           </StackPanel>
           <Border Grid.Column="1" Style="{StaticResource StatusChipStyle}" VerticalAlignment="Bottom">
             <StackPanel Orientation="Horizontal"><Ellipse Width="7" Height="7" Fill="{Binding DeviceSession.ConnectionAccentBrush}" Margin="0,4,8,0"/><TextBlock Text="{Binding DeviceSession.ConnectionLabel}" FontSize="11" Foreground="{Binding DeviceSession.ConnectionAccentBrush}"/></StackPanel>
@@ -501,7 +501,6 @@
               <Grid>
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width="Auto"/>
-                  <ColumnDefinition Width="138"/>
                   <ColumnDefinition Width="Auto"/>
                   <ColumnDefinition Width="Auto"/>
                   <ColumnDefinition Width="Auto"/>
@@ -510,15 +509,11 @@
                   <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <Button Content="开始刷入" Style="{StaticResource SignalButtonStyle}" Command="{Binding QuickFlash.RequestBatchFlashCommand}" Margin="0,0,12,0" Padding="18,9" VerticalAlignment="Center"/>
-                <ComboBox Grid.Column="1" Height="38" Style="{StaticResource SelectBoxStyle}" SelectedValuePath="Tag" SelectedValue="{Binding QuickFlash.SelectedTarget, Mode=TwoWay}" VerticalAlignment="Center">
-                  <ComboBoxItem Content="Fastboot" Tag="{x:Static models:FastbootTarget.Fastboot}"/>
-                  <ComboBoxItem Content="fastbootd" Tag="{x:Static models:FastbootTarget.Fastbootd}"/>
-                </ComboBox>
-                <CheckBox Grid.Column="2" Content="自动重启" IsChecked="{Binding QuickFlash.AutoReboot, Mode=TwoWay}" Margin="16,0,0,0" VerticalAlignment="Center" FontSize="11"/>
-                <CheckBox Grid.Column="3" Content="等待 FB 设备" IsChecked="{Binding QuickFlash.WaitForDevice, Mode=TwoWay}" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="11"/>
-                <CheckBox Grid.Column="4" Content="双刷入双槽" IsChecked="{Binding QuickFlash.FlashBothSlots, Mode=TwoWay}" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="11"/>
-                <CheckBox Grid.Column="5" Content="刷完切槽" IsChecked="{Binding QuickFlash.SwitchSlotAfterFlash, Mode=TwoWay}" IsEnabled="{Binding QuickFlash.CanSwitchSlotAfterFlash}" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="11"/>
-                <Button Grid.Column="7" Content="取消当前操作" Style="{StaticResource ToolButtonStyle}" Command="{Binding QuickFlash.CancelActiveFlashCommand}" Visibility="{Binding QuickFlash.IsFlashOperationActive, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="12,0,0,0" Padding="12,8" VerticalAlignment="Center"/>
+                <CheckBox Grid.Column="1" Content="自动重启" IsChecked="{Binding QuickFlash.AutoReboot, Mode=TwoWay}" Margin="16,0,0,0" VerticalAlignment="Center" FontSize="11"/>
+                <CheckBox Grid.Column="2" Content="等待 FB 设备" IsChecked="{Binding QuickFlash.WaitForDevice, Mode=TwoWay}" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="11"/>
+                <CheckBox Grid.Column="3" Content="双刷入双槽" IsChecked="{Binding QuickFlash.FlashBothSlots, Mode=TwoWay}" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="11"/>
+                <CheckBox Grid.Column="4" Content="刷完切槽" IsChecked="{Binding QuickFlash.SwitchSlotAfterFlash, Mode=TwoWay}" IsEnabled="{Binding QuickFlash.CanSwitchSlotAfterFlash}" Margin="14,0,0,0" VerticalAlignment="Center" FontSize="11"/>
+                <Button Grid.Column="6" Content="取消当前操作" Style="{StaticResource ToolButtonStyle}" Command="{Binding QuickFlash.CancelActiveFlashCommand}" Visibility="{Binding QuickFlash.IsFlashOperationActive, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="12,0,0,0" Padding="12,8" VerticalAlignment="Center"/>
               </Grid>
             </Border>
             <ItemsControl Grid.Row="1" ItemsSource="{Binding QuickFlash.Presets}" Margin="20,14,8,14">
@@ -827,7 +822,7 @@
                   </Button>
                 </StackPanel>
               </Grid>
-              <TextBlock Text="全自动 ROOT 会安装管理器、修补镜像、重启至 bootloader、等待 fastboot、按序刷写并自动重启；官版 KernelSU 会额外处理 vendor_boot。" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+              <TextBlock Text="全自动 ROOT 会安装管理器、修补镜像、重启至 fastbootd、等待 fastbootd、按序刷写并自动重启；官版 KernelSU 会额外处理 vendor_boot。" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" TextWrapping="Wrap"/>
             </StackPanel>
           </Grid>
         </Border>
