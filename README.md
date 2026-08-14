@@ -52,11 +52,9 @@ VivoKsu 工具/
 │  │  ├─ platform-tools/            # adb / fastboot
 │  │  ├─ root-tools/                # magiskboot.so
 │  │  └─ scrcpy/                    # scrcpy(发布时由脚本自动补齐)
-│  └─ VivoKsu.Server/               # 旧 .NET 服务端(已由 Cloudflare Worker 取代,作本地回退)
 ├─ cloudflare/                      # Cloudflare Worker:VivoKsu ROM 代理(api.nwflash.cc.cd)
 ├─ tests/
-│  ├─ VivoKsu.App.Tests/            # 桌面应用单元测试
-│  └─ VivoKsu.Server.Tests/         # 服务端单元与端到端测试
+│  └─ VivoKsu.App.Tests/            # 桌面应用单元测试
 ├─ scripts/
 │  ├─ Publish-Release.ps1           # 一键发布 self-contained 版本
 │  ├─ Ensure-Scrcpy.ps1             # 发布前自动获取 scrcpy
@@ -131,11 +129,11 @@ npx wrangler secret put VOTA_API_TOKEN   # 粘贴 VOTA 的 API Token(机密,不�
 npx wrangler deploy                   # 部署并绑定自定义域 api.nwflash.cc.cd
 ```
 
-**错误映射**(与 .NET 版一致):`NOT_FOUND`/`not found`→404、`AUTH_FAIL`→401、`INSUFFICIENT_CREDITS`→402、`FORBIDDEN`→403、`RATE_LIMITED`→429、其它→502。
+**错误映射**:`NOT_FOUND`/`not found`→404、`AUTH_FAIL`→401、`INSUFFICIENT_CREDITS`→402、`FORBIDDEN`→403、`RATE_LIMITED`→429、其它→502。
 
 **已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁,均已在 Cloudflare 上。**商业模型**:账号授权制 —— 登录即用,不对用户按次扣点 / 限制次数;上游 VOTA 信用点为运营方成本。
 
-**旧 .NET 服务端**(`src/VivoKsu.Server/`)已由 Worker 取代,保留作本地开发回退(无凭据时返回演示链接);真实 token 已从配置移除,只存在 Worker 机密里。
+> 早期自建 .NET 服务端(`src/VivoKsu.Server/`)已整体删除 —— 线上后端 100% 跑在 Cloudflare Workers(仅支持 JavaScript/TypeScript)+ D1,桌面端直连 `api.nwflash.cc.cd`;VOTA 凭据只存在 Worker 机密里,不再有自托管代码。
 
 ## 构建与测试
 

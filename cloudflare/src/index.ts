@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker —— Vivo ROM OTA 链接代理。
- * 复刻原 VivoKsu.Server 的接口:桌面应用带 PD + 版本号查询,服务端(Worker)持 VOTA 凭据,
+ * 桌面应用带 PD + 版本号查询,Worker 持 VOTA 凭据,
  * 转发到 VOTA API(https://api.otau.cc.cd)取 OTA 下载链接,不向客户端暴露 token。
  *
  * 端点:

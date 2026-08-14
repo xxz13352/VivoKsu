@@ -1,10 +1,8 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/VivoKsu.App/VivoKsu.App.csproj" />
-    <Project Path="src/VivoKsu.Server/VivoKsu.Server.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj" />
-    <Project Path="tests/VivoKsu.Server.Tests/VivoKsu.Server.Tests.csproj" />
   </Folder>
 </Solution>

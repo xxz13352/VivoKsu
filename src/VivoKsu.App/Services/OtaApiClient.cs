@@ -6,7 +6,7 @@ using VivoKsu.App.Models;
 namespace VivoKsu.App.Services;
 
 /// <summary>
-/// 查询本地 VivoKsu.Server,按 PD + 版本号获取 OTA 下载链接。
+/// 查询 Cloudflare Worker(api.nwflash.cc.cd),按 PD + 版本号获取 OTA 下载链接。
 /// 服务端(而非桌面端)持有 VOTA 凭据。
 /// </summary>
 public sealed class OtaApiClient

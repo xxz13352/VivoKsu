@@ -64,7 +64,7 @@ flowchart LR
 | **版本控制** | 只有后台「版本号控制」启用的 PD+版本才返回链接 |
 | **按用户审计** | 每次 ROM 查询写 `access_logs`(用户 / PD / 版本 / URL / 状态) |
 | **任务原子性** | 所有耗时操作经 `OperationCoordinator` 串行、可取消、失败即停、进度 100ms 节流 |
-| **零自有服务器** | 全部后端跑在 Cloudflare Workers + D1;`src/VivoKsu.Server` 仅作本地开发回退,生产不用 |
+| **零自有服务器** | 全部后端跑在 Cloudflare Workers + D1;无任何自托管服务端代码 |
 
 ---
 
@@ -72,7 +72,7 @@ flowchart LR
 
 ```
 VivoKsu 工具/
-├─ VivoKsu.slnx                     # 解决方案(src 2 项目 + tests 2 项目)
+├─ VivoKsu.slnx                     # 解决方案(src 1 项目 + tests 1 项目)
 ├─ src/
 │  ├─ VivoKsu.App/                  # 桌面应用(net8.0-windows, WPF)
 │  │  ├─ App.xaml(.cs)              # 启动门禁 / 崩溃日志 / 退出清理
@@ -86,11 +86,9 @@ VivoKsu 工具/
 │  │  ├─ platform-tools/            # adb.exe + 唯一 fastboot.exe(带进度)
 │  │  ├─ root-tools/                # magiskboot.so
 │  │  └─ scrcpy/                    # scrcpy(发布脚本自动补齐)
-│  └─ VivoKsu.Server/               # 旧 .NET 服务端(已被 Worker 取代,保留作本地回退)
 ├─ cloudflare/                      # Worker + 后台(见 §4 §5)
 ├─ tests/
-│  ├─ VivoKsu.App.Tests/            # 桌面应用单元测试(约 50 个文件)
-│  └─ VivoKsu.Server.Tests/         # 服务端测试
+│  └─ VivoKsu.App.Tests/            # 桌面应用单元测试(约 50 个文件)
 ├─ scripts/
 │  ├─ Publish-Release.ps1           # 一键发布 self-contained win-x64
 │  ├─ Ensure-Scrcpy.ps1             # 发布前自动获取 scrcpy
@@ -376,7 +374,7 @@ flowchart TD
 | `versions` | 版本号控制 | pd / version / enabled,`UNIQUE(pd,version)` |
 | `access_logs` | 每次 ROM 查询审计 | api_user_id / api_user_name / pd / version / url / status |
 
-### 4.4 错误映射(与 .NET 版一致)
+### 4.4 错误映射
 
 | 上游 `code` | HTTP | 语义 |
 | --- | --- | --- |
@@ -415,8 +413,14 @@ flowchart LR
 
 ## 5. Web 后台
 
-`web.nwflash.cc.cd`(`cloudflare/web/src/index.ts`,详见 [cloudflare/web/README.md](../cloudflare/web/README.md)):
+`web.nwflash.cc.cd`(`cloudflare/web/src/index.ts` + 单文件 SPA `admin.html`,详见 [cloudflare/web/README.md](../cloudflare/web/README.md)):
 
+- **界面(2026-08 重写,「固件登记簿」)**:机加工纸面画布 + 发丝刻线 + 单一账簿蓝的系统控制台。**恰好三个菜单** —— 版本号控制 / 用户管理 / 访问日志;**改密降级为头部维护按钮,不是第四菜单**。
+  - **服务健康带**:启用版本 / API 用户 / 近 24h 查询 / 近 24h 失败(客户端 best-effort 统计,基于最近 500 条日志)。
+  - **版本号控制**:№ 页边码登记册 + 双墨状态(● 启用 / ○ 停用)+ 活结算页脚(总计 N 条 · M 个 PD 家族 · 启用 K 条)。
+  - **用户管理**:建号 → **撕口一次性 token 凭证**(可复制);重置密码 / 换 token / 封禁 / 停用 / 删除。
+  - **访问日志**:带列标尺的查询读出口,OKAY / FAIL 双墨,URL 断行省略。
+  - **操作反馈以 OKAY/FAIL/INFO 协议行回显** —— 登记版本 / 建用户 / 换 token 都写成协议行,操作历史即审计轨迹。
 - **功能**:管理员登录、版本号控制、API 用户管理(建号 / token 生成轮换 / 停用 / 封禁)、访问日志。
 - **安全**:强制 HTTPS + HSTS + CSP + HttpOnly/Secure 会话 Cookie + PBKDF2-SHA256 密码哈希 + 随机 session token;首启用 `ADMIN_SEED_PASSWORD` 播种初始管理员。
 - 与 `api.nwflash.cc.cd` **共用同一 D1 `nwflash-db`** —— API 侧执行版本校验 / 认证 / 记日志,后台负责管理。
@@ -498,7 +502,6 @@ sequenceDiagram
 ## 8. 测试
 
 - **VivoKsu.App.Tests**:约 50 个测试文件、**253 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
-- **VivoKsu.Server.Tests**:8 个用例全绿(含 VOTA 非 2xx 状态码处理)。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配等。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 
