@@ -315,6 +315,7 @@ flowchart TD
 - **`WaitForFastbootAsync` 直接轮询 `backend.DiscoverAsync`**(不依赖冻结的会话快照),避免 ADB→fastbootd 过渡时检测不到设备。
 - **分区存在性预检**:每个分区 flash 前 `getvar partition-type:<name>`,设备没有的分区跳过 + 日志,避免未知分区中止半刷。
 - **staging 清理**:取消 / 失败 / 退出都清理 staging;盘选择优先系统 SSD(≥15GB),bezzad 多分片随机写 HDD 会停滞。
+- **下载内存有界 + 进度节流**:bezzad 多分片缓冲设 **256MB 上限**(库对 ≤0 视为无上限,网速快于磁盘时会无界堆积到包大小量级 OOM);进度上报 **~100ms 节流**(下载完成事件必达,不丢 100%)。
 - **进度分段**:解包 0–0.5、刷写 0.5–1,不重叠;右侧栏当前分区行显示 `百分比 · 速度 MB/s`。
 
 ### 3.10 其它关键服务
@@ -324,8 +325,8 @@ flowchart TD
 | `VivoRootResourceService` | Root 管理器 APK 校验(**SHA-256 白名单** + AndroidManifest.zip 检查,防被替换) |
 | `VivoVendorBootProcessor` | vendor_boot 补丁处理(官方 / GKI 内核),GKI 缺失跳过;输出已存在先删再重试 |
 | `VivoKsuDevicePatchService` | 设备 patch 应用(经 adb root) |
-| `QuickFlashService` | 快速刷写:`is-userspace` getvar 失败降级不抛;`expectedSerial` 防串号错刷 |
-| `MirrorService` + `ScrcpyProvisioningService` | scrcpy 投屏;自动投屏开关关闭时取消在途协调;`.staging` 目录清理 |
+| `QuickFlashService` | 快速刷写:`is-userspace` getvar 失败降级不抛;`expectedSerial` 防串号错刷;**一律 fastbootd**(不再提供 Fastboot/bootloader 选择) |
+| `MirrorService` + `ScrcpyProvisioningService` | scrcpy 投屏;启动用 **`ADB` 环境变量** 指向内置 adb(scrcpy v4.0 移除了 `--adb-path`);自动投屏开关关闭时取消在途协调;`.staging` 目录清理 |
 | `AdbFileService` | ADB root 通道文件浏览 / 上传 / 下载 / 删除 |
 | `DeviceInfoService` | 读设备详情(版本 / 电量 / 型号) |
 | `ToolPathPreferences` | 本地设置(settings.json),含登录 token 持久化 |
@@ -496,12 +497,16 @@ sequenceDiagram
 | 修补输出已存在阻塞重试 | `File.Exists` → 先删再解 |
 | tar base-256 长度解析 | `ParseOctal` 支持 base-256 |
 | 登录后程序消失 | `ShowDialog` 关闭触发 `OnLastWindowClose` → 改显式主窗 `Closed += Shutdown()` |
+| bezzad 多分片缓冲无界致 OOM | `MaximumMemoryBufferBytes=256MB`(库对 ≤0 视为无上限);网速快于磁盘时队列不再堆积至包大小量级 |
+| 高速下载进度事件灌爆 UI 线程 | `OtaDownloadService` 进度上报 ~100ms 节流(下载完成事件必达,不丢 100%) |
+| scrcpy v4.0 移除 `--adb-path` 秒退 | 启动改为注入 **`ADB` 环境变量** 指向内置 adb(全版本兼容) |
+| VIVO 刷写 / ROOT 必须 fastbootd | 快速刷写删除 Fastboot/bootloader 选择恒走 fastbootd;ROOT 自动流程 `adb reboot fastboot` + 等 `is-userspace=yes` 设备 |
 
 ---
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**264 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**267 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配等。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 
