@@ -174,6 +174,50 @@ public sealed class OtaApiClient
             && value.TryGetInt64(out var number)
             ? number
             : 0;
+
+    /// <summary>
+    /// 操作许可门禁:客户端每个用户操作运行前询问。服务端默认放行;封禁/停用返回
+    /// <c>{ allowed:false, reason }</c>;token 无效/停用返回 401(调用方按拒绝处理)。
+    /// </summary>
+    public async Task<OperationAuthorization> AuthorizeOperationAsync(string operation, string title, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operation);
+
+        using var response = await http.PostAsJsonAsync(
+            $"{BaseUrl}/api/operation/authorize",
+            new { operation, title },
+            cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await OtaApiException.FromResponseAsync(response);
+        }
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+        var allowed = body.TryGetProperty("allowed", out var value)
+            && value.ValueKind == JsonValueKind.True;
+        var reason = body.TryGetProperty("reason", out var r)
+            ? r.GetString()
+            : null;
+        return allowed ? OperationAuthorization.Allow() : OperationAuthorization.Deny(reason ?? "服务端未许可此操作。");
+    }
+
+    /// <summary>批量上传使用日志(服务端按操作分类存储,绑定当前 token 用户)。失败抛异常,调用方按 best-effort 处理。</summary>
+    public async Task UploadUsageLogsAsync(IReadOnlyList<UsageLogEntry> logs, CancellationToken cancellationToken)
+    {
+        if (logs.Count == 0)
+        {
+            return;
+        }
+
+        using var response = await http.PostAsJsonAsync(
+            $"{BaseUrl}/api/usage/logs",
+            new { logs },
+            cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await OtaApiException.FromResponseAsync(response);
+        }
+    }
 }
 
 /// <summary>查询 OTA 链接失败时的业务异常。</summary>

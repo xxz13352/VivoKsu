@@ -10,13 +10,16 @@ public sealed class AppComposition
 {
     private readonly MirrorService mirrorService;
     private readonly OtaApiClient otaClient;
+    private readonly UsageLogUploader usageReporter;
     private bool stopped;
 
     private AppComposition(
         IFastbootRsNativeApi nativeApi,
         IProcessRunner processRunner,
         ToolPathPreferences? preferences = null,
-        Action<string>? notifyBlocked = null)
+        Action<string>? notifyBlocked = null,
+        bool enableServerGate = true,
+        UsageLogUploader? usageReporter = null)
     {
         var backend = new FastbootRsBackend(nativeApi);
         // 唯一 fastboot 执行器:全部刷写 / 读变量 / 擦除 / 重启 / 槽位操作走它(fastboot-rs DLL 已移除)。
@@ -24,7 +27,12 @@ public sealed class AppComposition
             Path.Combine(AppContext.BaseDirectory, "platform-tools", "fastboot.exe"));
         LogService = new OperationLogService();
         Session = new DeviceSessionViewModel();
-        Coordinator = new OperationCoordinator(Session, LogService, notifyBlocked);
+        // 客户端 API 基座:登录后注入 token;操作许可门禁与使用日志上报共用它。需先于 Coordinator 创建。
+        otaClient = new OtaApiClient();
+        this.usageReporter = usageReporter ?? new UsageLogUploader(otaClient);
+        // 操作许可门禁:生产环境每个用户操作运行前询问服务端(默认放行、封禁/停用拒绝);测试关闭。
+        var gate = enableServerGate ? new ServerOperationGate(otaClient) : null;
+        Coordinator = new OperationCoordinator(Session, LogService, notifyBlocked, gate, this.usageReporter);
 
         var deviceInfo = new DeviceInfoService(backend, cliRunner);
         var deviceSessionService = new DeviceSessionService(backend, deviceInfo, LogService);
@@ -64,7 +72,6 @@ public sealed class AppComposition
             new VivoRootResourceService(AppContext.BaseDirectory),
             Coordinator);
         var overview = new OverviewViewModel(Session, backend, LogService, Coordinator);
-        otaClient = new OtaApiClient();
         // 心跳与设备操作无关,独立于 OperationCoordinator 运行;强制退出回调处理「不打断刷写」。
         Heartbeat = new HeartbeatService(
             otaClient,
@@ -145,6 +152,9 @@ public sealed class AppComposition
     /// <summary>在线状态页:登录后由 <see cref="StartSessionAsync"/> 启动轮询。</summary>
     public OnlineViewModel Online { get; }
 
+    /// <summary>客户端使用日志上报器:OperationCoordinator 记录 → 批量上传(30s 定时 + 退出 flush)。</summary>
+    public UsageLogUploader UsageReporter => usageReporter;
+
     /// <summary>本次启动的会话 id(客户端生成,GUID)。强制下线/在线列表以此标记「自己」。</summary>
     public string? SessionId { get; private set; }
 
@@ -172,6 +182,7 @@ public sealed class AppComposition
         SessionId = Guid.NewGuid().ToString("N");
         Heartbeat.Start(SessionId);
         Online.Start();
+        usageReporter.Start();
     }
 
     private bool sessionStarted;
@@ -186,7 +197,8 @@ public sealed class AppComposition
             nativeApi,
             processRunner,
             new ToolPathPreferences(Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", $"{Guid.NewGuid():N}.json")),
-            notifyBlocked: _ => { });
+            notifyBlocked: _ => { },
+            enableServerGate: false);
 
     public Task StartAsync(CancellationToken cancellationToken = default) => Monitor.StartAsync(cancellationToken);
 
@@ -208,6 +220,17 @@ public sealed class AppComposition
         await Monitor.DisposeAsync();
         Coordinator.Dispose();
 
+        // 退出前把缓冲的使用日志上传到服务端(best-effort,失败不影响退出)。
+        try
+        {
+            await usageReporter.FlushAsync();
+        }
+        catch
+        {
+            // 离线时丢弃;不阻塞退出。
+        }
+
+        usageReporter.Dispose();
         CleanupTemporaryFiles();
     }
 

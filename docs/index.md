@@ -38,9 +38,9 @@ VivoKsu 工具/
 ├─ cloudflare/               # 后端(TypeScript Worker + D1)
 │  ├─ src/index.ts           # api.nwflash.cc.cd · Worker nwflash-rom(登录/版本/ROM/心跳/在线)
 │  ├─ web/src/index.ts       # web.nwflash.cc.cd · Worker nwflash-web(API + 托管 SPA)
-│  ├─ web/src/admin.html     # 「固件登记簿」后台单页(版本/用户/日志/在线四菜单)
+│  ├─ web/src/admin.html     # 「固件登记簿」后台单页(版本/用户/日志/在线/使用日志五菜单)
 │  └─ wrangler.toml          # D1 绑定 + 自定义域 + vars + Cron
-├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(291 用例)
+├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(328 用例)
 ├─ scripts/                  # Publish-Release.ps1 / Ensure-Scrcpy.ps1 / verify-*.ps1
 └─ docs/                     # 本文档 + architecture.md + safeflash-ota.md
 ```
@@ -65,10 +65,10 @@ VivoKsu 工具/
 
 | 想做什么 | 打开 |
 | --- | --- |
-| 改后台界面 / 四菜单 | `cloudflare/web/src/admin.html`(单文件 SPA,内联 CSS/JS) |
+| 改后台界面 / 五菜单 | `cloudflare/web/src/admin.html`(单文件 SPA,内联 CSS/JS) |
 | 加 / 改 API 端点 | `cloudflare/src/index.ts` + 同步 [API.md](../cloudflare/API.md) |
 | 改后台 API / 安全头 | `cloudflare/web/src/index.ts` |
-| 改心跳 / 在线 / 强制下线 | 服务端 `cloudflare/src/index.ts`(心跳/在线)+ `cloudflare/web/src/index.ts`(kick);客户端 `HeartbeatService.cs` · `OnlineViewModel.cs` · `AppComposition.cs` |
+| 改心跳 / 在线 / 强制下线 / 操作门禁 | 服务端 `cloudflare/src/index.ts`(心跳/在线/授权/使用日志)+ `cloudflare/web/src/index.ts`(kick/使用日志);客户端 `HeartbeatService.cs` · `OnlineViewModel.cs` · `OperationCoordinator.cs` · `AppComposition.cs` |
 | 建表 / 迁移 D1 | `cloudflare/web/schema.sql` + `npx wrangler d1 execute` |
 | 改桌面某页面 | `src/VivoKsu.App/ViewModels/` + `MainWindow.xaml` |
 | 改登录门禁 / token | `App.xaml.cs` · `LoginService.cs` · `OtaApiClient.cs` · `ToolPathPreferences.cs` |
@@ -80,6 +80,7 @@ VivoKsu 工具/
 ## 六、当前状态(2026-08-14)
 
 - **后端**:全部 Cloudflare;旧自建 .NET 服务端已删除;api / web 均已部署。
-- **后台**:「固件登记簿」控制台(四菜单 + 服务健康带 + № 登记册 + 撕口 token 凭证 + OKAY/FAIL 协议回显)已上线。
-- **桌面端**:291 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
+- **后台**:「固件登记簿」控制台(五菜单 + 服务健康带 + № 登记册 + 撕口 token 凭证 + OKAY/FAIL 协议回显)已上线。
+- **桌面端**:328 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
 - **在线会话**:客户端每 5s 心跳保持在线;后台「在线状态」实时查看会话(用户/版本/IP/时长)并**强制下线**(≤5s 内客户端退出);客户端「在线状态」页查看在线用户与时长;心跳 force_exit / 封禁 / 426 均走防变砖退出(刷写中先取消、等 Idle 再退)。
+- **操作门禁 + 使用日志**:客户端每个用户操作运行前经服务端 `POST /api/operation/authorize` 许可(默认放行、封禁/停用拒绝);执行后批量上传使用日志,后台「使用日志」按操作分类查看。

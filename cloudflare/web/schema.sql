@@ -86,3 +86,22 @@ CREATE TABLE IF NOT EXISTS admin_audit_log (
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_log(created_at DESC);
+
+-- 客户端使用日志(每操作一条,按 kind 分类;客户端批量上传,由客户端 token 归属用户)
+CREATE TABLE IF NOT EXISTS usage_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  api_user_id INTEGER,                    -- 客户端 token 归属用户
+  api_user_name TEXT,
+  operation_kind TEXT NOT NULL,           -- 分类:Flashing / Rebooting / Transferring / Installing ...
+  title TEXT,
+  status TEXT NOT NULL DEFAULT 'started', -- success / failed / canceled
+  event_key TEXT,                         -- 客户端每次操作生成的事件唯一键(重传幂等去重)
+  started_at INTEGER NOT NULL,            -- epoch 秒
+  ended_at INTEGER,
+  duration_ms INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(api_user_id);
+CREATE INDEX IF NOT EXISTS idx_usage_kind ON usage_logs(operation_kind);
+CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_logs(created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_event ON usage_logs(event_key);

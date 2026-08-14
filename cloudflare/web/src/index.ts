@@ -115,6 +115,10 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   if (path === "/api/online" && method === "GET") return onlineAdmin(env);
   if (path === "/api/online/kick" && method === "POST") return kickOnline(request, admin, env);
 
+  // 使用日志(管理端)
+  if (path === "/api/usage-logs/kinds" && method === "GET") return usageLogKinds(env);
+  if (path === "/api/usage-logs" && method === "GET") return listUsageLogs(url, env);
+
   return json({ error: "Not found" }, 404);
 }
 
@@ -363,8 +367,10 @@ async function rotateUserToken(request: Request, path: string, env: Env): Promis
 /* ------------------------------------------------------------------ */
 
 async function listLogs(url: URL, env: Env): Promise<Response> {
-  const limit = Math.min(Number(url.searchParams.get("limit") || 100), 500);
-  const offset = Math.max(Number(url.searchParams.get("offset") || 0), 0);
+  const limitRaw = Number(url.searchParams.get("limit"));
+  const offsetRaw = Number(url.searchParams.get("offset"));
+  const limit = Math.max(1, Math.min(Number.isFinite(limitRaw) ? limitRaw : 100, 500));
+  const offset = Math.max(0, Number.isFinite(offsetRaw) ? Math.floor(offsetRaw) : 0);
   const userId = url.searchParams.get("userId");
   const pd = url.searchParams.get("pd");
 
@@ -472,6 +478,43 @@ async function writeAudit(
   }
 }
 
+/** GET /api/usage-logs/kinds(管理端)—— 已出现的操作分类,用于下拉筛选。 */
+async function usageLogKinds(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(
+    "SELECT DISTINCT operation_kind AS kind FROM usage_logs ORDER BY kind",
+  ).all<{ kind: string }>();
+  return json({ kinds: rows.results.map((r) => r.kind) }, 200);
+}
+
+/** GET /api/usage-logs(管理端)—— 客户端使用日志,按操作分类过滤。返回 total 供分页/徽章用。 */
+async function listUsageLogs(url: URL, env: Env): Promise<Response> {
+  // limit 上限 500、下限 1;offset 下限 0;NaN 回退默认(防 ?limit=-1 无界返回 / ?limit=abc 500)。
+  const limitRaw = Number(url.searchParams.get("limit"));
+  const offsetRaw = Number(url.searchParams.get("offset"));
+  const limit = Math.max(1, Math.min(Number.isFinite(limitRaw) ? limitRaw : 100, 500));
+  const offset = Math.max(0, Number.isFinite(offsetRaw) ? Math.floor(offsetRaw) : 0);
+  const kind = url.searchParams.get("kind");
+  const userId = url.searchParams.get("userId");
+  const status = url.searchParams.get("status");
+
+  let where = "";
+  const whereClause: string[] = [];
+  const bind: unknown[] = [];
+  if (kind) { whereClause.push("operation_kind = ?"); bind.push(kind); }
+  if (userId) { whereClause.push("api_user_id = ?"); bind.push(Number(userId)); }
+  if (status) { whereClause.push("status = ?"); bind.push(status); }
+  if (whereClause.length) where = " WHERE " + whereClause.join(" AND ");
+
+  const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS n FROM usage_logs${where}`).bind(...bind).first<{ n: number }>();
+  const rows = await env.DB.prepare(
+    `SELECT id, api_user_name, operation_kind, title, status, started_at, ended_at, duration_ms FROM usage_logs${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
+  )
+    .bind(...bind, limit, offset)
+    .all<UsageLogRow>();
+
+  return json({ logs: rows.results, total: totalRow?.n ?? 0 }, 200);
+}
+
 /* ------------------------------------------------------------------ */
 /* 工具                                                                */
 /* ------------------------------------------------------------------ */
@@ -566,4 +609,15 @@ interface OnlineSessionRow {
   last_seen_at: number;
   force_exit_at: number | null;
   force_exit_reason: string | null;
+}
+
+interface UsageLogRow {
+  id: number;
+  api_user_name: string | null;
+  operation_kind: string;
+  title: string | null;
+  status: string;
+  started_at: number;
+  ended_at: number | null;
+  duration_ms: number | null;
 }

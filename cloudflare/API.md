@@ -10,6 +10,7 @@
 - **版本门禁**: 所有请求带 `X-VivoKsu-Version` 头;版本低于后台「版本号控制」的最低版本 → **426 强制更新**(见 [版本门禁](#版本门禁强制更新))
 - **日志**: 每次查询记入 D1(按用户),可在 `web.nwflash.cc.cd` 查看
 - **在线会话**: 登录后客户端每 5s 心跳(`POST /api/heartbeat`)保持在线、接收强制下线;`GET /api/online` 查在线用户(显示名/时长)。管理端「在线状态」可强制下线。心跳数据存 D1 `online_sessions`,会话超过 120s 未心跳即视为离线(Worker Cron 兜底清理)
+- **操作门禁**: 客户端每个用户操作运行前询问 `POST /api/operation/authorize`(默认放行;封禁/停用拒绝);执行后批量上传 `POST /api/usage/logs` 使用日志(按操作分类存储)
 
 ## 端点
 
@@ -175,6 +176,55 @@ VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 ---
 
+### `POST /api/operation/authorize`
+
+**操作许可门禁**:客户端**每个用户操作运行前**询问一次。服务端默认放行;账号被封禁/停用时拒绝。必须带 `Authorization: Bearer <token>`。
+
+**请求体**
+```json
+{ "operation": "Flashing", "title": "正在刷写 boot" }
+```
+
+**成功 200**(默认放行)
+```json
+{ "allowed": true }
+```
+
+**拒绝 200**(封禁/停用)
+```json
+{ "allowed": false, "reason": "账号已被封禁,请联系管理员。" }
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `allowed` | bool | `false` = 拒绝该操作,客户端应阻止开始并提示 reason |
+| `reason` | string \| null | 拒绝原因 |
+
+> 客户端策略:服务端明确拒绝(封禁/停用)或 token 无效(401)→ 阻止操作;网络/服务端临时错误 → **默认放行**(服务端默认许可,不可达不应阻塞刷写;账号封禁由心跳 5s 内强制退出兜底)。
+
+---
+
+### `POST /api/usage/logs`
+
+**使用日志批量上传**:客户端每次用户操作(刷写/重启/传输/ROOT…)执行完成后,把记录(操作分类/标题/结果/耗时)批量上传。服务端按 `operation_kind` 分类存储,归属用户由 token 解析。必须带 `Authorization: Bearer <token>`。
+
+**请求体**
+```json
+{ "logs": [ { "operation": "Flashing", "title": "正在刷写 boot", "status": "success", "started_at": 1786700000, "ended_at": 1786700060, "duration_ms": 60000 } ] }
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `operation` | string | 操作分类(Flashing / Rebooting / Transferring / Installing…) |
+| `title` | string | 操作标题 |
+| `status` | string | `success` / `failed` / `canceled` |
+| `started_at` / `ended_at` | number | epoch 秒 |
+| `duration_ms` | number \| null | 耗时 |
+
+**成功 200** `{ "ok": true, "received": 1 }`。单批最多 200 条。后台「使用日志」可查看/筛选。
+
+---
+
 ### `GET /api/rom?pd=<PD>&version=<版本>`
 
 按 **PD 码 + 版本号** 解析 OTA 下载链接。**必须携带登录 token**。所有请求也须带 `X-VivoKsu-Version`(见 [版本门禁](#版本门禁强制更新))。
@@ -289,11 +339,12 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | 2026-08-13 | 明确商业模型:账号授权制 —— 用户登录即可查询、不按次计费;上游 VOTA 信用点由运营方承担 |
 | 2026-08-14 | **VivoKsu 版本门禁(强制更新)**:新增 `GET /api/app/version`(免登录策略查询);所有请求带 `X-VivoKsu-Version` 头,低于后台最低版本 → **426 UPDATE_REQUIRED**;**移除 ROM 白名单** —— `/api/rom` 不再做 PD+版本门禁,登录即可解析任意版本 |
 | 2026-08-14 | **在线会话心跳 + 强制下线**:D1 新增 `online_sessions` / `admin_audit_log`;`POST /api/heartbeat`(每 5s,检测强制下线/封禁/426)、`GET /api/online`(客户端视角在线列表,仅显示名/版本/时长,不含 username/IP);管理端「在线状态」可强制下线。服务端:per-token 心跳限速 + 每用户会话数上限 + 60s 写节流 + epoch 秒时间戳 + `last_seen` 索引 + Cron 兜底清理 |
+| 2026-08-14 | **操作许可门禁 + 使用日志**:`POST /api/operation/authorize`(客户端每个用户操作运行前询问,默认放行、封禁/停用拒绝);`POST /api/usage/logs`(使用日志批量上传,按 `operation_kind` 分类存储);D1 新增 `usage_logs` 表;管理端「使用日志」查看/筛选 |
 
 ## 管理后台
 
 - 地址:`https://web.nwflash.cc.cd`(详见 `web/README.md`)。
-- 功能:管理员登录、**VivoKsu 版本控制(强制更新)**、API 用户管理(token 生成/轮换/停用)、访问日志查看、**在线状态(实时会话 + 强制下线)**。
+- 功能:管理员登录、**VivoKsu 版本控制(强制更新)**、API 用户管理(token 生成/轮换/停用)、访问日志查看、**在线状态(实时会话 + 强制下线)**、**使用日志(客户端操作分类)**。
 
 ## 代码结构
 

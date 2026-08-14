@@ -13,6 +13,8 @@ public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
     private readonly SemaphoreSlim operationGate = new(1, 1);
     private readonly object stateGate = new();
     private readonly Action<string>? notifyBlocked;
+    private readonly IOperationPermissionGate? permissionGate;
+    private readonly IUsageReporter? usageReporter;
     private OperationStateSnapshot state = OperationStateSnapshot.Idle;
     private CancellationTokenSource? currentCancellation;
     private long lastProgressReport;
@@ -21,11 +23,15 @@ public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
     public OperationCoordinator(
         DeviceSessionViewModel session,
         OperationLogService logs,
-        Action<string>? notifyBlocked = null)
+        Action<string>? notifyBlocked = null,
+        IOperationPermissionGate? permissionGate = null,
+        IUsageReporter? usageReporter = null)
     {
         this.session = session;
         this.logs = logs;
         this.notifyBlocked = notifyBlocked;
+        this.permissionGate = permissionGate;
+        this.usageReporter = usageReporter;
     }
 
     public bool IsBusy
@@ -70,28 +76,68 @@ public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
         }
 
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var operationId = Guid.NewGuid().ToString("N");
-        SetCurrent(kind, operationId, title, title, null, linkedCancellation);
-        session.BeginOperation(kind, title);
-        logs.Write(OperationLogLevel.Info, title, operationId);
+        // 授权阶段就登记取消源:Stop 在授权等待期(最长 5s)也能取消,而不是「点了没反应」,
+        // 之后操作仍照常开始。授权被取消/拒绝时由 finally 的 ClearCurrent 清理。
+        lock (stateGate)
+        {
+            currentCancellation = linkedCancellation;
+        }
 
+        string? operationId = null;
+        var startedAt = 0L;
+        var startedMs = 0L;
         try
         {
+            // 操作前服务端许可:默认放行;封禁/停用拒绝。授权在 try 内,拒绝/取消时操作门禁也能释放。
+            if (permissionGate is not null)
+            {
+                var permission = await permissionGate.AuthorizeAsync(kind, title, linkedCancellation.Token);
+                if (!permission.Allowed)
+                {
+                    var denied = $"服务端未许可此操作: {permission.Reason ?? "账号状态异常"}";
+                    logs.Write(OperationLogLevel.Warning, denied);
+                    // 多数页面吞掉 OperationDeniedException,只靠日志用户看不到;走 notifyBlocked(生产=MessageBox)
+                    // 让「操作被拒」对用户可见——与 OperationInProgress 的提示同一条路径。
+                    notifyBlocked?.Invoke(denied);
+                    throw new OperationDeniedException(denied);
+                }
+            }
+
+            operationId = Guid.NewGuid().ToString("N");
+            startedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            startedMs = Environment.TickCount64;
+            SetCurrent(kind, operationId, title, title, null, linkedCancellation);
+            session.BeginOperation(kind, title);
+            logs.Write(OperationLogLevel.Info, title, operationId);
+
             var context = new OperationContext(operationId, Report);
             await operation(context, linkedCancellation.Token);
             session.CompleteOperation();
             logs.Write(OperationLogLevel.Success, $"{title}完成。", operationId);
+            RecordUsage(kind, title, "success", startedAt, startedMs, operationId);
         }
         catch (OperationCanceledException) when (linkedCancellation.IsCancellationRequested)
         {
-            session.CancelOperation();
-            logs.Write(OperationLogLevel.Warning, $"{title}已取消。", operationId);
+            // 授权阶段被取消时 operationId 为 null(操作未开始),不做状态/日志/使用记录。
+            if (operationId is not null)
+            {
+                session.CancelOperation();
+                logs.Write(OperationLogLevel.Warning, $"{title}已取消。", operationId);
+                RecordUsage(kind, title, "canceled", startedAt, startedMs, operationId);
+            }
+
+            throw;
+        }
+        catch (OperationDeniedException)
+        {
+            // 已在授权处写日志并提示;操作门禁由 finally 释放。
             throw;
         }
         catch (Exception exception)
         {
             session.FailOperation($"{title}失败");
             logs.Write(OperationLogLevel.Error, exception.Message, operationId);
+            RecordUsage(kind, title, "failed", startedAt, startedMs, operationId);
             throw;
         }
         finally
@@ -99,6 +145,20 @@ public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
             ClearCurrent(linkedCancellation);
             operationGate.Release();
         }
+    }
+
+    private void RecordUsage(OperationKind kind, string title, string status, long startedAt, long startedMs, string operationId)
+    {
+        if (usageReporter is null)
+        {
+            return;
+        }
+
+        var endedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var durationMs = Environment.TickCount64 - startedMs;
+        // event_id 每次操作生成一次;上传重试复用同一条记录(同一 id),服务端幂等去重,不会重复落库。
+        usageReporter.Record(new UsageLogEntry(
+            kind.ToString(), title, status, Guid.NewGuid().ToString("N"), startedAt, endedAt, durationMs));
     }
 
     public void CancelCurrent()

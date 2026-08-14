@@ -133,6 +133,64 @@ public class OtaApiClientTests
     }
 
     [Fact]
+    public async Task AuthorizeOperationAsync_posts_operation_and_parses_allowed()
+    {
+        var handler = new BodyCapturingHandler(("""{"allowed":true}""", HttpStatusCode.OK));
+        var client = new OtaApiClient(new HttpClient(handler), baseUrl: "https://localhost:7243");
+
+        var result = await client.AuthorizeOperationAsync("Flashing", "正在刷写 boot", CancellationToken.None);
+
+        handler.Path.Should().Be("/api/operation/authorize");
+        handler.Body.Should().Contain("\"operation\":\"Flashing\"");
+        result.Allowed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task AuthorizeOperationAsync_parses_deny_with_reason()
+    {
+        var client = new OtaApiClient(
+            new HttpClient(new BodyCapturingHandler(("""{"allowed":false,"reason":"账号已被封禁,请联系管理员。"}""", HttpStatusCode.OK))),
+            baseUrl: "https://localhost:7243");
+
+        var result = await client.AuthorizeOperationAsync("Flashing", "正在刷写 boot", CancellationToken.None);
+
+        result.Allowed.Should().BeFalse();
+        result.Reason.Should().Contain("封禁");
+    }
+
+    [Fact]
+    public async Task AuthorizeOperationAsync_maps_401_to_ota_exception()
+    {
+        var client = new OtaApiClient(
+            new HttpClient(new BodyCapturingHandler(("""{"error":"API token 无效或已停用。"}""", HttpStatusCode.Unauthorized))),
+            baseUrl: "https://localhost:7243");
+
+        var act = () => client.AuthorizeOperationAsync("Flashing", "正在刷写 boot", CancellationToken.None);
+
+        var exception = await act.Should().ThrowAsync<OtaApiException>();
+        exception.Which.StatusCode.Should().Be(401);
+    }
+
+    [Fact]
+    public async Task UploadUsageLogsAsync_posts_the_batch()
+    {
+        var handler = new BodyCapturingHandler(("""{"ok":true,"received":2}""", HttpStatusCode.OK));
+        var client = new OtaApiClient(new HttpClient(handler), baseUrl: "https://localhost:7243");
+        var logs = new[]
+        {
+            new UsageLogEntry("Flashing", "正在刷写 boot", "success", "evt-1", 1000, 1060, 60000),
+            new UsageLogEntry("Rebooting", "正在重启设备", "failed", "evt-2", 2000, 2010, 10000),
+        };
+
+        await client.UploadUsageLogsAsync(logs, CancellationToken.None);
+
+        handler.Path.Should().Be("/api/usage/logs");
+        handler.Body.Should().Contain("\"operation\":\"Flashing\"")
+            .And.Contain("\"status\":\"failed\"")
+            .And.Contain("\"event_id\":\"evt-1\"");
+    }
+
+    [Fact]
     public async Task HeartbeatAsync_maps_401_to_ota_exception_even_with_non_json_body()
     {
         // 回归:状态码检查必须先于 body 解析——空/非 JSON 响应体(如 WAF HTML 403)不得抛

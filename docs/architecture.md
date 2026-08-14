@@ -418,11 +418,12 @@ flowchart LR
 
 `web.nwflash.cc.cd`(`cloudflare/web/src/index.ts` + 单文件 SPA `admin.html`,详见 [cloudflare/web/README.md](../cloudflare/web/README.md)):
 
-- **界面(2026-08 重写,「固件登记簿」)**:机加工纸面画布 + 发丝刻线 + 单一账簿蓝的系统控制台。**四个菜单** —— 版本号控制 / 用户管理 / 访问日志 / **在线状态(LIVE)**;**改密降级为头部维护按钮,不是第五菜单**。
+- **界面(2026-08 重写,「固件登记簿」)**:机加工纸面画布 + 发丝刻线 + 单一账簿蓝的系统控制台。**五个菜单** —— 版本号控制 / 用户管理 / 访问日志 / **在线状态(LIVE)** / **使用日志**;**改密降级为头部维护按钮,不是第六菜单**。
   - **服务健康带**:VivoKsu 当前版本 / API 用户 / **在线人数** / 近 24h 查询 / 近 24h 失败(客户端 best-effort 统计,基于最近 500 条日志)。
   - **VivoKsu 版本控制**:登记版本号(版本 / 最低版本 / 下载地址)→ № 页边码登记册 + 双墨状态(● 启用 / ○ 停用)+ 当前策略结算;客户端低于「最低版本」→ 强制更新。
   - **用户管理**:建号 → **撕口一次性 token 凭证**(可复制);重置密码 / 换 token / 封禁 / 停用 / 删除。
   - **在线状态**:实时会话登记册(显示名 + 登录账号 / 版本 / IP / 上线 / 最后心跳 / 在线时长),每 10s 刷新;**强制下线**给会话打 `force_exit`,客户端下一个心跳(≤5s)退出进程(刷写中先取消、等 Idle 再退,不打断分区写入)。kick 写 `admin_audit_log` 审计。
+  - **使用日志**:客户端每次用户操作运行前经 `POST /api/operation/authorize` 许可(默认放行、封禁/停用拒绝),执行后批量上传 `POST /api/usage/logs`;后台按 `operation_kind` 分类查看(分类/状态筛选 + 分页)。
   - **访问日志**:带列标尺的查询读出口,OKAY / FAIL 双墨,URL 断行省略。
   - **操作反馈以 OKAY/FAIL/INFO 协议行回显** —— 登记版本 / 建用户 / 换 token 都写成协议行,操作历史即审计轨迹。
 - **功能**:管理员登录、VivoKsu 版本控制(强制更新)、API 用户管理(建号 / token 生成轮换 / 停用 / 封禁)、访问日志。
@@ -509,7 +510,7 @@ sequenceDiagram
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**291 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**328 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 

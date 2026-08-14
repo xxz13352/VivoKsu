@@ -22,6 +22,8 @@ VivoKsu 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 | `GET /api/me` | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
 | `POST /api/heartbeat` | 在线会话心跳(登录后每 5s;检测强制下线 / 封禁 / 426) |
 | `GET /api/online` | 在线用户列表(鉴权;显示名/版本/时长,不含 username/IP) |
+| `POST /api/operation/authorize` | 操作许可门禁(每个用户操作运行前询问;默认放行、封禁/停用拒绝) |
+| `POST /api/usage/logs` | 使用日志批量上传(按操作分类存储) |
 | `GET /api/rom?pd=X&version=Y` | 解析 OTA 直链(**强制登录** + 版本控制 + 记日志) |
 
 错误映射:NOT_FOUND/`not found`→404, AUTH_FAIL→401, INSUFFICIENT_CREDITS→402, FORBIDDEN→403, RATE_LIMITED→429, 其它→502。

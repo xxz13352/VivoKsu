@@ -201,6 +201,8 @@
   .term-line .v{flex:0 0 200px;color:var(--grey);overflow:hidden;text-overflow:ellipsis}
   .term-line .url{flex:1;min-width:0;color:#5A6B7A;overflow:hidden;text-overflow:ellipsis}
   .term-line .url .arr{color:var(--faint);margin-right:5px}
+  .term-line .dur{flex:0 0 76px;color:var(--faint);font-family:var(--mono)}
+  .term-line .kind{flex:0 0 120px;color:var(--blue);font-weight:600;overflow:hidden;text-overflow:ellipsis}
   .term-line:hover{background:#F3F5F6}
   .term-empty{padding:34px;text-align:center;color:var(--faint);font-size:12px;min-width:0}
   .ledger-foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:13px 20px;border-top:1px solid var(--rule2)}
@@ -289,6 +291,7 @@
     <button class="tab" id="tab-users" data-tab="users" role="tab" aria-controls="sec-users" aria-selected="false" tabindex="-1"><span class="n">02</span>用户管理 <span class="cnt" id="tabCntUsr"></span></button>
     <button class="tab" id="tab-logs" data-tab="logs" role="tab" aria-controls="sec-logs" aria-selected="false" tabindex="-1"><span class="n">03</span>访问日志 <span class="live"><span class="dot"></span>LIVE</span></button>
     <button class="tab" id="tab-online" data-tab="online" role="tab" aria-controls="sec-online" aria-selected="false" tabindex="-1"><span class="n">04</span>在线状态 <span class="live"><span class="dot"></span>LIVE</span><span class="cnt" id="tabCntOnline"></span></button>
+    <button class="tab" id="tab-usage" data-tab="usage" role="tab" aria-controls="sec-usage" aria-selected="false" tabindex="-1"><span class="n">05</span>使用日志 <span class="cnt" id="tabCntUsage"></span></button>
   </nav>
 
   <!-- 服务健康带(活结算) -->
@@ -415,6 +418,41 @@
       </div>
     </section>
 
+    <!-- 使用日志(客户端操作,分类存放) -->
+    <section class="page" id="sec-usage" role="tabpanel" aria-labelledby="tab-usage" style="display:none">
+      <div class="page-head">
+        <div class="eyebrow">USAGE LOG</div>
+        <h2 class="page-title">使用日志</h2>
+        <p class="page-desc">客户端每次用户操作(刷写 / 重启 / 传输 / ROOT…)在运行前经服务端许可;执行后按 <code>operation_kind</code> 分类上传。封禁 / 停用用户在操作前即被拒绝。</p>
+      </div>
+      <div class="ledger">
+        <div class="ledger-head">
+          <span>操作流水</span>
+          <span class="scope">usage · 按操作分类</span>
+          <span class="live"><span class="dot"></span>LIVE</span>
+        </div>
+        <div class="ruler"><span>时间</span><span>用户</span><span>操作分类</span><span>标题</span><span>状态</span><span>耗时</span></div>
+        <div class="term-scroll">
+          <div class="term-body" id="usageBody"><div class="term-empty">等待日志…</div></div>
+        </div>
+        <div class="ledger-foot">
+          <select id="usageKind"></select>
+          <select id="usageStatus">
+            <option value="">全部状态</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="canceled">取消</option>
+          </select>
+          <button id="usageRefresh" class="btn btn-sm btn-ghost">刷新</button>
+          <div class="pg">
+            <button id="usagePrev" class="btn btn-sm btn-ghost">‹ 上一页</button>
+            <span class="info" id="usageInfo"></span>
+            <button id="usageNext" class="btn btn-sm btn-ghost">下一页 ›</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 账号(非主菜单,从头部「改密」进入) -->
     <section class="page" id="sec-account" style="display:none">
       <div class="page-head">
@@ -529,6 +567,7 @@ function switchTab(tab) {
   if (tab === "users") loadUsers();
   if (tab === "versions") loadAppVersions();
   if (tab === "online") startOnlinePoll(); else stopOnlinePoll();
+  if (tab === "usage") loadUsageLogs();
 }
 document.querySelectorAll(".tab").forEach(n => n.onclick = () => switchTab(n.dataset.tab));
 $("tabList").addEventListener("keydown", (e) => {
@@ -821,6 +860,69 @@ async function kickSession(sessionId, reason) {
     loadOnline();
   } catch (e) { toast(e.message, "fail"); }
 }
+
+/* ---------- 使用日志(管理端,按操作分类) ---------- */
+let usagePage = 0;
+let usageTotal = 0;
+const USAGE_PAGE_SIZE = 60;
+const USAGE_KIND_ZH = { Flashing: "刷写", Rebooting: "重启", Transferring: "传输", Installing: "安装", Hashing: "校验", Mirroring: "投屏", Extracting: "解包", Downloading: "下载", Discovering: "发现" };
+function usageKindZh(k) { return USAGE_KIND_ZH[k] || k; }
+async function loadUsageLogs() {
+  try {
+    const kinds = await api("/api/usage-logs/kinds");
+    const sel = $("usageKind");
+    const prevKind = sel.value;
+    sel.innerHTML = '<option value="">全部分类</option>' + kinds.kinds.map(k => `<option value="${esc(k)}">${esc(usageKindZh(k))} · ${esc(k)}</option>`).join("");
+    // 分类已消失时仍保留选中值(否则静默退回「全部分类」,筛选被无声丢弃)。
+    if (prevKind && !Array.from(sel.options).some(o => o.value === prevKind)) {
+      const opt = document.createElement("option");
+      opt.value = prevKind; opt.textContent = prevKind; sel.appendChild(opt);
+    }
+    sel.value = prevKind || "";
+
+    const q = new URLSearchParams({ limit: String(USAGE_PAGE_SIZE), offset: String(usagePage * USAGE_PAGE_SIZE) });
+    if (sel.value) q.set("kind", sel.value);
+    if ($("usageStatus").value) q.set("status", $("usageStatus").value);
+    const data = await api("/api/usage-logs?" + q.toString());
+    const rows = data.logs || [];
+    $("tabCntUsage").textContent = (data.total || 0) + " 条";
+    const body = $("usageBody");
+    body.innerHTML = "";
+    if (!rows.length) {
+      body.innerHTML = '<div class="term-empty">暂无使用日志 — 客户端执行过操作后(先经服务端许可)出现在这里。</div>';
+    }
+    rows.forEach(l => {
+      const ts = new Date(Number(l.started_at) * 1000);
+      const t = isNaN(ts) ? "—" : ts.toLocaleTimeString("zh-CN", { hour12: false });
+      // success→SUCCESS, failed→FAILED, canceled→CANCELED;其它(如 started)按「进行中」。
+      const cls = l.status === "success" ? "ok" : l.status === "failed" ? "fail" : "info";
+      const word = l.status === "success" ? "SUCCESS" : l.status === "failed" ? "FAILED" : l.status === "canceled" ? "CANCELED" : "进行中";
+      const dur = l.duration_ms != null ? fmtDur(l.duration_ms / 1000) : "—";
+      const line = document.createElement("div");
+      line.className = "term-line";
+      line.innerHTML =
+        `<span class="t">[${esc(t)}]</span>` +
+        `<span class="u">${esc(l.api_user_name || "anonymous")}</span>` +
+        `<span class="kind">${esc(usageKindZh(l.operation_kind))}</span>` +
+        `<span class="v">${esc(l.title || "")}</span>` +
+        `<span class="st ${cls}">${word}</span>` +
+        `<span class="dur">${dur}</span>`;
+      body.appendChild(line);
+    });
+    // 分页:用 total 封顶,翻到末页后「下一页」禁用(不再无限翻入空页)。
+    usageTotal = data.total || 0;
+    const totalPages = Math.max(1, Math.ceil(usageTotal / USAGE_PAGE_SIZE));
+    if (usagePage >= totalPages) usagePage = totalPages - 1;
+    $("usageInfo").textContent = "第 " + (usagePage + 1) + " / " + totalPages + " 页 · 共 " + usageTotal + " 条";
+    $("usageNext").disabled = usagePage + 1 >= totalPages;
+    $("usagePrev").disabled = usagePage <= 0;
+  } catch (e) { toast(e.message, "fail"); }
+}
+$("usagePrev").onclick = () => { if (usagePage > 0) { usagePage--; loadUsageLogs(); } };
+$("usageNext").onclick = () => { usagePage++; loadUsageLogs(); };
+$("usageRefresh").onclick = () => { usagePage = 0; loadUsageLogs(); };
+$("usageKind").onchange = () => { usagePage = 0; loadUsageLogs(); };
+$("usageStatus").onchange = () => { usagePage = 0; loadUsageLogs(); };
 
 /* ---------- 启动 ---------- */
 (async () => {

@@ -1,3 +1,4 @@
+using FluentAssertions;
 using VivoKsu.App.Models;
 using VivoKsu.App.Services;
 using VivoKsu.App.ViewModels;
@@ -6,6 +7,106 @@ namespace VivoKsu.App.Tests;
 
 public class OperationCoordinatorTests
 {
+    [Fact]
+    public async Task RunAsync_denies_operation_when_gate_rejects_before_the_operation_runs()
+    {
+        // 操作前必须经服务端许可;拒绝时不执行操作、不污染会话状态,并通知用户(生产=MessageBox)。
+        var session = new DeviceSessionViewModel();
+        var logs = new OperationLogService();
+        var notified = string.Empty;
+        var gate = new StubGate { Result = OperationAuthorization.Deny("账号已被封禁,请联系管理员。") };
+        using var coordinator = new OperationCoordinator(session, logs, message => notified = message, permissionGate: gate);
+        var executed = false;
+
+        var act = () => coordinator.RunAsync(
+            OperationKind.Flashing, "正在刷写 boot",
+            (_, _) => { executed = true; return Task.CompletedTask; });
+
+        await act.Should().ThrowAsync<OperationDeniedException>();
+        executed.Should().BeFalse();
+        coordinator.IsBusy.Should().BeFalse();
+        session.OperationKind.Should().Be(OperationKind.Idle);
+        notified.Should().Contain("服务端未许可");
+        logs.Entries.Should().Contain(e =>
+            e.Level == OperationLogLevel.Warning && e.Message.Contains("服务端未许可"));
+    }
+
+    [Fact]
+    public async Task RunAsync_records_usage_on_success()
+    {
+        var session = new DeviceSessionViewModel();
+        var logs = new OperationLogService();
+        var reporter = new RecordingReporter();
+        using var coordinator = new OperationCoordinator(session, logs, usageReporter: reporter);
+
+        await coordinator.RunAsync(OperationKind.Rebooting, "正在重启设备", (_, _) => Task.CompletedTask);
+
+        var record = reporter.Records.Should().ContainSingle().Subject;
+        record.Operation.Should().Be("Rebooting");
+        record.Title.Should().Be("正在重启设备");
+        record.Status.Should().Be("success");
+        record.DurationMs.Should().NotBeNull();
+        record.EndedAtEpochSeconds.Should().BeGreaterThanOrEqualTo(record.StartedAtEpochSeconds);
+    }
+
+    [Fact]
+    public async Task RunAsync_records_usage_on_failure()
+    {
+        var session = new DeviceSessionViewModel();
+        var logs = new OperationLogService();
+        var reporter = new RecordingReporter();
+        using var coordinator = new OperationCoordinator(session, logs, usageReporter: reporter);
+
+        var act = () => coordinator.RunAsync(
+            OperationKind.Flashing, "正在刷写 boot",
+            (_, _) => throw new InvalidOperationException("写分区失败"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        reporter.Records.Should().ContainSingle(r => r.Status == "failed");
+    }
+
+    [Fact]
+    public async Task RunAsync_records_usage_on_cancel()
+    {
+        var session = new DeviceSessionViewModel();
+        var logs = new OperationLogService();
+        var reporter = new RecordingReporter();
+        using var coordinator = new OperationCoordinator(session, logs, usageReporter: reporter);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var operation = coordinator.RunAsync(
+            OperationKind.Transferring, "正在传输文件",
+            async (_, ct) =>
+            {
+                started.SetResult();
+                await release.Task.WaitAsync(ct);
+            });
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        coordinator.CancelCurrent();
+        release.SetResult();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        reporter.Records.Should().ContainSingle(r => r.Status == "canceled");
+    }
+
+    private sealed class StubGate : IOperationPermissionGate
+    {
+        public OperationAuthorization Result { get; set; } = OperationAuthorization.Allow();
+
+        public Task<OperationAuthorization> AuthorizeAsync(OperationKind kind, string title, CancellationToken cancellationToken)
+            => Task.FromResult(Result);
+    }
+
+    private sealed class RecordingReporter : IUsageReporter
+    {
+        public List<UsageLogEntry> Records { get; } = [];
+
+        public void Record(UsageLogEntry entry) => Records.Add(entry);
+
+        public Task FlushAsync() => Task.CompletedTask;
+    }
+
     [Fact]
     public async Task RunAsync_rejects_a_concurrent_operation_while_another_is_running_and_restores_idle_state()
     {

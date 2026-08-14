@@ -12,7 +12,7 @@ VivoKsu 是**商业付费工具**:
 - **服务端全在 Cloudflare,零自有服务器**:API `api.nwflash.cc.cd`(Worker `nwflash-rom`)+ 后台 `web.nwflash.cc.cd`(Worker `nwflash-web`)+ 数据库 D1 `nwflash-db`,认证、版本授权、审计、后台管理全在 Cloudflare Edge。
 - **商业模式 = 账号授权制**:用户登录即可使用,**不对用户按次扣点 / 限制次数**。拿 ROM 的链路是 `api.nwflash.cc.cd` 从上游 VOTA 取链接返回给工具,中间不涉及对用户账号的任何扣点计费。
 - **上游信用点 = 运营方成本**:VOTA 的信用点扣的是 Worker 所持 token 账户(运营方),由开发者承担,不进客户端、不向用户收。
-- **授权与控制**:版本在后台「版本号控制」启用才可查(未启用 → 404);封禁 / 停用即时生效(登录 401 / 查询 403);每次查询按用户记入访问日志。客户端每 5s 心跳保持在线,后台「在线状态」可实时查看会话并**强制下线**(≤5s 内客户端退出进程)。
+- **授权与控制**:版本在后台「版本号控制」启用才可查(未启用 → 404);封禁 / 停用即时生效(登录 401 / 查询 403);每次查询按用户记入访问日志。客户端每 5s 心跳保持在线,后台「在线状态」可实时查看会话并**强制下线**(≤5s 内客户端退出进程)。**每次用户操作运行前经服务端许可**(默认放行,封禁/停用即拒绝),操作结果与耗时按分类上传使用日志。
 
 ## 功能页面
 
@@ -27,6 +27,7 @@ VivoKsu 是**商业付费工具**:
 | **固件提取** | 解包 `payload.bin` / OTA zip;或粘贴云端直链,通过 HTTP Range **按需下载**镜像(不下载整个包),带实时进度与速度 |
 | **VIVO 线刷** | 一键刷机:adb 读设备 PD/版本 → 查 `api.nwflash.cc.cd` 拿 OTA 链接 → 多分片下载 → 解压解包 payload → **跳过 preloader/lk** → 自动重启 fastbootd 逐个刷入其余分区 → 重启。也可选择本地 .zip / payload.bin 走同流程 |
 | **在线状态** | 登录后每 5s 心跳保持在线;实时查看其他在线用户与在线时长(显示名/版本/时长,不含账号/IP);服务端可**强制下线**(≤5s 内退出进程,刷写中先取消、等 Idle 再退不打断写入) |
+| **操作门禁** | 每次用户操作(刷写/重启/传输/ROOT…)运行前经服务端许可(默认放行;账号封禁/停用即拒绝);操作结果与耗时按分类上传使用日志,后台可查 |
 | **操作日志** | 按级别(信息 / 成功 / 警告 / 错误)记录所有操作,`[HH:mm:ss]` 时间戳 + 消息的刷机工具式单行显示 |
 
 ## 技术栈
@@ -115,6 +116,8 @@ VivoKsu 工具/
 | `GET /api/rom?pd=PD2417&version=16.2.12.0.W10.V000L1` | 按 PD + 版本号返回 OTA 下载链接 |
 | `POST /api/heartbeat` | 在线会话心跳(每 5s;检测强制下线 / 封禁 / 426) |
 | `GET /api/online` | 在线用户列表(显示名/版本/时长,不含账号/IP) |
+| `POST /api/operation/authorize` | 操作许可门禁(每个操作运行前询问;默认放行、封禁/停用拒绝) |
+| `POST /api/usage/logs` | 使用日志批量上传(按操作分类存储) |
 
 **凭据隔离**:VOTA API Token 以 Worker 机密(`wrangler secret put VOTA_API_TOKEN`)存在 `api.nwflash.cc.cd` 上,**不进入 VivoKsu 桌面端**。VivoKsu 代码里没有任何 `api.otau.cc.cd` / token 信息,只连 `api.nwflash.cc.cd`。
 
@@ -134,7 +137,7 @@ npx wrangler deploy                   # 部署并绑定自定义域 api.nwflash.
 
 **错误映射**:`NOT_FOUND`/`not found`→404、`AUTH_FAIL`→401、`INSUFFICIENT_CREDITS`→402、`FORBIDDEN`→403、`RATE_LIMITED`→429、其它→502。
 
-**已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁、**在线会话(心跳 / 在线状态 / 强制下线)**,均已在 Cloudflare 上。**商业模型**:账号授权制 —— 登录即用,不对用户按次扣点 / 限制次数;上游 VOTA 信用点为运营方成本。
+**已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁、**在线会话(心跳 / 在线状态 / 强制下线)**、**操作许可门禁 + 使用日志分类上传**,均已在 Cloudflare 上。**商业模型**:账号授权制 —— 登录即用,不对用户按次扣点 / 限制次数;上游 VOTA 信用点为运营方成本。
 
 > 早期自建 .NET 服务端(`src/VivoKsu.Server/`)已整体删除 —— 线上后端 100% 跑在 Cloudflare Workers(仅支持 JavaScript/TypeScript)+ D1,桌面端直连 `api.nwflash.cc.cd`;VOTA 凭据只存在 Worker 机密里,不再有自托管代码。
 

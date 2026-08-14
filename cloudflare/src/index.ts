@@ -87,6 +87,21 @@ export default {
         return onlineClients(env, request);
       }
 
+      // 操作许可:客户端每个用户操作运行前询问;默认放行,封禁/停用拒绝。走版本门禁(低于最低版本→426,
+      // 客户端应弹更新窗而非放行)。
+      if (url.pathname === "/api/operation/authorize" && request.method === "POST") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
+        return authorizeOperation(env, request);
+      }
+
+      // 使用日志:客户端批量上传操作记录(按 kind 分类存储)。走版本门禁(与 authorize 一致)。
+      if (url.pathname === "/api/usage/logs" && request.method === "POST") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
+        return acceptUsageLogs(env, request);
+      }
+
       if (url.pathname === "/api/rom") {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
@@ -373,6 +388,69 @@ async function onlineClients(env: Env, request: Request): Promise<Response> {
 
   await purgeStaleSessions(env);
   return json({ count: sessions.length, sessions }, 200);
+}
+
+/* ------------------------------------------------------------------ */
+/* 操作许可门禁 + 使用日志                                                 */
+/* ------------------------------------------------------------------ */
+
+/** POST /api/operation/authorize —— 客户端每个用户操作运行前询问。默认放行;封禁/停用拒绝。 */
+async function authorizeOperation(env: Env, request: Request): Promise<Response> {
+  const auth = await authenticateUser(env, request);
+  if (auth instanceof Response) return auth;
+  if (auth === null) return json({ error: "请先登录。" }, 401);
+
+  if (auth.banned) {
+    return json({ allowed: false, reason: "账号已被封禁,请联系管理员。" }, 200);
+  }
+  // disabled 用户由 authenticateUser 直接返回 401;此处再兜一层(理论上不会到这)。
+  return json({ allowed: true }, 200);
+}
+
+/** POST /api/usage/logs —— 客户端批量上传使用日志;按 operation_kind 分类存储,绑定认证用户。event_key 幂等去重。 */
+async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
+  const auth = await authenticateUser(env, request);
+  if (auth instanceof Response) return auth;
+  if (auth === null) return json({ error: "请先登录。" }, 401);
+  if (auth.banned) return json({ error: "账号已被封禁。" }, 403);
+
+  const body = await request.json().catch(() => null);
+  const logs = Array.isArray(body?.logs) ? body.logs : [];
+  if (logs.length === 0) return json({ ok: true, received: 0 }, 200);
+  if (logs.length > 100) return json({ error: "单批日志最多 100 条。" }, 400);
+
+  // 数字字段 NaN 保护:任一条 ended_at/duration_ms 非法绑定会让整批(原子)500 且客户端永久重试。
+  const toInt = (v: unknown): number | null => {
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const statement = env.DB.prepare(
+    `INSERT INTO usage_logs (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at, ended_at, duration_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(event_key) DO NOTHING`,
+  );
+  const batch = logs.map((log) =>
+    statement.bind(
+      auth.id,
+      auth.name,
+      String(log?.operation || "").slice(0, 32),
+      String(log?.title || "").slice(0, 200),
+      String(log?.status || "started").slice(0, 16),
+      log?.event_id != null ? String(log.event_id).slice(0, 64) : null,
+      Number(log?.started_at) || 0,
+      toInt(log?.ended_at),
+      toInt(log?.duration_ms),
+    ),
+  );
+
+  try {
+    await env.DB.batch(batch);
+  } catch {
+    return json({ error: "日志写入失败。" }, 500);
+  }
+  return json({ ok: true, received: logs.length }, 200);
 }
 
 /* ------------------------------------------------------------------ */
