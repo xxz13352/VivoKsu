@@ -115,14 +115,16 @@ public sealed class MirrorService
             var executable = scrcpyToolLocator.ExecutablePath!;
             var adbPath = Path.Combine(AppContext.BaseDirectory, "platform-tools", "adb.exe");
             var arguments = new List<string> { "--serial", session.Serial, "--stay-awake" };
+            IReadOnlyDictionary<string, string>? environment = null;
             if (File.Exists(adbPath))
             {
                 // 统一用 platform-tools/adb.exe,避免依赖 scrcpy 包自带的 adb(发布已删除)。
-                arguments.Add("--adb-path");
-                arguments.Add(adbPath);
+                // scrcpy v4.0 移除了 --adb-path 命令行选项,改为通过 ADB 环境变量指定
+                // adb 路径;环境变量在所有 scrcpy 版本都受支持。
+                environment = new Dictionary<string, string> { ["ADB"] = adbPath };
             }
 
-            process = processRunner.Start(executable, arguments);
+            process = processRunner.Start(executable, arguments, environment);
             process.Exited += OnProcessExited;
             logs.Write(OperationLogLevel.Success, $"ADB 投屏已启动: {session.Serial}。");
             NotifyStateChanged();

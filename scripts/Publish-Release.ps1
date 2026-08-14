@@ -52,7 +52,7 @@ Get-ChildItem $outputPath -Directory |
     Where-Object { $_.Name -match '^[a-z]{2}(-[A-Za-z]+)?$' -and $_.Name -notin $keepLanguages } |
     Remove-Item -Recurse -Force
 
-# 3. Remove scrcpy-bundled adb (app passes --adb-path to platform-tools\adb.exe)
+# 3. Remove scrcpy-bundled adb (app sets the ADB env var to platform-tools\adb.exe)
 $scrcpyRedundant = @(
     (Join-Path $outputPath "scrcpy\adb.exe"),
     (Join-Path $outputPath "scrcpy\AdbWinApi.dll"),

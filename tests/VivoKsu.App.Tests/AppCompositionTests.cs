@@ -32,7 +32,7 @@ public class AppCompositionTests
 
     private sealed class FakeProcessRunner : IProcessRunner
     {
-        public IRunningProcess Start(string executable, IReadOnlyList<string> arguments) => new FakeRunningProcess();
+        public IRunningProcess Start(string executable, IReadOnlyList<string> arguments, IReadOnlyDictionary<string, string>? environment = null) => new FakeRunningProcess();
     }
 
     private sealed class FakeRunningProcess : IRunningProcess

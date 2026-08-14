@@ -5,11 +5,14 @@ namespace VivoKsu.App.Services;
 
 public sealed class SystemProcessRunner : IProcessRunner
 {
-    public IRunningProcess Start(string executable, IReadOnlyList<string> arguments)
+    public IRunningProcess Start(
+        string executable,
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var process = new Process
         {
-            StartInfo = CreateStartInfo(executable, arguments),
+            StartInfo = CreateStartInfo(executable, arguments, environment),
             EnableRaisingEvents = true
         };
 
@@ -21,7 +24,10 @@ public sealed class SystemProcessRunner : IProcessRunner
         return new RunningProcess(process);
     }
 
-    private static ProcessStartInfo CreateStartInfo(string executable, IReadOnlyList<string> arguments)
+    private static ProcessStartInfo CreateStartInfo(
+        string executable,
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment)
     {
         var fullPath = Path.GetFullPath(executable);
         var startInfo = new ProcessStartInfo
@@ -35,6 +41,14 @@ public sealed class SystemProcessRunner : IProcessRunner
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
+        }
+
+        if (environment is not null)
+        {
+            foreach (var pair in environment)
+            {
+                startInfo.Environment[pair.Key] = pair.Value;
+            }
         }
 
         return startInfo;

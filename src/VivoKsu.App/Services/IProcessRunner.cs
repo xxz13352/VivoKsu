@@ -2,7 +2,10 @@ namespace VivoKsu.App.Services;
 
 public interface IProcessRunner
 {
-    IRunningProcess Start(string executable, IReadOnlyList<string> arguments);
+    IRunningProcess Start(
+        string executable,
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment = null);
 }
 
 public interface IRunningProcess : IDisposable

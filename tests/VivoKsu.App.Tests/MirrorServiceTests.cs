@@ -22,6 +22,33 @@ public class MirrorServiceTests
     }
 
     [Fact]
+    public async Task StartAsync_points_scrcpy_at_platform_tools_adb_via_the_adb_environment_variable()
+    {
+        // scrcpy v4.0 移除了 --adb-path 选项(遇到它会以 "unknown option" 立即退出),
+        // adb 路径必须改为通过 ADB 环境变量注入,且参数里不再出现 --adb-path。
+        var adbDirectory = Path.Combine(AppContext.BaseDirectory, "platform-tools");
+        var adbPath = Path.Combine(adbDirectory, "adb.exe");
+        Directory.CreateDirectory(adbDirectory);
+        try
+        {
+            File.WriteAllBytes(adbPath, new byte[] { 0 });
+            var runner = new FakeProcessRunner();
+            var service = new MirrorService(runner, new OperationLogService(), new AvailableScrcpyLocator());
+            var session = new DeviceSessionViewModel();
+            session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.AdbConnected, "RF8", "ADB 已连接"));
+
+            await service.StartAsync(session, CancellationToken.None);
+
+            Assert.DoesNotContain(runner.LastArguments!, argument => argument == "--adb-path");
+            Assert.Equal(adbPath, runner.LastEnvironment!["ADB"]);
+        }
+        finally
+        {
+            Directory.Delete(adbDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StopAsync_suppresses_auto_restart_after_a_deliberate_stop()
     {
         var runner = new FakeProcessRunner();
@@ -174,11 +201,15 @@ public class MirrorServiceTests
     {
         public int StartCount { get; private set; }
         public string? LastSerial { get; private set; }
+        public IReadOnlyList<string>? LastArguments { get; private set; }
+        public IReadOnlyDictionary<string, string>? LastEnvironment { get; private set; }
         public FakeRunningProcess? LastProcess { get; private set; }
 
-        public IRunningProcess Start(string executable, IReadOnlyList<string> arguments)
+        public IRunningProcess Start(string executable, IReadOnlyList<string> arguments, IReadOnlyDictionary<string, string>? environment = null)
         {
             StartCount++;
+            LastArguments = arguments;
+            LastEnvironment = environment;
             var serialIndex = Array.FindIndex(arguments.ToArray(), static value => value == "--serial");
             LastSerial = serialIndex >= 0 && serialIndex + 1 < arguments.Count ? arguments[serialIndex + 1] : null;
             LastProcess = new FakeRunningProcess();
