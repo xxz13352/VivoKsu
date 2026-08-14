@@ -107,7 +107,8 @@ public sealed class AppComposition
             new SoftwareViewModel(
                 AppContext.BaseDirectory,
                 preferences: toolPreferences,
-                onReinstallDriver: () => new DriverReminderWindow(reinstallMode: true).ShowDialog()));
+                onReinstallDriver: () => new DriverReminderWindow(reinstallMode: true).ShowDialog()),
+            onLogout: OnLogoutAsync);
         Monitor.DeviceRefreshed += MainViewModel.OnDeviceRefreshedAsync;
 
         firmwareExtract.SetFlashContinuation((image, partition) =>
@@ -159,6 +160,9 @@ public sealed class AppComposition
     /// <summary>客户端使用日志上报器:OperationCoordinator 记录 → 批量上传(30s 定时 + 退出 flush)。</summary>
     public UsageLogUploader UsageReporter => usageReporter;
 
+    /// <summary>用户点击登出,优雅下线完成后触发;App 据此关主窗回登录窗。</summary>
+    public event EventHandler? LogoutRequested;
+
     /// <summary>本次启动的会话 id(客户端生成,GUID)。强制下线/在线列表以此标记「自己」。</summary>
     public string? SessionId { get; private set; }
 
@@ -177,6 +181,7 @@ public sealed class AppComposition
     {
         SetAuthToken(token);
         CurrentUsername = username;
+        MainViewModel.AccountName = username;
         if (sessionStarted)
         {
             return;
@@ -214,6 +219,7 @@ public sealed class AppComposition
         }
 
         stopped = true;
+        MainViewModel.StopClock();
         Monitor.DeviceRefreshed -= MainViewModel.OnDeviceRefreshedAsync;
         // 先停心跳(尽早发 goodbye,让服务端立即标记离线),再停 Monitor——否则 Monitor 的
         // DrainRefreshesAsync 可能烧掉 OnExit 的 5s 预算,goodbye 连机会都没有。
@@ -236,6 +242,13 @@ public sealed class AppComposition
 
         usageReporter.Dispose();
         CleanupTemporaryFiles();
+    }
+
+    private async Task OnLogoutAsync()
+    {
+        // 优雅下线(心跳 goodbye / 使用日志 flush / 停设备监视),完成后通知 App 回登录窗。
+        await StopAsync();
+        LogoutRequested?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>清理可达数 GB 的临时文件(URL 下载 gzip + 安全刷写 staging)。正常退出与强制退出共用。</summary>

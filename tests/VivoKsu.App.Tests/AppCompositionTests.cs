@@ -38,6 +38,19 @@ public class AppCompositionTests
         composition.Heartbeat.IsRunning.Should().BeFalse();
     }
 
+    [Fact]
+    public async Task Logout_command_stops_the_composition_and_raises_logout_requested()
+    {
+        var composition = AppComposition.CreateForTesting(new EmptyNativeApi(), new FakeProcessRunner());
+        var logoutRaised = false;
+        composition.LogoutRequested += (_, _) => logoutRaised = true;
+
+        await composition.MainViewModel.LogoutCommand.ExecuteAsync(null);
+
+        Assert.True(logoutRaised);
+        Assert.False(composition.Heartbeat.IsRunning);
+    }
+
     private sealed class EmptyNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => string.Empty;
