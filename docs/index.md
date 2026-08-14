@@ -40,7 +40,7 @@ VivoKsu 工具/
 │  ├─ web/src/index.ts       # web.nwflash.cc.cd · Worker nwflash-web(API + 托管 SPA)
 │  ├─ web/src/admin.html     # 「固件登记簿」后台单页(三菜单)
 │  └─ wrangler.toml          # D1 绑定 + 自定义域 + vars
-├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(264 用例)
+├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(267 用例)
 ├─ scripts/                  # Publish-Release.ps1 / Ensure-Scrcpy.ps1 / verify-*.ps1
 └─ docs/                     # 本文档 + architecture.md + safeflash-ota.md
 ```
