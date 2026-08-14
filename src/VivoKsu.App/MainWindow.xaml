@@ -1264,33 +1264,88 @@
 
             <Border Grid.Row="2" Background="{StaticResource EdgeBrush}"/>
 
-            <Grid Grid.Row="3" Margin="20,16,20,14">
-              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-              <StackPanel>
-                <TextBlock Text="手机 USB 驱动" FontSize="14" FontWeight="SemiBold"/>
-                <TextBlock Text="DriverStore 关键 INF / BBK 安装目录 / 卸载注册表键" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
-              </StackPanel>
-              <Border Grid.Column="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center" Margin="12,0,0,0">
-                <Border.Style>
-                  <Style TargetType="Border">
-                    <Setter Property="Background" Value="#FBEAE7"/>
-                    <Style.Triggers>
-                      <DataTrigger Binding="{Binding Software.IsDriverInstalled}" Value="True"><Setter Property="Background" Value="#EAF7F5"/></DataTrigger>
-                    </Style.Triggers>
-                  </Style>
-                </Border.Style>
-                <TextBlock Text="{Binding Software.DriverStatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold">
-                  <TextBlock.Style>
-                    <Style TargetType="TextBlock">
-                      <Setter Property="Foreground" Value="#C85B46"/>
+            <StackPanel Grid.Row="3" Margin="20,16,20,14">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <StackPanel>
+                  <TextBlock Text="手机 USB 驱动" FontSize="14" FontWeight="SemiBold"/>
+                  <TextBlock Text="ADB / Fastboot / MediaTek 三类分别检测,任缺一类启动即提醒" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
+                </StackPanel>
+                <Button Grid.Column="1" Content="重新安装" Style="{StaticResource ToolButtonStyle}" Command="{Binding Software.ReinstallDriverCommand}" Padding="12,6" Margin="0" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+              </Grid>
+              <Grid Margin="0,12,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="ADB（WinUSB）" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Grid.Column="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                  <Border.Style>
+                    <Style TargetType="Border">
+                      <Setter Property="Background" Value="#FBEAE7"/>
                       <Style.Triggers>
-                        <DataTrigger Binding="{Binding Software.IsDriverInstalled}" Value="True"><Setter Property="Foreground" Value="{StaticResource ConnectionBrush}"/></DataTrigger>
+                        <DataTrigger Binding="{Binding Software.IsAdbDriverInstalled}" Value="True"><Setter Property="Background" Value="#EAF7F5"/></DataTrigger>
                       </Style.Triggers>
                     </Style>
-                  </TextBlock.Style>
-                </TextBlock>
-              </Border>
-            </Grid>
+                  </Border.Style>
+                  <TextBlock Text="{Binding Software.AdbDriverStatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold">
+                    <TextBlock.Style>
+                      <Style TargetType="TextBlock">
+                        <Setter Property="Foreground" Value="#C85B46"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding Software.IsAdbDriverInstalled}" Value="True"><Setter Property="Foreground" Value="{StaticResource ConnectionBrush}"/></DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </TextBlock.Style>
+                  </TextBlock>
+                </Border>
+              </Grid>
+              <Grid Margin="0,8,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="Fastboot（fastbootd 刷写）" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Grid.Column="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                  <Border.Style>
+                    <Style TargetType="Border">
+                      <Setter Property="Background" Value="#FBEAE7"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Software.IsFastbootDriverInstalled}" Value="True"><Setter Property="Background" Value="#EAF7F5"/></DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Border.Style>
+                  <TextBlock Text="{Binding Software.FastbootDriverStatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold">
+                    <TextBlock.Style>
+                      <Style TargetType="TextBlock">
+                        <Setter Property="Foreground" Value="#C85B46"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding Software.IsFastbootDriverInstalled}" Value="True"><Setter Property="Foreground" Value="{StaticResource ConnectionBrush}"/></DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </TextBlock.Style>
+                  </TextBlock>
+                </Border>
+              </Grid>
+              <Grid Margin="0,8,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="MediaTek（联发科 / BROM 救砖）" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <Border Grid.Column="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                  <Border.Style>
+                    <Style TargetType="Border">
+                      <Setter Property="Background" Value="#FBEAE7"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Software.IsMediaTekDriverInstalled}" Value="True"><Setter Property="Background" Value="#EAF7F5"/></DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Border.Style>
+                  <TextBlock Text="{Binding Software.MediaTekDriverStatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold">
+                    <TextBlock.Style>
+                      <Style TargetType="TextBlock">
+                        <Setter Property="Foreground" Value="#C85B46"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding Software.IsMediaTekDriverInstalled}" Value="True"><Setter Property="Foreground" Value="{StaticResource ConnectionBrush}"/></DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </TextBlock.Style>
+                  </TextBlock>
+                </Border>
+              </Grid>
+            </StackPanel>
 
             <Border Grid.Row="4" Background="{StaticResource EdgeBrush}"/>
 

@@ -21,7 +21,7 @@ public class SoftwareViewModelTests
     }
 
     [Fact]
-    public async Task Driver_status_reflects_detector()
+    public async Task Driver_status_reflects_detector_across_three_categories()
     {
         using var fixture = new TempRoot();
         var notInstalled = new VivoDriverDetector(
@@ -32,21 +32,44 @@ public class SoftwareViewModelTests
         var viewModel = CreateViewModel(driverDetector: notInstalled);
         await viewModel.RefreshCommand.ExecuteAsync(null);
 
-        Assert.False(viewModel.IsDriverInstalled);
-        Assert.Equal("未安装", viewModel.DriverStatusText);
+        Assert.False(viewModel.IsAdbDriverInstalled);
+        Assert.False(viewModel.IsFastbootDriverInstalled);
+        Assert.False(viewModel.IsMediaTekDriverInstalled);
+        Assert.Equal("未安装", viewModel.AdbDriverStatusText);
+        Assert.Equal("未安装", viewModel.MediaTekDriverStatusText);
 
-        // 安装目录存在 → 已安装。
-        Directory.CreateDirectory(Path.Combine(fixture.Root, "BBK", "vivo_usb_driver"));
-        var installed = new VivoDriverDetector(
-            driverStoreDirectories: [Path.Combine(fixture.Root, "missing")],
-            installDirectories: [Path.Combine(fixture.Root, "BBK", "vivo_usb_driver")],
+        // 只装 ADB 标记:仅 ADB 显示已安装,另两类未安装。
+        Directory.CreateDirectory(Path.Combine(fixture.Root, "DriverStore", "FileRepository", "android_winusb.inf_amd64_x"));
+        var onlyAdb = new VivoDriverDetector(
+            driverStoreDirectories: [Path.Combine(fixture.Root, "DriverStore", "FileRepository")],
+            installDirectories: [Path.Combine(fixture.Root, "missing-install")],
             uninstallRegistryKeys: ["unused"],
             registryKeyExists: _ => false);
-        var installedViewModel = CreateViewModel(driverDetector: installed);
-        await installedViewModel.RefreshCommand.ExecuteAsync(null);
+        var onlyAdbViewModel = CreateViewModel(driverDetector: onlyAdb);
+        await onlyAdbViewModel.RefreshCommand.ExecuteAsync(null);
 
-        Assert.True(installedViewModel.IsDriverInstalled);
-        Assert.Equal("已安装", installedViewModel.DriverStatusText);
+        Assert.True(onlyAdbViewModel.IsAdbDriverInstalled);
+        Assert.Equal("已安装", onlyAdbViewModel.AdbDriverStatusText);
+        Assert.False(onlyAdbViewModel.IsFastbootDriverInstalled);
+        Assert.False(onlyAdbViewModel.IsMediaTekDriverInstalled);
+    }
+
+    [Fact]
+    public async Task Reinstall_driver_command_invokes_the_callback()
+    {
+        using var fixture = new TempRoot();
+        var invoked = false;
+        var detector = new VivoDriverDetector(
+            driverStoreDirectories: [Path.Combine(fixture.Root, "missing")],
+            installDirectories: [Path.Combine(fixture.Root, "missing-install")],
+            uninstallRegistryKeys: ["unused"],
+            registryKeyExists: _ => false);
+        var viewModel = CreateViewModel(driverDetector: detector, onReinstallDriver: () => invoked = true);
+
+        Assert.True(viewModel.ReinstallDriverCommand.CanExecute(null));
+        viewModel.ReinstallDriverCommand.Execute(null);
+
+        Assert.True(invoked);
     }
 
     [Fact]
@@ -112,7 +135,7 @@ public class SoftwareViewModelTests
     public async Task Refresh_command_notifies_property_changed_and_recomputes()
     {
         using var fixture = new TempRoot();
-        var markerDirectory = Path.Combine(fixture.Root, "DriverStore", "FileRepository", "androidwinusb.inf_amd64_x");
+        var markerDirectory = Path.Combine(fixture.Root, "DriverStore", "FileRepository", "android_winusb.inf_amd64_x");
         var detector = new VivoDriverDetector(
             driverStoreDirectories: [Path.Combine(fixture.Root, "DriverStore", "FileRepository")],
             installDirectories: [Path.Combine(fixture.Root, "missing")],
@@ -120,7 +143,7 @@ public class SoftwareViewModelTests
             registryKeyExists: _ => false);
         var viewModel = CreateViewModel(driverDetector: detector);
         await viewModel.RefreshCommand.ExecuteAsync(null);
-        Assert.False(viewModel.IsDriverInstalled);
+        Assert.False(viewModel.IsAdbDriverInstalled);
 
         // 订阅 PropertyChanged:Refresh 必须实际触发通知(而非仅 getter 惰性求值)。
         var notified = new List<string>();
@@ -129,9 +152,9 @@ public class SoftwareViewModelTests
         Directory.CreateDirectory(markerDirectory);
         await viewModel.RefreshCommand.ExecuteAsync(null);
 
-        Assert.True(viewModel.IsDriverInstalled);
-        Assert.Contains(nameof(SoftwareViewModel.IsDriverInstalled), notified);
-        Assert.Contains(nameof(SoftwareViewModel.DriverStatusText), notified);
+        Assert.True(viewModel.IsAdbDriverInstalled);
+        Assert.Contains(nameof(SoftwareViewModel.IsAdbDriverInstalled), notified);
+        Assert.Contains(nameof(SoftwareViewModel.AdbDriverStatusText), notified);
     }
 
     private static SoftwareViewModel CreateViewModel(
@@ -139,14 +162,16 @@ public class SoftwareViewModelTests
         IScrcpyToolLocator? scrcpyLocator = null,
         PayloadDumperRunner? payloadDumper = null,
         ToolPathPreferences? preferences = null,
-        string? scrcpyInstallationRoot = null) =>
+        string? scrcpyInstallationRoot = null,
+        Action? onReinstallDriver = null) =>
         new(
             applicationRoot: Path.GetTempPath(),
             driverDetector,
             scrcpyLocator,
             payloadDumper,
             preferences,
-            scrcpyInstallationRoot);
+            scrcpyInstallationRoot,
+            onReinstallDriver);
 
     private sealed class StubScrcpyLocator : IScrcpyToolLocator
     {

@@ -134,8 +134,8 @@
           <!-- 标题 + 说明 -->
           <StackPanel Grid.Row="1" Margin="0,24,0,0">
             <TextBlock Text="DRIVER GATE · USB 驱动" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource Teal}"/>
-            <TextBlock Text="未检测到手机 USB 驱动" Margin="0,6,0,0" Foreground="{StaticResource Ink}" FontSize="22" FontWeight="Bold"/>
-            <TextBlock Text="当前电脑缺少 vivo 手机 USB 驱动,刷机 / 救砖 / 文件管理等功能可能无法识别手机。安装驱动需要管理员权限。" Margin="0,8,0,0" Foreground="{StaticResource Muted}" FontSize="12.5" TextWrapping="Wrap" LineHeight="20"/>
+            <TextBlock x:Name="TitleText" Text="缺少手机 USB 驱动" Margin="0,6,0,0" Foreground="{StaticResource Ink}" FontSize="22" FontWeight="Bold"/>
+            <TextBlock x:Name="DescText" Text="当前电脑缺少 vivo 手机 USB 驱动,刷机 / 救砖 / 文件管理等功能可能无法识别手机。安装驱动需要管理员权限。" Margin="0,8,0,0" Foreground="{StaticResource Muted}" FontSize="12.5" TextWrapping="Wrap" LineHeight="20"/>
           </StackPanel>
 
           <!-- 状态提示(安装成功/失败后显示) -->

@@ -19,6 +19,7 @@ public partial class SoftwareViewModel : ObservableObject
     private readonly PayloadDumperRunner payloadDumper;
     private readonly ToolPathPreferences? preferences;
     private readonly string scrcpyInstallationRoot;
+    private readonly Action? onReinstallDriver;
 
     public SoftwareViewModel() : this(AppContext.BaseDirectory)
     {
@@ -30,7 +31,8 @@ public partial class SoftwareViewModel : ObservableObject
         IScrcpyToolLocator? scrcpyLocator = null,
         PayloadDumperRunner? payloadDumper = null,
         ToolPathPreferences? preferences = null,
-        string? scrcpyInstallationRoot = null)
+        string? scrcpyInstallationRoot = null,
+        Action? onReinstallDriver = null)
     {
         AppVersion = AppInfo.Version;
         this.driverDetector = driverDetector ?? VivoDriverDetector.CreateDefault();
@@ -42,7 +44,9 @@ public partial class SoftwareViewModel : ObservableObject
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "VivoKsu",
             "scrcpy");
+        this.onReinstallDriver = onReinstallDriver;
         RefreshCommand = new AsyncRelayCommand(() => RefreshAsync());
+        ReinstallDriverCommand = new RelayCommand(ReinstallDriver, () => onReinstallDriver is not null);
 
         // 页面未打开前即开始检测;完成后自动更新绑定。
         _ = RefreshAsync();
@@ -52,10 +56,22 @@ public partial class SoftwareViewModel : ObservableObject
     public string AppVersion { get; }
 
     [ObservableProperty]
-    private bool isDriverInstalled;
+    private bool isAdbDriverInstalled;
 
     [ObservableProperty]
-    private string driverStatusText = "检测中…";
+    private string adbDriverStatusText = "检测中…";
+
+    [ObservableProperty]
+    private bool isFastbootDriverInstalled;
+
+    [ObservableProperty]
+    private string fastbootDriverStatusText = "检测中…";
+
+    [ObservableProperty]
+    private bool isMediaTekDriverInstalled;
+
+    [ObservableProperty]
+    private string mediaTekDriverStatusText = "检测中…";
 
     [ObservableProperty]
     private bool isScrcpyReady;
@@ -72,21 +88,53 @@ public partial class SoftwareViewModel : ObservableObject
     /// <summary>重新检测各组件状态(线程池执行,完成通知界面)。</summary>
     public IAsyncRelayCommand RefreshCommand { get; }
 
+    /// <summary>重新安装 USB 驱动(弹驱动安装窗,三类可重装)。</summary>
+    public IRelayCommand ReinstallDriverCommand { get; }
+
+    private void ReinstallDriver()
+    {
+        onReinstallDriver?.Invoke();
+        // 安装窗关闭后刷新,让软件页驱动状态与真实情况一致。
+        _ = RefreshAsync();
+    }
+
     private async Task RefreshAsync()
     {
-        // DriverStore 枚举可能遍历上千目录,放线程池,避免冻结 UI。
-        var driverTask = Task.Run(() => driverDetector.IsInstalled());
-        var payloadReady = await Task.Run(() => payloadDumper.IsAvailable).ConfigureAwait(false);
+        try
+        {
+            // DriverStore 枚举可能遍历上千目录,放线程池,避免冻结 UI。
+            var driverTask = Task.Run(() =>
+            {
+                var adb = driverDetector.IsAdbInstalled;
+                var fastboot = driverDetector.IsFastbootInstalled;
+                var mediaTek = driverDetector.IsMediaTekInstalled;
+                return (Adb: adb, Fastboot: fastboot, MediaTek: mediaTek);
+            });
+            var payloadReady = await Task.Run(() => payloadDumper.IsAvailable).ConfigureAwait(false);
 
-        var scrcpyExecutable = await ResolveScrcpyAsync().ConfigureAwait(false);
-        var driverInstalled = await driverTask.ConfigureAwait(false);
+            var scrcpyExecutable = await ResolveScrcpyAsync().ConfigureAwait(false);
+            var (adb, fastboot, mediaTek) = await driverTask.ConfigureAwait(false);
 
-        IsDriverInstalled = driverInstalled;
-        DriverStatusText = driverInstalled ? "已安装" : "未安装";
-        IsScrcpyReady = scrcpyExecutable is not null;
-        ScrcpyStatusText = scrcpyExecutable is not null ? "scrcpy 已就绪" : "未检测到 scrcpy.exe";
-        IsPayloadReady = payloadReady;
-        PayloadStatusText = payloadReady ? "就绪" : "未就绪";
+            IsAdbDriverInstalled = adb;
+            AdbDriverStatusText = adb ? "已安装" : "未安装";
+            IsFastbootDriverInstalled = fastboot;
+            FastbootDriverStatusText = fastboot ? "已安装" : "未安装";
+            IsMediaTekDriverInstalled = mediaTek;
+            MediaTekDriverStatusText = mediaTek ? "已安装" : "未安装";
+            IsScrcpyReady = scrcpyExecutable is not null;
+            ScrcpyStatusText = scrcpyExecutable is not null ? "scrcpy 已就绪" : "未检测到 scrcpy.exe";
+            IsPayloadReady = payloadReady;
+            PayloadStatusText = payloadReady ? "就绪" : "未就绪";
+        }
+        catch
+        {
+            // 检测失败(DriverStore 权限等)不弹错误,把仍处于「检测中」的状态标为失败。
+            if (AdbDriverStatusText == "检测中…") AdbDriverStatusText = "检测失败";
+            if (FastbootDriverStatusText == "检测中…") FastbootDriverStatusText = "检测失败";
+            if (MediaTekDriverStatusText == "检测中…") MediaTekDriverStatusText = "检测失败";
+            if (ScrcpyStatusText == "检测中…") ScrcpyStatusText = "检测失败";
+            if (PayloadStatusText == "检测中…") PayloadStatusText = "检测失败";
+        }
     }
 
     /// <summary>解析 scrcpy 实际可用路径:内置/PATH(定位器)→ 用户自选 → 自动下载安装目录。</summary>

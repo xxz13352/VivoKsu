@@ -131,12 +131,19 @@ public partial class App : Application
     {
         try
         {
-            var installed = await Task.Run(() => VivoDriverDetector.CreateDefault().IsInstalled());
-            if (installed)
+            // 只要求 ADB + Fastboot(刷机/连接必需);MediaTek 联发科仅救砖用,高通 SoC 机型(iQOO/X 系)
+            // 不需要,不强制提醒——「软件」页三类分别显示状态,可手动重装。
+            var needed = await Task.Run(() =>
+            {
+                var detector = VivoDriverDetector.CreateDefault();
+                return (Adb: detector.IsAdbInstalled, Fastboot: detector.IsFastbootInstalled);
+            });
+            if (needed.Adb && needed.Fastboot)
             {
                 return;
             }
 
+            // 模态提醒:需用户决定是否安装后主界面才可操作(UAC 安装需聚焦)。
             new DriverReminderWindow().ShowDialog();
         }
         catch

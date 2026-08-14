@@ -104,7 +104,10 @@ public sealed class AppComposition
             Monitor,
             Coordinator,
             Online,
-            new SoftwareViewModel(AppContext.BaseDirectory, preferences: toolPreferences));
+            new SoftwareViewModel(
+                AppContext.BaseDirectory,
+                preferences: toolPreferences,
+                onReinstallDriver: () => new DriverReminderWindow(reinstallMode: true).ShowDialog()));
         Monitor.DeviceRefreshed += MainViewModel.OnDeviceRefreshedAsync;
 
         firmwareExtract.SetFlashContinuation((image, partition) =>
