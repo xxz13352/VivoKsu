@@ -74,6 +74,27 @@ public class MainViewModelTests
         Assert.Empty(viewModel.PartitionWorkspace.Rows);
     }
 
+    [Fact]
+    public async Task LogoutCommand_invokes_the_injected_logout_callback()
+    {
+        var invoked = false;
+        var viewModel = new MainViewModel(new DeviceSessionViewModel(), onLogout: () => { invoked = true; return Task.CompletedTask; });
+
+        await viewModel.LogoutCommand.ExecuteAsync(null);
+
+        Assert.True(invoked);
+    }
+
+    [Fact]
+    public void AccountName_is_settable()
+    {
+        var viewModel = new MainViewModel(new DeviceSessionViewModel());
+
+        viewModel.AccountName = "alice";
+
+        Assert.Equal("alice", viewModel.AccountName);
+    }
+
     private sealed class CurrentDeviceApi : IFastbootRsNativeApi
     {
         public string ListDevices() => "AUTO\tdevice\n";

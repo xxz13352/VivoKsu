@@ -1,3 +1,4 @@
+using System.Windows;
 using System.IO;
 using System.Net.Http;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -12,10 +13,18 @@ public partial class MainViewModel : ObservableObject
     private readonly DeviceSessionService? deviceSessionService;
     private readonly IDeviceMonitor? deviceMonitor;
     private readonly IOperationCoordinator? coordinator;
+    private readonly Func<Task>? onLogout;
+    private readonly System.Windows.Threading.DispatcherTimer? clockTimer;
     private int refreshInProgress;
 
     [ObservableProperty]
     private AppPage selectedPage = AppPage.Overview;
+
+    [ObservableProperty]
+    private string accountName = "";
+
+    [ObservableProperty]
+    private string currentTimeText = "";
 
     public DeviceSessionViewModel DeviceSession { get; }
 
@@ -49,6 +58,8 @@ public partial class MainViewModel : ObservableObject
 
     public IAsyncRelayCommand RefreshDeviceCommand { get; }
 
+    public IAsyncRelayCommand LogoutCommand { get; }
+
     public MainViewModel(
         DeviceSessionViewModel deviceSession,
         OverviewViewModel? overview = null,
@@ -65,7 +76,8 @@ public partial class MainViewModel : ObservableObject
         IDeviceMonitor? deviceMonitor = null,
         IOperationCoordinator? coordinator = null,
         OnlineViewModel? online = null,
-        SoftwareViewModel? software = null)
+        SoftwareViewModel? software = null,
+        Func<Task>? onLogout = null)
     {
         var fallbackLogs = new OperationLogService();
         var fallbackCliRunner = new FastbootCliRunner(Path.Combine(Path.GetTempPath(), "unavailable-fastboot.exe"));
@@ -104,9 +116,30 @@ public partial class MainViewModel : ObservableObject
             fallbackCliRunner);
         Online = online ?? new OnlineViewModel(fallbackOtaClient, new HeartbeatService(fallbackOtaClient));
         Software = software ?? new SoftwareViewModel();
+        this.onLogout = onLogout;
+        LogoutCommand = new AsyncRelayCommand(LogoutAsync);
+        // 纯单测环境(无 WPF Application)不启动时钟,避免 DispatcherTimer 泄漏。
+        if (Application.Current is not null)
+        {
+            clockTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            clockTimer.Tick += (_, _) => CurrentTimeText = DateTime.Now.ToString("MM-dd HH:mm:ss");
+            clockTimer.Start();
+            CurrentTimeText = DateTime.Now.ToString("MM-dd HH:mm:ss");
+        }
+
         SelectPageCommand = new RelayCommand<AppPage>(page => SelectedPage = page);
         RefreshDeviceCommand = new AsyncRelayCommand(() => RefreshDeviceAsync(logActivity: true));
     }
+
+    private async Task LogoutAsync()
+    {
+        if (onLogout is not null)
+        {
+            await onLogout();
+        }
+    }
+
+    public void StopClock() => clockTimer?.Stop();
 
     public async Task RefreshDeviceAsync(bool logActivity, bool automatic = false)
     {
