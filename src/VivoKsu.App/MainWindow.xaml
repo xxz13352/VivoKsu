@@ -4,7 +4,7 @@
         xmlns:models="clr-namespace:VivoKsu.App.Models"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:hc="https://handyorg.github.io/handycontrol"
-        Title="Nwflash 奶娃Flash"
+        Title="奶娃Flash"
         Height="700"
         Width="1240"
         MinHeight="620"
@@ -35,7 +35,7 @@
             <TextBlock Text="NWF" Foreground="White" FontSize="13" FontWeight="Bold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
           </Border>
           <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-            <TextBlock Text="Nwflash" FontSize="18" FontWeight="Bold"/>
+            <TextBlock Text="奶娃Flash" FontSize="18" FontWeight="Bold"/>
             <TextBlock Text="奶娃FLASH · ANDROID DEVICE WORKBENCH" FontFamily="Cascadia Mono" FontSize="8" Foreground="{StaticResource MutedBrush}" Margin="0,1,0,0"/>
           </StackPanel>
         </StackPanel>
@@ -1123,7 +1123,7 @@
           <StackPanel>
             <TextBlock Text="ONLINE / SESSION" Style="{StaticResource PageEyebrowStyle}"/>
             <TextBlock Text="在线状态" Style="{StaticResource PageTitleStyle}"/>
-            <TextBlock Text="实时查看当前在线的 Nwflash 用户与在线时长（每 5 秒同步）" Style="{StaticResource PageSubtitleStyle}"/>
+            <TextBlock Text="实时查看当前在线的 奶娃Flash 用户与在线时长（每 5 秒同步）" Style="{StaticResource PageSubtitleStyle}"/>
           </StackPanel>
           <Border Grid.Column="1" Style="{StaticResource StatusChipStyle}" VerticalAlignment="Bottom">
             <StackPanel Orientation="Horizontal">
@@ -1234,7 +1234,7 @@
           <StackPanel>
             <TextBlock Text="SOFTWARE / STATUS" Style="{StaticResource PageEyebrowStyle}"/>
             <TextBlock Text="软件" Style="{StaticResource PageTitleStyle}"/>
-            <TextBlock Text="Nwflash 版本与依赖组件的就绪状态" Style="{StaticResource PageSubtitleStyle}"/>
+            <TextBlock Text="奶娃Flash 版本与依赖组件的就绪状态" Style="{StaticResource PageSubtitleStyle}"/>
           </StackPanel>
           <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
             <Button Content="重新检测" Style="{StaticResource ToolButtonStyle}" Command="{Binding Software.RefreshCommand}" Padding="12,7" Margin="0"/>
@@ -1254,7 +1254,7 @@
             <Grid Grid.Row="1" Margin="20,16,20,14">
               <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <StackPanel>
-                <TextBlock Text="Nwflash 客户端" FontSize="14" FontWeight="SemiBold"/>
+                <TextBlock Text="奶娃Flash 客户端" FontSize="14" FontWeight="SemiBold"/>
                 <TextBlock Text="{Binding Software.AppVersion, StringFormat=版本 v{0}}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
               </StackPanel>
               <Border Grid.Column="1" CornerRadius="4" Padding="8,3" Background="#EAF7F5" VerticalAlignment="Center" Margin="12,0,0,0">

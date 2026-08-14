@@ -1,7 +1,7 @@
 <Window x:Class="VivoKsu.App.LoginWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="登录 Nwflash 奶娃Flash" Width="400" Height="564"
+        Title="登录 奶娃Flash" Width="400" Height="564"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI" TextOptions.TextFormattingMode="Display"
@@ -206,7 +206,7 @@
                 <TextBlock Text="NWF" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
               </Border>
               <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-                <TextBlock Text="Nwflash 奶娃Flash" Foreground="{StaticResource Ink}" FontSize="16" FontWeight="SemiBold"/>
+                <TextBlock Text="奶娃Flash" Foreground="{StaticResource Ink}" FontSize="16" FontWeight="SemiBold"/>
                 <TextBlock Text="ROM CONTROL · API.NWFLASH.CC.CD" FontFamily="Cascadia Mono" FontSize="8" FontWeight="SemiBold" Foreground="{StaticResource Muted}" Margin="0,2,0,0"/>
               </StackPanel>
             </StackPanel>
@@ -216,7 +216,7 @@
           <!-- 主标题 + 副文案 -->
           <StackPanel Grid.Row="1" Margin="0,26,0,0">
             <TextBlock Text="SECURE SIGN IN" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource Teal}"/>
-            <TextBlock Text="登录 Nwflash" Margin="0,6,0,0" Foreground="{StaticResource Ink}" FontSize="23" FontWeight="Bold"/>
+            <TextBlock Text="登录 奶娃Flash" Margin="0,6,0,0" Foreground="{StaticResource Ink}" FontSize="23" FontWeight="Bold"/>
             <TextBlock Text="商业工具授权。使用后台分配的账号登录后进入主界面。" Margin="0,7,0,0" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" LineHeight="20"/>
           </StackPanel>
 
