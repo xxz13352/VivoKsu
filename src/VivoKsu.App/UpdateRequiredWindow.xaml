@@ -1,7 +1,7 @@
 <Window x:Class="VivoKsu.App.UpdateRequiredWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Nwflash 需要更新" Width="420" SizeToContent="Height"
+        Title="奶蛙Flash 需要更新" Width="420" SizeToContent="Height"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI" TextOptions.TextFormattingMode="Display"
