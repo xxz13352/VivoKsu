@@ -25,6 +25,8 @@
 | **线刷文档** | VIVO 安全刷写流程、三种 OTA 格式、下载 / 解包 / 刷写细节 | [safeflash-ota.md](safeflash-ota.md) |
 | **Worker 部署** | `cloudflare/` 部署、机密、变量 | [../cloudflare/README.md](../cloudflare/README.md) |
 
+> 界面整合设计过程文档(2026-08-15):[设计规格](superpowers/specs/2026-08-15-ui-consolidation-design.md) · [实施计划](superpowers/plans/2026-08-15-ui-consolidation.md)。
+
 ## 三、代码地图
 
 ```
@@ -46,7 +48,7 @@ VivoKsu 工具/
 │  ├─ website/src/index.html # nwflash.cc.cd 官网(高级白液态玻璃单页)
 │  ├─ website/src/index.ts   # nwflash.cc.cd · Worker nwflash-site(托管官网)
 │  └─ wrangler.toml          # D1 绑定 + 自定义域 + vars + Cron
-├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(350 用例)
+├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(351 用例)
 ├─ scripts/                  # Publish-Release.ps1 / Ensure-Scrcpy.ps1 / verify-*.ps1
 └─ docs/                     # 本文档 + architecture.md + safeflash-ota.md
 ```
@@ -87,11 +89,12 @@ VivoKsu 工具/
 | 发布桌面端 | `scripts/Publish-Release.ps1` → `artifacts/release/` |
 | 部署 Worker | `cd cloudflare && npx wrangler deploy`(web / user 子目录同理) |
 
-## 六、当前状态(2026-08-14)
+## 六、当前状态(2026-08-15)
 
-- **后端**:全部 Cloudflare;旧自建 .NET 服务端已删除;api / web 均已部署。
+- **后端**:全部 Cloudflare;旧自建 .NET 服务端已删除;api / web / user / website 均已部署。
 - **后台**:「固件登记簿」控制台(五菜单 + 服务健康带 + № 登记册 + 撕口 token 凭证 + OKAY/FAIL 协议回显)已上线。
-- **桌面端**:350 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
+- **桌面端**:351 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
+- **界面整合(2026-08-15)**:左侧菜单按刷机链路分组;左下角账号/时间/登出栏(同进程登出回登录窗,刷写中登出禁用);全部主进度统一到右上角「操作进度」区;文件管理传出弹保存位置对话框。设计文档见 [设计规格](superpowers/specs/2026-08-15-ui-consolidation-design.md) / [实施计划](superpowers/plans/2026-08-15-ui-consolidation.md)。
 - **在线会话**:客户端每 5s 心跳保持在线;后台「在线状态」实时查看会话(用户/版本/IP/时长)并**强制下线**(≤5s 内客户端退出);客户端「在线状态」页查看在线用户与时长;心跳 force_exit / 封禁 / 426 均走防变砖退出(刷写中先取消、等 Idle 再退)。
 - **操作门禁 + 使用日志**:客户端每个用户操作运行前经服务端 `POST /api/operation/authorize` 许可(默认放行、封禁/停用拒绝);执行后批量上传使用日志,后台「使用日志」按操作分类查看。
 - **软件菜单 + 驱动安装**:「软件」页展示 Nwflash 版本 / USB 驱动 / scrcpy / payload_dumper 就绪状态;启动检测到未装 vivo USB 驱动时弹窗提醒,一键以管理员权限静默安装(pnputil 通配符递归装 ADB / fastboot / 联发科驱动 + 写 adb_usb.ini)。

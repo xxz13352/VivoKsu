@@ -121,19 +121,28 @@ VivoKsu 工具/
 ```mermaid
 flowchart TD
     A[App.OnStartup] --> B[注册崩溃日志<br/>DispatcherUnhandledException → crash.log]
-    B --> C["LoginWindow.ShowDialog<br/>每次启动强制登录"]
-    C -->|登录成功| F["token = login.Token"]
+    B --> V["BlockForForcedUpdate<br/>版本门禁:过低 → 更新窗 + 退出"]
+    V --> S["ShutdownMode = OnExplicitShutdown<br/>关窗不自动退出,由代码显式 Shutdown"]
+    S --> L["RunApplicationLoop()<br/>登录循环(登出后可重入)"]
+    L --> C["LoginWindow.ShowDialog<br/>每次启动强制登录"]
     C -->|取消/关闭| G["Shutdown()<br/>不进主界面"]
-    F --> H["AppComposition.CreateDefault()<br/>composition.SetAuthToken(token)"]
-    H --> I["MainWindow.Show()<br/>MainWindow.Closed → Shutdown()"]
+    C -->|登录成功| F["token = login.Token"]
+    F --> H["AppComposition.CreateDefault()<br/>LogoutRequested += 事件<br/>StartSessionAsync(token, username)"]
+    H --> I["MainWindow.Show()<br/>Closed → OnMainWindowClosed"]
+    I -->|X 关闭| X["Shutdown()"]
+    I -->|点击登出| O["MainViewModel.LogoutCommand<br/>(忙时禁用)"]
+    O --> E["AppComposition.OnLogoutAsync<br/>StopAsync:心跳 goodbye + 上传使用日志 + 停监视/协调器"]
+    E --> R["LogoutRequested 事件"]
+    R --> L
 ```
 
 要点:
 
 - **每次启动强制登录**:无本地免登录 —— 每次启动必弹登录窗,`/api/login` 通过才进主界面;token 不持久化,仅本次会话注入 `OtaApiClient`([LoginService.cs](src/VivoKsu.App/Services/LoginService.cs) 用 `ConfigureAwait(false)`,不依赖 UI 上下文)。
+- **同进程登出(2026-08-15 新增)**:点「登出」→ `MainViewModel.LogoutCommand`(`CanExecute = !Coordinator.IsBusy`,刷写/传输运行中禁用,防打断设备操作,与 force-exit「刷写中先取消等 Idle 再退」一致)→ `AppComposition.OnLogoutAsync`(`StopAsync` 优雅下线后抛 `LogoutRequested` 事件)→ App 关主窗 → `OnMainWindowClosed` 识别登出态(`isLogout`)重入 `RunApplicationLoop` 弹登录窗。旧 composition 已 `StopAsync`(`stopped` 幂等守卫,登出后 OnExit 直接返回),新登录全新构造,无状态残留。
 - **退出清理**:`OnExit` 用 `DispatcherFrame` 泵消息最多 5s 等 `composition.StopAsync()` 完成 —— 清理下载的 Vivo 临时 gzip 与各盘 `Nwflash\safe-flash` staging,并停监视/镜像进程。
 - **崩溃日志**:未捕获异常写 `%LOCALAPPDATA%\Nwflash\crash.log`(商业工具排查用)。
-- **登录后程序消失修复**:`ShowDialog` 关闭触发 `OnLastWindowClose` 退出 —— 改为主窗口显式 `Closed += Shutdown()`。
+- **登录后程序消失修复**:`ShowDialog` 关闭触发 `OnLastWindowClose` 退出 —— 改为主窗口显式 `Closed` 处理器(登出重入循环 / 否则 `Shutdown()`),并设 `ShutdownMode = OnExplicitShutdown`。
 
 ### 3.2 组合根与依赖组装(无第三方 DI)
 
@@ -183,7 +192,7 @@ flowchart LR
 
 ### 3.3 MVVM 与页面导航
 
-单窗口 + 左侧导航,`MainWindow.xaml` 用一个 `Grid` 按 `SelectedPage` 做 `DataTrigger` 显隐切换页面。右侧固定 **DEVICE STATUS 卡片**(设备信息 + 双进度条)。
+单窗口 + 左侧导航,`MainWindow.xaml` 用一个 `Grid` 按 `SelectedPage` 做 `DataTrigger` 显隐切换页面。左侧导航**按刷机链路分组**(设备概览 / 文件管理 / ADB 投屏 ‖ 快速刷写 / 可视刷写 / VIVO 线刷 / 固件提取 / Vivo ROOT ‖ 在线状态 / 软件),左下角固定**账号栏**(登录账号 `AccountName` + 每秒走动的时钟 `CurrentTimeText` + 登出按钮 `LogoutCommand`)。右侧固定 **DEVICE STATUS 卡片**(设备信息 + **右上角统一「操作进度」区**)。
 
 | AppPage 枚举 | 页面 | 核心 ViewModel |
 | --- | --- | --- |
@@ -200,6 +209,18 @@ flowchart LR
 | `Software` | 软件 | `SoftwareViewModel` |
 
 技术底座:**CommunityToolkit.Mvvm 8.4**(`[ObservableProperty]` / `[RelayCommand]`)+ HandyControl 3.5.1 + teal 主题(参考 taste-skill 审美迭代)。
+
+> **右上角统一「操作进度」区(2026-08-15)**:右侧 DEVICE STATUS 卡片内的进度区是唯一主进度显示,五块按「操作是否在运行」显示(切换页面进度不消失):
+>
+> | 块 | 显示条件 | 绑定 |
+> | --- | --- | --- |
+> | 快速刷写 | `QuickFlash.IsFlashOperationActive` | 当前分区 + 当前条 + 总进度 + 速度 |
+> | 可视刷写 | `PartitionWorkspace.IsExecuting` | 当前分区 + 当前条 + 总进度 + 速度 |
+> | VIVO 线刷 | `SafeFlash.IsBusy` | 当前分区 + 当前条 + 总进度 + 速度 |
+> | 固件提取 | `FirmwareExtract.IsPayloadBusy` | 当前分区 + 总进度 + 速度·耗时(独立于协调器) |
+> | 设备操作(通用) | `DeviceSession.IsBusy` 且上四块均空闲 | 阶段文案 + 不定进度(文件传输 / ROOT / 安装等只报阶段) |
+>
+> 全部空闲时显示「无进行中的操作」占位(读取分区表期间不显示)。固件提取页与文件管理页原有的重复进度条已移除;可视刷写分区行级小进度条与「读取分区表」加载条保留原位。
 
 ### 3.4 设备监视与会话(三通道 + 防抖)
 
@@ -540,13 +561,17 @@ sequenceDiagram
 | 高速下载进度事件灌爆 UI 线程 | `OtaDownloadService` 进度上报 ~100ms 节流(下载完成事件必达,不丢 100%) |
 | scrcpy v4.0 移除 `--adb-path` 秒退 | 启动改为注入 **`ADB` 环境变量** 指向内置 adb(全版本兼容) |
 | VIVO 刷写 / ROOT 必须 fastbootd | 快速刷写删除 Fastboot/bootloader 选择恒走 fastbootd;ROOT 自动流程 `adb reboot fastboot` + 等 `is-userspace=yes` 设备 |
+| 登出打断运行中的刷写 | 登出按钮 `CanExecute = !Coordinator.IsBusy` + `StateChanged` 重评估,忙时禁用(与 force-exit「刷写中先取消等 Idle 再退」一致) |
+| 进度条分散在各页面底部 | 全部主进度统一到右上角「操作进度」区,按操作运行显示(固件提取 / 文件传输入位,页面移除重复条) |
+| 传出文件固定下到当前目录 | 弹保存对话框选择位置(选择器可注入以便单测),成功后本地目录跟随 |
+| 左侧菜单顺序混乱 | 按刷机链路分组重排(概览/文件/投屏 ‖ 刷写/提取/ROOT ‖ 在线/软件) |
 
 ---
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**336 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
-- 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**351 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长;2026-08-15 新增保存对话框注入下载到指定路径、`DownloadToFileAsync` 路径安全校验、登出命令触发回调、**登出忙时禁用**、本地目录跟随。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 
 ---
