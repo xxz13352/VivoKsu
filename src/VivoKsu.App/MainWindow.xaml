@@ -730,7 +730,13 @@
                 <ListBox Grid.Row="1" ItemsSource="{Binding Logs.Entries}" BorderThickness="0" Background="Transparent" ScrollViewer.VerticalScrollBarVisibility="Auto" Margin="0,6,0,0"><ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Message}" FontSize="10" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis"/></DataTemplate></ListBox.ItemTemplate></ListBox>
               </Grid>
             </Border>
-            <Border Grid.Row="4" Background="#F7F9FB" BorderBrush="{StaticResource EdgeBrush}" BorderThickness="0,1,0,0" Padding="12,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding DeviceSession.StatusText}" Foreground="{Binding DeviceSession.ConnectionAccentBrush}" FontSize="10" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/><ProgressBar Grid.Column="1" Width="110" Height="6" IsIndeterminate="{Binding DeviceSession.IsBusy}" Visibility="{Binding DeviceSession.IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="12,0,12,0" VerticalAlignment="Center"/><TextBlock Grid.Column="2" Text="ADB 文件传输" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/></Grid></Border>
+            <Border Grid.Row="4" Background="#F7F9FB" BorderBrush="{StaticResource EdgeBrush}" BorderThickness="0,1,0,0" Padding="12,0">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding DeviceSession.StatusText}" Foreground="{Binding DeviceSession.ConnectionAccentBrush}" FontSize="10" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Grid.Column="1" Text="ADB 文件传输" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+              </Grid>
+            </Border>
           </Grid>
         </Border>
         <Border Background="#FFF4F0" BorderBrush="{StaticResource SignalBrush}" BorderThickness="1" Padding="14" Margin="0,16,0,0" Visibility="{Binding FileManager.IsDeleteConfirmationVisible, Converter={StaticResource BooleanToVisibilityConverter}}"><Grid><StackPanel><TextBlock Text="确认删除设备文件" FontSize="14" FontWeight="SemiBold"/><TextBlock Text="{Binding FileManager.PendingDeleteEntry.FullPath}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,5,0,0" TextTrimming="CharacterEllipsis" MaxWidth="520"/></StackPanel><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="取消" Style="{StaticResource ToolButtonStyle}" Command="{Binding FileManager.CancelDeleteCommand}"/><Button Content="确认删除" Style="{StaticResource SignalButtonStyle}" Command="{Binding FileManager.ConfirmDeleteCommand}" Margin="0"/></StackPanel></Grid></Border>
@@ -1029,23 +1035,14 @@
 
         <Border Grid.Row="2" Style="{StaticResource PanelBorderStyle}" Padding="16,12" Margin="0,14,0,0">
           <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="280"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel VerticalAlignment="Center">
               <TextBlock Text="{Binding FirmwareExtract.PayloadStatusText}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
               <TextBlock FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0">
                 <Run Text="速度  "/><Run Text="{Binding FirmwareExtract.SpeedText, Mode=OneWay}"/><Run Text="      耗时  "/><Run Text="{Binding FirmwareExtract.ElapsedText, Mode=OneWay}"/>
               </TextBlock>
             </StackPanel>
-            <StackPanel Grid.Column="1" Margin="16,0" VerticalAlignment="Center">
-              <TextBlock Text="{Binding FirmwareExtract.CurrentPartitionName, StringFormat='当前分区  {0}'}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" TextTrimming="CharacterEllipsis"/>
-              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding FirmwareExtract.CurrentPartitionProgress}" IsIndeterminate="{Binding FirmwareExtract.IsCurrentPartitionIndeterminate}"/>
-              <Grid Margin="0,8,0,5">
-                <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
-                <TextBlock Text="{Binding FirmwareExtract.PayloadProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-              </Grid>
-              <ProgressBar Height="5" Value="{Binding FirmwareExtract.PayloadProgress}" Maximum="1"/>
-            </StackPanel>
-            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
               <Button Content="读取信息" Style="{StaticResource ToolButtonStyle}" Command="{Binding FirmwareExtract.ReadInfoCommand}" AutomationProperties.Name="读取信息"/>
               <Button Content="提取镜像" Style="{StaticResource PrimaryButtonStyle}" Command="{Binding FirmwareExtract.ExtractCommand}" AutomationProperties.Name="提取镜像"/>
               <Button Content="映射到快速刷写" Style="{StaticResource SoftTealButtonStyle}" Command="{Binding FirmwareExtract.MapToQuickFlashCommand}" AutomationProperties.Name="映射到快速刷写"/>
@@ -1491,43 +1488,65 @@
               <Run Text="  BAT  "/><Run Text="{Binding DeviceSession.BatteryLevel}"/>
             </TextBlock>
 
-            <!-- 操作进度(刷写/可视读写):当前分区进度 + 总进度。按页面切换绑定对应 VM -->
             <Border Height="1" Background="{StaticResource EdgeBrush}" Margin="0,12,0,10"/>
-            <StackPanel>
+            <TextBlock Text="操作进度" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource ConnectionBrush}"/>
+
+            <!-- 占位:全部空闲时显示 -->
+            <StackPanel Margin="0,10,0,0">
               <StackPanel.Style>
                 <Style TargetType="StackPanel">
                   <Setter Property="Visibility" Value="Collapsed"/>
                   <Style.Triggers>
-                    <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}">
+                    <MultiDataTrigger>
+                      <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding QuickFlash.IsFlashOperationActive}" Value="False"/>
+                        <Condition Binding="{Binding PartitionWorkspace.IsExecuting}" Value="False"/>
+                        <Condition Binding="{Binding SafeFlash.IsBusy}" Value="False"/>
+                        <Condition Binding="{Binding FirmwareExtract.IsPayloadBusy}" Value="False"/>
+                        <Condition Binding="{Binding DeviceSession.IsBusy}" Value="False"/>
+                      </MultiDataTrigger.Conditions>
                       <Setter Property="Visibility" Value="Visible"/>
-                    </DataTrigger>
+                    </MultiDataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </StackPanel.Style>
+              <TextBlock Text="无进行中的操作" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+            </StackPanel>
+
+            <!-- 快速刷写(运行中显示) -->
+            <StackPanel Margin="0,10,0,0">
+              <StackPanel.Style>
+                <Style TargetType="StackPanel">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding QuickFlash.IsFlashOperationActive}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
                   </Style.Triggers>
                 </Style>
               </StackPanel.Style>
               <Grid>
                 <TextBlock Text="当前分区" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
-                <TextBlock Text="{Binding SafeFlash.CurrentPartition}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding QuickFlash.CurrentPartition}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                  <TextBlock Text="{Binding SafeFlash.CurrentPartitionProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
+                  <TextBlock Text="{Binding QuickFlash.CurrentPartitionProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
                   <TextBlock Text=" · " FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
-                  <TextBlock Text="{Binding SafeFlash.SpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
+                  <TextBlock Text="{Binding QuickFlash.SpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
                 </StackPanel>
               </Grid>
-              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding SafeFlash.CurrentPartitionProgress}" IsIndeterminate="{Binding SafeFlash.IsCurrentPartitionIndeterminate}" Margin="0,6,0,0"/>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding QuickFlash.CurrentPartitionProgress}" IsIndeterminate="{Binding QuickFlash.IsCurrentPartitionIndeterminate}" Margin="0,6,0,0"/>
               <Grid Margin="0,10,0,0">
                 <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
-                <TextBlock Text="{Binding SafeFlash.OverallProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
+                <TextBlock Text="{Binding QuickFlash.OverallProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
               </Grid>
-              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding SafeFlash.OverallProgress}" Margin="0,6,0,0"/>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding QuickFlash.OverallProgress}" Margin="0,6,0,0"/>
             </StackPanel>
-            <StackPanel>
+
+            <!-- 可视刷写(运行中显示) -->
+            <StackPanel Margin="0,10,0,0">
               <StackPanel.Style>
                 <Style TargetType="StackPanel">
                   <Setter Property="Visibility" Value="Collapsed"/>
                   <Style.Triggers>
-                    <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.LineFlash}">
-                      <Setter Property="Visibility" Value="Visible"/>
-                    </DataTrigger>
+                    <DataTrigger Binding="{Binding PartitionWorkspace.IsExecuting}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
                   </Style.Triggers>
                 </Style>
               </StackPanel.Style>
@@ -1547,32 +1566,85 @@
               </Grid>
               <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding PartitionWorkspace.OverallProgress}" Margin="0,6,0,0"/>
             </StackPanel>
-            <StackPanel>
+
+            <!-- VIVO 线刷(运行中显示) -->
+            <StackPanel Margin="0,10,0,0">
               <StackPanel.Style>
                 <Style TargetType="StackPanel">
                   <Setter Property="Visibility" Value="Collapsed"/>
                   <Style.Triggers>
-                    <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FastbootFlash}">
-                      <Setter Property="Visibility" Value="Visible"/>
-                    </DataTrigger>
+                    <DataTrigger Binding="{Binding SafeFlash.IsBusy}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
                   </Style.Triggers>
                 </Style>
               </StackPanel.Style>
               <Grid>
                 <TextBlock Text="当前分区" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
-                <TextBlock Text="{Binding QuickFlash.CurrentPartition}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding SafeFlash.CurrentPartition}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                  <TextBlock Text="{Binding QuickFlash.CurrentPartitionProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
+                  <TextBlock Text="{Binding SafeFlash.CurrentPartitionProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
                   <TextBlock Text=" · " FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
-                  <TextBlock Text="{Binding QuickFlash.SpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
+                  <TextBlock Text="{Binding SafeFlash.SpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
                 </StackPanel>
               </Grid>
-              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding QuickFlash.CurrentPartitionProgress}" IsIndeterminate="{Binding QuickFlash.IsCurrentPartitionIndeterminate}" Margin="0,6,0,0"/>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding SafeFlash.CurrentPartitionProgress}" IsIndeterminate="{Binding SafeFlash.IsCurrentPartitionIndeterminate}" Margin="0,6,0,0"/>
               <Grid Margin="0,10,0,0">
                 <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
-                <TextBlock Text="{Binding QuickFlash.OverallProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
+                <TextBlock Text="{Binding SafeFlash.OverallProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
               </Grid>
-              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding QuickFlash.OverallProgress}" Margin="0,6,0,0"/>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding SafeFlash.OverallProgress}" Margin="0,6,0,0"/>
+            </StackPanel>
+
+            <!-- 固件提取(运行中显示) -->
+            <StackPanel Margin="0,10,0,0">
+              <StackPanel.Style>
+                <Style TargetType="StackPanel">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding FirmwareExtract.IsPayloadBusy}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </StackPanel.Style>
+              <Grid>
+                <TextBlock Text="当前分区" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding FirmwareExtract.CurrentPartitionName}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                  <TextBlock Text="{Binding FirmwareExtract.SpeedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
+                  <TextBlock Text=" · " FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                  <TextBlock Text="{Binding FirmwareExtract.ElapsedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource TextBrush}"/>
+                </StackPanel>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding FirmwareExtract.CurrentPartitionProgress}" IsIndeterminate="{Binding FirmwareExtract.IsCurrentPartitionIndeterminate}" Margin="0,6,0,0"/>
+              <Grid Margin="0,10,0,0">
+                <TextBlock Text="总进度" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding FirmwareExtract.PayloadProgressPercent}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right"/>
+              </Grid>
+              <ProgressBar Height="5" Minimum="0" Maximum="1" Value="{Binding FirmwareExtract.PayloadProgress}" Margin="0,6,0,0"/>
+            </StackPanel>
+
+            <!-- 设备操作(通用:文件传输/ROOT 等仅上报阶段的操作;四块特定页均空闲时显示) -->
+            <StackPanel Margin="0,10,0,0">
+              <StackPanel.Style>
+                <Style TargetType="StackPanel">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <MultiDataTrigger>
+                      <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding DeviceSession.IsBusy}" Value="True"/>
+                        <Condition Binding="{Binding QuickFlash.IsFlashOperationActive}" Value="False"/>
+                        <Condition Binding="{Binding PartitionWorkspace.IsExecuting}" Value="False"/>
+                        <Condition Binding="{Binding SafeFlash.IsBusy}" Value="False"/>
+                        <Condition Binding="{Binding FirmwareExtract.IsPayloadBusy}" Value="False"/>
+                      </MultiDataTrigger.Conditions>
+                      <Setter Property="Visibility" Value="Visible"/>
+                    </MultiDataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </StackPanel.Style>
+              <Grid>
+                <TextBlock Text="当前操作" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}"/>
+                <TextBlock Text="{Binding DeviceSession.StatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" Margin="56,0,0,0" TextTrimming="CharacterEllipsis"/>
+              </Grid>
+              <ProgressBar Height="5" IsIndeterminate="True" Margin="0,6,0,0"/>
             </StackPanel>
           </StackPanel>
         </Border>
