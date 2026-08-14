@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="description" content="奶娃Flash(Nwflash, NWF):Vivo 手机刷机与 Root 商业工具箱。Windows 桌面端一站式完成 OTA 下载、解包、线刷与 Root,商用授权,账号登录即用。">
+<title>奶娃Flash · Nwflash</title>
+<style>
+  /* ============================================================
+     Nwflash(奶娃Flash,NWF) 官网
+     高级白 + 液态玻璃:磨砂半透明白玻璃面板 + 高斯模糊 + 内高光
+     + 发丝描边 + 顶部渐变光。Apple Liquid Glass 网页近似。
+     浅色主题锁定,单一青色强调,数据一律等宽 mono。
+     ============================================================ */
+  :root{
+    --bg0:#F5F7F9;            /* 画布顶部(冷调高级白) */
+    --bg1:#E9EEF2;            /* 画布底部 */
+    --ink:#17232E;            /* 主文字(白底上 ≈14:1) */
+    --muted:#5A6C80;          /* 次级文字(≈5.8:1) */
+    --faint:#6B7C8F;          /* 时间戳/说明(≈5:1) */
+    --cyan:#0C7C74;           /* 强调文字/链接/CTA(≈6:1 文字安全) */
+    --cyan-deep:#0A6B64;      /* CTA 悬停 */
+    --cyan-bright:#2FD6C8;    /* 高亮/填充/发光(非文字层) */
+    --violet:#6D56D6;         /* 品牌副调,少量 */
+    --rose:#D0453C;           /* 危险,极少量 */
+    --hair:rgba(23,35,46,.10);
+    --hair-strong:rgba(23,35,46,.16);
+    --shadow:0 24px 70px rgba(23,35,46,.10), 0 4px 16px rgba(23,35,46,.05);
+    --r-lg:28px; --r-md:18px; --r-pill:999px;
+    --display:"Segoe UI Variable","Segoe UI",-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+    --mono:"Cascadia Mono","JetBrains Mono","Cascadia Code",Consolas,"SF Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{font-family:var(--display);color:var(--ink);background:var(--bg0);-webkit-font-smoothing:antialiased;font-size:16px;line-height:1.6}
+  ::selection{background:rgba(47,214,200,.28)}
+  ::-webkit-scrollbar{width:11px;height:11px}
+  ::-webkit-scrollbar-thumb{background:rgba(23,35,46,.18);border-radius:6px;border:3px solid transparent;background-clip:content-box}
+  a{color:var(--cyan);text-decoration:none}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--cyan);outline-offset:3px;border-radius:8px}
+  .mono{font-family:var(--mono);font-feature-settings:"tnum"}
+
+  /* ---------- 环境背景(给玻璃可糊的东西) ---------- */
+  .ambient{position:fixed;inset:0;z-index:-2;pointer-events:none;
+    background:
+      radial-gradient(46vw 36vh at 80% -8%, rgba(47,214,200,.13), transparent 62%),
+      radial-gradient(40vw 32vh at -6% 30%, rgba(109,86,214,.10), transparent 60%),
+      radial-gradient(52vw 42vh at 112% 82%, rgba(47,214,200,.07), transparent 64%),
+      linear-gradient(180deg,var(--bg0),var(--bg1));}
+  .ambient::after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.55;
+    background-image:radial-gradient(rgba(23,35,46,.05) 1px, transparent 1px);background-size:26px 26px}
+
+  /* ---------- 液态玻璃 ---------- */
+  .glass{position:relative;isolation:isolate;overflow:hidden;
+    border:1px solid rgba(255,255,255,.6);
+    background:linear-gradient(135deg, rgba(255,255,255,.68), rgba(255,255,255,.28));
+    -webkit-backdrop-filter:blur(22px) saturate(170%);
+    backdrop-filter:blur(22px) saturate(170%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.9), inset 0 -1px 0 rgba(255,255,255,.22), var(--shadow)}
+  .glass::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
+    background:
+      radial-gradient(120% 60% at 12% 0%, rgba(47,214,200,.14), transparent 44%),
+      linear-gradient(90deg, rgba(255,255,255,.55), transparent 42%, rgba(47,214,200,.09))}
+  @media (prefers-reduced-transparency:reduce){.glass{background:rgba(255,255,255,.94);-webkit-backdrop-filter:none;backdrop-filter:none}}
+
+  /* ---------- 悬浮玻璃导航 ---------- */
+  .nav{position:sticky;top:16px;z-index:40;display:flex;justify-content:center;padding:0 20px}
+  .nav-in{display:flex;align-items:center;gap:14px;padding:8px 8px 8px 18px;border-radius:var(--r-pill);width:100%;max-width:1080px;
+    border:1px solid rgba(255,255,255,.66);
+    background:linear-gradient(135deg, rgba(255,255,255,.72), rgba(255,255,255,.42));
+    -webkit-backdrop-filter:blur(20px) saturate(170%);backdrop-filter:blur(20px) saturate(170%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.9), 0 14px 40px rgba(23,35,46,.08)}
+  .brand{display:flex;align-items:center;gap:11px;flex-shrink:0}
+  .brand-mark{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:#fff;font-family:var(--mono);font-weight:700;font-size:12.5px;letter-spacing:.5px;
+    background:linear-gradient(135deg,var(--cyan-bright),var(--cyan));box-shadow:0 6px 18px rgba(47,214,200,.4)}
+  .brand .t{font-size:16px;font-weight:750;letter-spacing:.1px}
+  .nav .links{display:flex;gap:2px;margin:0 auto}
+  .nav .links a{color:var(--muted);font-size:14px;font-weight:500;padding:8px 15px;border-radius:var(--r-pill);transition:color .2s,background .2s}
+  .nav .links a:hover{color:var(--ink);background:rgba(255,255,255,.55)}
+  .nav .cta{display:inline-flex;align-items:center;gap:9px;border-radius:var(--r-pill);background:var(--cyan);color:#fff;font-size:14px;font-weight:650;padding:10px 20px;transition:background .2s,box-shadow .2s,transform .15s cubic-bezier(.32,.72,0,1)}
+  .nav .cta:hover{background:var(--cyan-deep);box-shadow:0 10px 26px rgba(12,124,116,.34)}
+  .nav .cta:active{transform:scale(.97)}
+  .nav .cta .ar{width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.22);display:grid;place-items:center;font-size:11px}
+
+  /* ---------- HERO ---------- */
+  .hero{max-width:1180px;margin:0 auto;padding:88px 26px 0;display:grid;grid-template-columns:1.04fr .96fr;gap:60px;align-items:center}
+  .pill{display:inline-flex;align-items:center;gap:9px;border-radius:var(--r-pill);padding:8px 16px;font-family:var(--mono);font-size:11.5px;letter-spacing:1.2px;color:var(--cyan);font-weight:600;
+    border:1px solid rgba(255,255,255,.66);background:rgba(255,255,255,.5);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan-bright);box-shadow:0 0 10px rgba(47,214,200,.8);animation:beat 2.6s ease-in-out infinite}
+  @keyframes beat{0%,100%{opacity:1}50%{opacity:.3}}
+  .hero h1{font-size:clamp(44px,6vw,76px);font-weight:780;letter-spacing:-.022em;line-height:1.04;margin:26px 0 0;max-width:13ch}
+  .hero h1 .w{display:inline-block;opacity:0;transform:translateY(30px);filter:blur(8px);animation:wordin .9s cubic-bezier(.16,1,.3,1) forwards}
+  @keyframes wordin{to{opacity:1;transform:none;filter:none}}
+  .hero h1 .w.cyan{color:var(--cyan)}
+  .hero .sub{font-size:17px;color:var(--muted);line-height:1.8;max-width:48ch;margin-top:24px}
+  .hero .sub code{font-family:var(--mono);font-size:14px;color:var(--cyan)}
+  .cta-row{display:flex;gap:14px;margin-top:36px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:10px;border-radius:var(--r-pill);font-size:16px;font-weight:650;padding:16px 26px;transition:transform .15s cubic-bezier(.32,.72,0,1),box-shadow .25s,background .2s}
+  .btn:active{transform:scale(.97)}
+  .btn-primary{background:var(--cyan);color:#fff;box-shadow:0 14px 34px rgba(12,124,116,.3)}
+  .btn-primary:hover{background:var(--cyan-deep);box-shadow:0 18px 44px rgba(12,124,116,.42)}
+  .btn-primary .ar{width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,.22);display:grid;place-items:center;font-size:12px;transition:transform .25s cubic-bezier(.32,.72,0,1)}
+  .btn-primary:hover .ar{transform:translateX(3px)}
+  .btn-ghost{background:rgba(255,255,255,.55);color:var(--ink);border:1px solid rgba(255,255,255,.7);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);box-shadow:inset 0 1px 0 rgba(255,255,255,.8)}
+  .btn-ghost:hover{background:rgba(255,255,255,.85)}
+
+  /* ---------- 液态玻璃设备控制台(真实迷你 UI) ---------- */
+  .console{border-radius:30px;transform:rotate(1.2deg);transition:transform .5s cubic-bezier(.32,.72,0,1)}
+  .console:hover{transform:rotate(0deg) translateY(-3px)}
+  .console-head{display:flex;align-items:center;gap:10px;padding:16px 22px;border-bottom:1px solid rgba(255,255,255,.6)}
+  .console-head .t{font-family:var(--mono);font-size:12px;letter-spacing:1.5px;color:var(--muted)}
+  .console-head .scope{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:1px}
+  .console-head .live{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;letter-spacing:1.6px;color:var(--cyan);font-weight:600}
+  .console-head .live .dot{width:6px;height:6px;border-radius:50%;background:var(--cyan-bright);box-shadow:0 0 9px rgba(47,214,200,.85);animation:beat 2.6s ease-in-out infinite}
+  .console .body{padding:20px 22px 6px;display:grid;gap:12px}
+  .console .kv{display:flex;align-items:baseline;justify-content:space-between;font-family:var(--mono);font-size:13.5px;color:var(--faint)}
+  .console .kv b{color:var(--ink);font-weight:600}
+  .console .kv .st{display:inline-flex;align-items:center;gap:7px;color:var(--cyan);font-size:11px;letter-spacing:1.4px}
+  .console .kv .st i{width:6px;height:6px;border-radius:50%;background:var(--cyan-bright);box-shadow:0 0 8px rgba(47,214,200,.8);animation:beat 2.6s ease-in-out infinite}
+  .prog{padding:4px 22px 18px}
+  .prog .lbl{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.5px}
+  .prog .track{height:8px;border-radius:var(--r-pill);background:rgba(23,35,46,.08);overflow:hidden;margin-top:9px;box-shadow:inset 0 1px 2px rgba(23,35,46,.08)}
+  .prog .fill{height:100%;width:0;border-radius:var(--r-pill);background:linear-gradient(90deg,var(--cyan-bright),var(--cyan));animation:progfill 7s cubic-bezier(.32,.72,0,1) infinite}
+  @keyframes progfill{0%{width:0%}55%{width:100%}70%{width:100%}100%{width:0%}}
+  .log{padding:0 22px 22px;display:flex;flex-direction:column;gap:5px;font-family:var(--mono);font-size:12px;min-height:170px;justify-content:flex-end}
+  .log .ln{color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:0;transform:translateY(6px);animation:login .3s cubic-bezier(.16,1,.3,1) forwards}
+  @keyframes login{to{opacity:1;transform:none}}
+  .log .ln .ok{color:var(--cyan);font-weight:600}
+  .log .ln .dim{color:var(--faint)}
+  .console .beam{position:absolute;top:60px;bottom:18px;left:10px;width:3px;pointer-events:none;opacity:.4;
+    background:linear-gradient(180deg,transparent,var(--cyan-bright) 50%,transparent);background-size:100% 42%;background-repeat:no-repeat;
+    animation:beam 7s linear infinite}
+  @keyframes beam{0%{background-position:0 -140%}100%{background-position:0 240%}}
+
+  /* ---------- 技术栈条 ---------- */
+  .stack{max-width:1180px;margin:0 auto;padding:110px 26px 0;text-align:center}
+  .stack .lbl{font-family:var(--mono);font-size:11px;letter-spacing:2px;color:var(--faint);text-transform:uppercase}
+  .stack .chips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:22px}
+  .chips .chip{padding:9px 18px;border-radius:var(--r-pill);font-family:var(--mono);font-size:13px;color:var(--muted);
+    border:1px solid rgba(255,255,255,.6);background:rgba(255,255,255,.5);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);box-shadow:inset 0 1px 0 rgba(255,255,255,.7)}
+  .chips .chip b{color:var(--ink);font-weight:600}
+
+  /* ---------- 区块通用 ---------- */
+  .wrap{max-width:1180px;margin:0 auto;padding:120px 26px 0}
+  .sec-head{max-width:60ch}
+  .sec-eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:2px;color:var(--cyan);font-weight:650;display:flex;align-items:center;gap:10px}
+  .sec-eyebrow::before{content:"";width:22px;height:2px;border-radius:2px;background:var(--cyan-bright)}
+  .sec-title{font-size:clamp(28px,3.6vw,44px);font-weight:760;letter-spacing:-.018em;line-height:1.12;margin-top:16px}
+  .sec-sub{font-size:16px;color:var(--muted);line-height:1.8;margin-top:16px}
+
+  /* ---------- 功能 BENTO(非对称) ---------- */
+  .bento{display:grid;grid-template-columns:repeat(12,1fr);gap:18px;margin-top:46px}
+  .tile{border-radius:var(--r-lg);padding:28px;display:flex;flex-direction:column;justify-content:space-between;min-height:238px;transition:transform .35s cubic-bezier(.32,.72,0,1),box-shadow .35s}
+  .tile:hover{transform:translateY(-5px);box-shadow:inset 0 1px 0 rgba(255,255,255,.95), inset 0 -1px 0 rgba(255,255,255,.28), 0 38px 90px rgba(23,35,46,.13)}
+  .tile .tag{font-family:var(--mono);font-size:11px;letter-spacing:.6px;color:var(--cyan);font-weight:600}
+  .tile h3{font-size:20px;font-weight:720;margin-top:14px;letter-spacing:-.01em}
+  .tile p{font-size:14px;color:var(--muted);line-height:1.75;margin-top:9px}
+  .tile .viz{margin-top:18px}
+  .tile.s6{grid-column:span 6}
+  .tile.s8{grid-column:span 8}
+  .tile.s4{grid-column:span 4}
+  .tile.s3{grid-column:span 3}
+  .viz-bar{display:flex;align-items:center;gap:4px;height:26px}
+  .viz-bar i{flex:1;border-radius:3px;background:linear-gradient(180deg,var(--cyan-bright),rgba(47,214,200,.2));min-width:2px;opacity:.85}
+  .viz-row{display:flex;gap:8px;flex-wrap:wrap}
+  .viz-chip{padding:6px 12px;border-radius:var(--r-pill);font-family:var(--mono);font-size:11.5px;color:var(--cyan);border:1px solid rgba(12,124,116,.24);background:rgba(255,255,255,.5)}
+  .viz-mirror{aspect-ratio:16/9;border-radius:12px;overflow:hidden;position:relative;background:linear-gradient(160deg,rgba(23,35,46,.06),rgba(47,214,200,.10));border:1px solid rgba(255,255,255,.5)}
+  .viz-mirror::after{content:"";position:absolute;inset:0;background:radial-gradient(120% 90% at 30% 20%,rgba(255,255,255,.5),transparent 55%)}
+  .flow-mini{display:grid;grid-template-columns:1fr;gap:8px}
+  .flow-mini .fm{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  .flow-mini .fm b{color:var(--cyan);font-weight:600;width:72px;flex-shrink:0}
+  .flow-mini .fm .bar{flex:1;height:6px;border-radius:99px;background:rgba(23,35,46,.07);overflow:hidden}
+  .flow-mini .fm .bar i{display:block;height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--cyan-bright),var(--cyan));animation:progfill 9s cubic-bezier(.32,.72,0,1) infinite}
+
+  /* ---------- VIVO 线刷流程 ---------- */
+  .flow-track{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-top:46px;position:relative}
+  .flow-track::before{content:"";position:absolute;top:34px;left:6%;right:6%;height:1px;background:linear-gradient(90deg,transparent,var(--hair-strong) 15%,var(--hair-strong) 85%,transparent)}
+  .step{border-radius:var(--r-md);padding:22px;position:relative}
+  .step .n{position:absolute;top:12px;right:16px;font-family:var(--mono);font-size:21px;font-weight:760;color:rgba(47,214,200,.45)}
+  .step h4{font-size:16.5px;font-weight:720}
+  .step p{font-size:13px;color:var(--muted);line-height:1.65;margin-top:7px}
+  .step .arr{margin-top:16px;color:var(--cyan-bright);font-size:15px}
+
+  /* ---------- 更新日志 ---------- */
+  .changelog{display:grid;gap:16px;margin-top:46px}
+  .rel{border-radius:var(--r-lg);padding:32px}
+  .rel-head{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .rel-ver{font-family:var(--mono);font-size:28px;font-weight:760;letter-spacing:-.01em}
+  .rel-date{font-size:13.5px;color:var(--muted)}
+  .rel-pill{margin-left:auto;padding:5px 15px;border-radius:var(--r-pill);font-family:var(--mono);font-size:11px;letter-spacing:1.4px;color:var(--cyan);border:1px solid rgba(12,124,116,.26);background:rgba(255,255,255,.5)}
+  .rel-list{list-style:none;margin-top:22px;display:grid;gap:12px}
+  .rel-list li{position:relative;padding-left:24px;font-size:14.5px;color:var(--muted);line-height:1.7}
+  .rel-list li::before{content:"";position:absolute;left:2px;top:10px;width:8px;height:8px;border-radius:3px;background:linear-gradient(135deg,var(--cyan-bright),var(--cyan))}
+
+  /* ---------- 下载 CTA ---------- */
+  .cta-panel{border-radius:36px;padding:70px 40px;text-align:center;position:relative;overflow:hidden}
+  .cta-panel::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
+    background:radial-gradient(80% 90% at 50% -20%, rgba(47,214,200,.2), transparent 55%)}
+  .cta-panel h2{font-size:clamp(30px,4.4vw,52px);font-weight:780;letter-spacing:-.02em;line-height:1.08}
+  .cta-panel p{font-size:16px;color:var(--muted);margin:18px auto 0;max-width:52ch;line-height:1.8}
+  .cta-panel .btns{display:flex;gap:14px;justify-content:center;margin-top:34px;flex-wrap:wrap}
+  .cta-panel .meta{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:22px;letter-spacing:.3px}
+  .cta-panel .meta a{color:var(--cyan)}
+
+  /* ---------- 页脚 ---------- */
+  footer{max-width:1180px;margin:0 auto;padding:96px 26px 40px}
+  .foot-in{display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap;padding-top:26px;border-top:1px solid var(--hair)}
+  .foot-brand{display:flex;align-items:center;gap:11px}
+  .foot-brand .t{font-size:14.5px;font-weight:700}
+  .foot-brand .s{font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:1px;margin-top:1px}
+  .foot-links{display:flex;gap:22px;flex-wrap:wrap;font-size:13.5px;color:var(--muted)}
+  .foot-links a{color:var(--muted)}
+  .foot-links a:hover{color:var(--cyan)}
+  .copyright{margin-top:20px;font-size:12px;color:var(--faint)}
+
+  /* ---------- 滚动揭示 ---------- */
+  .reveal{opacity:0;transform:translateY(30px) scale(.99);filter:blur(7px);transition:opacity .9s cubic-bezier(.16,1,.3,1),transform .9s cubic-bezier(.16,1,.3,1),filter .9s cubic-bezier(.16,1,.3,1)}
+  .reveal.in{opacity:1;transform:none;filter:none}
+
+  /* ---------- 动效开关 / 移动端 ---------- */
+  @media (prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation:none!important;transition:none!important}
+    .hero h1 .w{opacity:1;transform:none;filter:none}
+    .console{transform:none}
+    .reveal{opacity:1;transform:none;filter:none}
+    .prog .fill,.flow-mini .fm .bar i{width:100%}
+  }
+  @media (max-width:1024px){
+    .nav .links{display:none}
+    .hero{grid-template-columns:1fr;gap:44px;padding-top:64px}
+    .console{max-width:560px}
+    .flow-track{grid-template-columns:1fr;gap:12px}
+    .flow-track::before{display:none}
+    .bento{grid-template-columns:1fr 1fr}
+    .tile.s6,.tile.s8,.tile.s4,.tile.s3{grid-column:span 1}
+  }
+  @media (max-width:640px){
+    .hero h1{font-size:clamp(38px,12vw,52px)}
+    .bento{grid-template-columns:1fr}
+    .nav-in{padding-left:12px}
+    .nav .brand .t{font-size:14px}
+    .cta-panel{padding:48px 22px}
+  }
+</style>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+
+  <!-- 悬浮玻璃导航 -->
+  <nav class="nav">
+    <div class="nav-in">
+      <div class="brand">
+        <div class="brand-mark">NWF</div>
+        <div class="t">奶娃Flash</div>
+      </div>
+      <div class="links">
+        <a href="#features">功能</a>
+        <a href="#flow">VIVO 线刷</a>
+        <a href="#changelog">更新日志</a>
+      </div>
+      <a class="cta" href="#download">下载<span class="ar">↓</span></a>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="hero-copy">
+      <span class="pill"><span class="dot"></span>NWF · 奶娃Flash · Vivo 刷机与 Root 工具箱</span>
+      <h1>
+        <span class="w" style="animation-delay:.05s">Vivo</span>
+        <span class="w" style="animation-delay:.15s">线刷</span>
+        <span class="w" style="animation-delay:.25s">与</span>
+        <span class="w" style="animation-delay:.35s">Root,</span><br>
+        <span class="w cyan" style="animation-delay:.45s">一键到底。</span>
+      </h1>
+      <p class="sub">桌面端一站式完成 <code>OTA</code> 下载、解包、线刷与 Root。商用授权,账号登录即用,不限次数。</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#download">下载 Nwflash<span class="ar">→</span></a>
+        <a class="btn btn-ghost" href="#features">查看功能</a>
+      </div>
+    </div>
+
+    <!-- 液态玻璃设备控制台(真实迷你 UI) -->
+    <div class="glass console" aria-label="Nwflash 刷机控制台预览">
+      <div class="console-head">
+        <span class="t">NWF · DEVICE CONSOLE</span>
+        <span class="scope">vivo-flash · session</span>
+        <span class="live"><span class="dot"></span>LIVE</span>
+      </div>
+      <div class="body">
+        <div class="kv"><span>设备</span><b>PD2417</b><span class="st"><i></i>fastbootd</span></div>
+        <div class="kv"><span>系统</span><b>16.2.12.0.W10.V000L1</b></div>
+        <div class="kv"><span>电量</span><b>82%</b></div>
+      </div>
+      <div class="prog">
+        <div class="lbl"><span>刷写 vendor_boot</span><span id="pct">64%</span></div>
+        <div class="track"><div class="fill"></div></div>
+      </div>
+      <div class="log" id="consoleLog" aria-hidden="true"></div>
+      <div class="beam" aria-hidden="true"></div>
+    </div>
+  </header>
+
+  <!-- 技术栈条 -->
+  <section class="stack">
+    <div class="lbl">基于开放工具链</div>
+    <div class="chips">
+      <span class="chip"><b>adb</b></span>
+      <span class="chip"><b>fastboot</b></span>
+      <span class="chip"><b>KernelSU</b></span>
+      <span class="chip"><b>magiskboot</b></span>
+      <span class="chip"><b>scrcpy</b></span>
+      <span class="chip"><b>payload_dumper</b></span>
+    </div>
+  </section>
+
+  <!-- 功能 BENTO -->
+  <section class="wrap" id="features">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">CAPABILITIES</div>
+      <h2 class="sec-title">从检测到刷入,一部手机全搞定</h2>
+      <p class="sec-sub">九大能力覆盖刷机与 Root 全流程,所有耗时操作串行执行、可取消、失败即停。</p>
+    </div>
+
+    <div class="bento">
+      <!-- 1 设备概览 -->
+      <div class="glass tile s6 reveal">
+        <div>
+          <div class="tag">adb · fastboot</div>
+          <h3>设备概览</h3>
+          <p>ADB / Fastboot 设备自动检测,串号、型号、系统版本、电量一眼可读,一键刷新。</p>
+        </div>
+        <div class="viz viz-row">
+          <span class="viz-chip">PD2417</span>
+          <span class="viz-chip">fastbootd</span>
+          <span class="viz-chip">电量 82%</span>
+        </div>
+      </div>
+      <!-- 2 Vivo ROOT -->
+      <div class="glass tile s3 reveal" style="transition-delay:.05s">
+        <div>
+          <div class="tag">magiskboot</div>
+          <h3>Vivo ROOT</h3>
+          <p>KernelSU 安装与 vendor_boot 补丁,官方与 GKI 内核自动处理。</p>
+        </div>
+        <div class="viz viz-bar" style="margin-top:16px"><i style="height:70%"></i><i style="height:88%"></i><i style="height:56%"></i><i style="height:100%"></i><i style="height:74%"></i></div>
+      </div>
+      <!-- 3 快速刷写 -->
+      <div class="glass tile s3 reveal" style="transition-delay:.1s">
+        <div>
+          <div class="tag">fastboot</div>
+          <h3>快速刷写</h3>
+          <p>预设分区表,选择镜像一键刷入,自动重启与双槽处理。</p>
+        </div>
+        <div class="viz viz-row" style="margin-top:16px">
+          <span class="viz-chip">boot</span><span class="viz-chip">init_boot</span><span class="viz-chip">lk</span>
+        </div>
+      </div>
+      <!-- 4 可视刷写 -->
+      <div class="glass tile s4 reveal">
+        <div>
+          <div class="tag">fastboot · adb-root</div>
+          <h3>可视刷写</h3>
+          <p>全量分区表卡片,备份、写入、擦除依序执行,双通道自动切换。</p>
+        </div>
+        <div class="viz viz-bar" style="margin-top:16px"><i style="height:40%"></i><i style="height:75%"></i><i style="height:52%"></i><i style="height:92%"></i><i style="height:66%"></i><i style="height:30%"></i></div>
+      </div>
+      <!-- 5 ADB 投屏 -->
+      <div class="glass tile s4 reveal" style="transition-delay:.05s">
+        <div>
+          <div class="tag">scrcpy</div>
+          <h3>ADB 投屏</h3>
+          <p>手机屏幕实时镜像,随连随投,操作与刷写同步可见。</p>
+        </div>
+        <div class="viz"><div class="viz-mirror"></div></div>
+      </div>
+      <!-- 6 固件提取 -->
+      <div class="glass tile s4 reveal" style="transition-delay:.1s">
+        <div>
+          <div class="tag">payload_dumper</div>
+          <h3>固件提取</h3>
+          <p>payload 解包,云端直链按需下载,不落地整包,实时进度与速度。</p>
+        </div>
+        <div class="viz viz-bar" style="margin-top:16px"><i style="height:60%"></i><i style="height:100%"></i><i style="height:82%"></i><i style="height:46%"></i><i style="height:70%"></i></div>
+      </div>
+      <!-- 7 文件管理 -->
+      <div class="glass tile s4 reveal">
+        <div>
+          <div class="tag">adb-root</div>
+          <h3>文件管理</h3>
+          <p>ADB Root 通道浏览、上传、下载、删除,系统文件随手可管。</p>
+        </div>
+        <div class="viz viz-row" style="margin-top:16px">
+          <span class="viz-chip">/data</span><span class="viz-chip">/system</span><span class="viz-chip">/vendor</span>
+        </div>
+      </div>
+      <!-- 8 VIVO 线刷 -->
+      <div class="glass tile s8 reveal" style="transition-delay:.05s">
+        <div>
+          <div class="tag">ota · fastbootd</div>
+          <h3>VIVO 线刷</h3>
+          <p>一键完成:读取设备 PD 与版本,云端取 OTA 直链,多分片下载,解包 payload,跳过 preloader 与 lk,重启 fastbootd 逐个刷入其余分区,最后重启回系统。</p>
+        </div>
+        <div class="viz flow-mini" style="margin-top:18px">
+          <div class="fm"><b>读取设备</b><span class="bar"><i></i></span></div>
+          <div class="fm"><b>获取 OTA</b><span class="bar"><i style="animation-delay:.4s"></i></span></div>
+          <div class="fm"><b>下载解包</b><span class="bar"><i style="animation-delay:.8s"></i></span></div>
+          <div class="fm"><b>刷入分区</b><span class="bar"><i style="animation-delay:1.2s"></i></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- VIVO 线刷流程 -->
+  <section class="wrap" id="flow">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">ONE-CLICK SAFE FLASH</div>
+      <h2 class="sec-title">VIVO 线刷,五步到底</h2>
+      <p class="sec-sub">跳过 preloader 与 lk,逐分区预检,缺失分区自动跳过。全程可取消,失败即停,绝不半刷。</p>
+    </div>
+    <div class="flow-track">
+      <div class="glass step reveal"><span class="n">01</span><h4>读取设备</h4><p>通过 adb 读取设备 PD 码与系统版本。</p><div class="arr">→</div></div>
+      <div class="glass step reveal" style="transition-delay:.06s"><span class="n">02</span><h4>获取 OTA</h4><p>云端取回对应版本的 OTA 直链,版本门禁校验。</p><div class="arr">→</div></div>
+      <div class="glass step reveal" style="transition-delay:.12s"><span class="n">03</span><h4>下载解包</h4><p>多分片下载,流式解压解包 payload,跳过 preloader 与 lk。</p><div class="arr">→</div></div>
+      <div class="glass step reveal" style="transition-delay:.18s"><span class="n">04</span><h4>刷入分区</h4><p>重启 fastbootd,逐分区预检后刷入,缺失分区自动跳过。</p><div class="arr">→</div></div>
+      <div class="glass step reveal" style="transition-delay:.24s"><span class="n">05</span><h4>完成重启</h4><p>全部刷入后重启回系统,全程进度可读可取消。</p></div>
+    </div>
+  </section>
+
+  <!-- 更新日志 -->
+  <section class="wrap" id="changelog">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">CHANGELOG</div>
+      <h2 class="sec-title">更新日志</h2>
+      <p class="sec-sub">每一次更新都记录在这里。发布新版本前,在此登记版本号与变更。</p>
+    </div>
+    <div class="changelog">
+      <div class="glass rel reveal">
+        <div class="rel-head">
+          <span class="rel-ver">1.0.0</span>
+          <span class="rel-date">首发版本</span>
+          <span class="rel-pill">当前</span>
+        </div>
+        <ul class="rel-list">
+          <li>VIVO 线刷:一键完成 OTA 下载、解包、刷入,跳过 preloader 与 lk,缺失分区自动跳过</li>
+          <li>快速刷写:KernelSU 预设分区表,一键刷入,自动重启与双槽处理</li>
+          <li>Vivo ROOT:vendor_boot 补丁,官方与 GKI 内核自动处理</li>
+          <li>固件提取:payload 解包,云端直链按需下载,不落地整包,实时进度</li>
+          <li>可视刷写:全量分区表卡片,备份、写入、擦除,fastboot 与 adb-root 双通道</li>
+          <li>ADB 投屏、文件管理、设备概览、在线状态与操作日志</li>
+          <li>商用登录门禁:版本控制与强制更新,封禁停用即时生效,按用户审计</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 下载 CTA -->
+  <section class="wrap" id="download">
+    <div class="glass cta-panel reveal">
+      <h2>下载 Nwflash,开始刷机</h2>
+      <p>Windows 桌面端,自带完整工具链。后台创建账号后即可登录使用,商用授权,开箱即用。</p>
+      <div class="btns">
+        <!-- TODO: 接入安装包下载直链后替换 href -->
+        <a class="btn btn-primary" href="#download">下载 Nwflash<span class="ar">→</span></a>
+        <a class="btn btn-ghost" href="#changelog">更新日志</a>
+      </div>
+      <div class="meta">Windows x64 · 商用授权 · 开箱即用</div>
+    </div>
+  </section>
+
+  <!-- 页脚 -->
+  <footer>
+    <div class="foot-in">
+      <div class="foot-brand">
+        <div class="brand-mark">NWF</div>
+        <div><div class="t">奶娃Flash</div><div class="s">VIVO FLASH · ROM TOOL</div></div>
+      </div>
+      <div class="foot-links">
+        <a href="#features">功能</a>
+        <a href="#flow">VIVO 线刷</a>
+        <a href="#changelog">更新日志</a>
+        <a href="#download">下载</a>
+      </div>
+    </div>
+    <div class="copyright">© 2026 奶娃Flash(Nwflash)。Vivo 是维沃移动通信有限公司的注册商标,本工具与其无关联。</div>
+  </footer>
+
+<script>
+/* ---------- 设备控制台:循环进度 + 日志流水 ---------- */
+(function () {
+  var pctEl = document.getElementById("pct");
+  var logEl = document.getElementById("consoleLog");
+  var logs = [
+    "[OKAY] 设备已连接 · PD2417",
+    "[OKAY] 读取系统版本 · 16.2.12.0.W10.V000L1",
+    "[OKAY] 云端已取回 OTA 直链",
+    "[INFO] 正在解包 payload.bin",
+    "[OKAY] 跳过 preloader / lk",
+    "[OKAY] 刷入 boot 分区",
+    "[OKAY] 刷入 vendor_boot 分区",
+    "[OKAY] 全部完成 · 准备重启"
+  ];
+  var i = 0;
+  function tick() {
+    var line = logs[i % logs.length];
+    i++;
+    var div = document.createElement("div");
+    div.className = "ln";
+    if (line.indexOf("OKAY") === 0) {
+      div.innerHTML = "<span class='ok'>[OKAY]</span><span class='dim'>" + line.slice(6) + "</span>";
+    } else if (line.indexOf("INFO") === 0) {
+      div.innerHTML = "<span class='dim'>[INFO]</span><span class='dim'>" + line.slice(6) + "</span>";
+    } else {
+      div.textContent = line;
+    }
+    logEl.appendChild(div);
+    while (logEl.children.length > 5) logEl.removeChild(logEl.firstChild);
+  }
+  for (var k = 0; k < 3; k++) tick();
+  setInterval(tick, 2400);
+  // 进度百分比:与 CSS 动画 7s 周期对齐(只对支持者更新,非关键)
+  var pct = 0, dir = 1;
+  setInterval(function () {
+    pct += dir * 7;
+    if (pct >= 100) dir = -1;
+    if (pct <= 0) dir = 1;
+    pctEl.textContent = pct + "%";
+  }, 700);
+})();
+
+/* ---------- 滚动揭示(IntersectionObserver,禁 window.scroll) ---------- */
+(function () {
+  var els = document.querySelectorAll(".reveal");
+  if (!("IntersectionObserver" in window)) {
+    els.forEach(function (el) { el.classList.add("in"); });
+    return;
+  }
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add("in");
+        io.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.14, rootMargin: "0px 0px -8% 0px" });
+  els.forEach(function (el) { io.observe(el); });
+})();
+</script>
+</body>
+</html>

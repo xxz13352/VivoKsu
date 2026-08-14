@@ -1,0 +1,13 @@
+name = "nwflash-site"
+main = "src/index.ts"
+compatibility_date = "2026-08-15"
+
+# 让 worker 能把 index.html 当作纯文本导入
+rules = [
+  { type = "Text", globs = ["**/*.html"], fallthrough = true }
+]
+
+# 官网:根域 nwflash.cc.cd
+[[routes]]
+pattern = "nwflash.cc.cd"
+custom_domain = true
