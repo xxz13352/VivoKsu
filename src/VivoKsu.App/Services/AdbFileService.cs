@@ -64,6 +64,19 @@ public sealed class AdbFileService
         Report(context, OperationLogLevel.Success, "文件下载完成。");
     }
 
+    public async Task DownloadToFileAsync(
+        string serial,
+        DeviceFileEntry remoteFile,
+        string destinationFilePath,
+        CancellationToken cancellationToken,
+        OperationContext? context = null)
+    {
+        var destination = ValidateSafeDestination(destinationFilePath, remoteFile.Name);
+        Report(context, OperationLogLevel.Info, $"正在下载 {remoteFile.FullPath}。");
+        await backend.PullAsync(serial, remoteFile.FullPath, destination, cancellationToken);
+        Report(context, OperationLogLevel.Success, "文件下载完成。");
+    }
+
     public async Task DeleteRemoteAsync(
         string serial,
         DeviceFileEntry entry,
@@ -152,17 +165,7 @@ public sealed class AdbFileService
 
     private static string BuildSafeLocalDestination(string localDirectory, string fileName)
     {
-        if (string.IsNullOrWhiteSpace(fileName)
-            || fileName is "." or ".."
-            || fileName.EndsWith(' ')
-            || fileName.EndsWith('.')
-            || Path.IsPathRooted(fileName)
-            || fileName.Any(character => character < ' ' || Path.GetInvalidFileNameChars().Contains(character))
-            || IsReservedWindowsFileName(fileName))
-        {
-            throw new ArgumentException("设备文件名无法安全保存到 Windows。", nameof(fileName));
-        }
-
+        ValidateSafeFileName(fileName);
         var normalizedDirectory = Path.GetFullPath(localDirectory);
         var destination = Path.GetFullPath(Path.Combine(normalizedDirectory, fileName));
         var directoryPrefix = Path.EndsInDirectorySeparator(normalizedDirectory)
@@ -174,6 +177,37 @@ public sealed class AdbFileService
         }
 
         return destination;
+    }
+
+    private static void ValidateSafeFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)
+            || fileName is "." or ".."
+            || fileName.EndsWith(' ')
+            || fileName.EndsWith('.')
+            || Path.IsPathRooted(fileName)
+            || fileName.Any(character => character < ' ' || Path.GetInvalidFileNameChars().Contains(character))
+            || IsReservedWindowsFileName(fileName))
+        {
+            throw new ArgumentException("设备文件名无法安全保存到 Windows。", nameof(fileName));
+        }
+    }
+
+    private static string ValidateSafeDestination(string destinationFilePath, string fileName)
+    {
+        ValidateSafeFileName(fileName);
+        if (string.IsNullOrWhiteSpace(destinationFilePath))
+        {
+            throw new ArgumentException("下载目标路径为空。", nameof(destinationFilePath));
+        }
+
+        var fullPath = Path.GetFullPath(destinationFilePath);
+        if (string.IsNullOrWhiteSpace(Path.GetDirectoryName(fullPath)))
+        {
+            throw new ArgumentException("下载目标目录无效。", nameof(destinationFilePath));
+        }
+
+        return fullPath;
     }
 
     private static bool IsReservedWindowsFileName(string fileName)

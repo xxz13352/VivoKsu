@@ -96,11 +96,42 @@ public class AdbFileServiceTests
         Assert.False(native.PullCalled);
     }
 
+    [Fact]
+    public async Task DownloadToFileAsync_pulls_to_the_exact_destination_path()
+    {
+        var destination = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"), "renamed.bin");
+        var native = new FileNativeApi();
+        var service = new AdbFileService(new FastbootRsBackend(native), new OperationLogService());
+        var remoteFile = new DeviceFileEntry("update.zip", "/sdcard/update.zip", false, 1024);
+
+        await service.DownloadToFileAsync("RF8", remoteFile, destination, CancellationToken.None);
+
+        Assert.True(native.PullCalled);
+        Assert.Equal(destination, native.PullDestination);
+    }
+
+    [Theory]
+    [InlineData("..\\outside.bin")]
+    [InlineData("C:\\outside.bin")]
+    [InlineData("bad:name.bin")]
+    [InlineData("CON.img")]
+    [InlineData("trailingdot.")]
+    public async Task DownloadToFileAsync_rejects_unsafe_device_file_names(string remoteName)
+    {
+        var destination = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"), remoteName);
+        var service = new AdbFileService(new FastbootRsBackend(new FileNativeApi()), new OperationLogService());
+        var remoteFile = new DeviceFileEntry(remoteName, $"/sdcard/{remoteName}", false, 1);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.DownloadToFileAsync("RF8", remoteFile, destination, CancellationToken.None));
+    }
+
     private sealed class FileNativeApi : IFastbootRsNativeApi
     {
         public string ShellResult { get; set; } = string.Empty;
         public bool InstallCalled { get; private set; }
         public bool PullCalled { get; private set; }
+        public string? PullDestination { get; private set; }
         public string? LastShellCommand { get; private set; }
         public string ListDevices() => string.Empty;
         public string Shell(string? serial, string command)
@@ -111,7 +142,7 @@ public class AdbFileServiceTests
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }
-        public long Pull(string? serial, string remotePath, string localPath) { PullCalled = true; return 0; }
+        public long Pull(string? serial, string remotePath, string localPath) { PullCalled = true; PullDestination = localPath; return 0; }
         public string Install(string? serial, string apkPath, bool replace) { InstallCalled = true; return "Success"; }
         public void Flash(string? serial, string partition, string imagePath) { }
     }
