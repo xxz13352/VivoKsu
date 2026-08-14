@@ -48,6 +48,7 @@ flowchart LR
     subgraph Cloudflare["Cloudflare Edge"]
         API["api.nwflash.cc.cd\nWorker nwflash-rom"]
         WEB["web.nwflash.cc.cd\n后台管理 Worker"]
+        USER["user.nwflash.cc.cd\n用户门户 Worker"]
         DB[("D1: nwflash-db\napi_users / app_versions\naccess_logs / admins")]
     end
 
@@ -99,7 +100,7 @@ VivoKsu 工具/
 │  │  ├─ platform-tools/            # adb.exe + 唯一 fastboot.exe(带进度)
 │  │  ├─ root-tools/                # magiskboot.so
 │  │  └─ scrcpy/                    # scrcpy(发布脚本自动补齐)
-├─ cloudflare/                      # Worker + 后台(见 §4 §5)
+├─ cloudflare/                      # Worker + 后台 + 用户门户(见 §4 §5)
 ├─ tests/
 │  └─ VivoKsu.App.Tests/            # 桌面应用单元测试(约 50 个文件)
 ├─ scripts/
@@ -443,6 +444,16 @@ flowchart LR
 - **功能**:管理员登录、Nwflash 版本控制(强制更新)、API 用户管理(建号 / token 生成轮换 / 停用 / 封禁)、访问日志。
 - **安全**:强制 HTTPS + HSTS + CSP + HttpOnly/Secure 会话 Cookie + PBKDF2-SHA256 密码哈希 + 随机 session token;首启用 `ADMIN_SEED_PASSWORD` 播种初始管理员。
 - 与 `api.nwflash.cc.cd` **共用同一 D1 `nwflash-db`** —— API 侧执行版本校验 / 认证 / 记日志,后台负责管理。
+
+### 5.1 用户门户 `user.nwflash.cc.cd`(客户自助后台)
+
+`user.nwflash.cc.cd`(`cloudflare/user/src/index.ts` + 单文件 SPA `user.html`,高级白 + 毛玻璃设计):
+
+- **面向授权客户**的自助表面,与桌面端同源 API token(`api_users.token`)鉴权;登录(账号+密码)在本 worker 内完成(PBKDF2,与 api/web 同算法)。
+- **我的查询日志**:该用户的 `access_logs`(PD / 版本 / 状态 / URL),分页 + PD 过滤。
+- **在线会话**:该用户的 `online_sessions`(版本 / IP / 上线 / 时长),**⟠ 强制下线**(仅限本人会话,设 `force_exit`)。
+- **修改密码**:校验当前密码后更新(`api_users.salt + password`)。
+- 写操作校验 `X-Requested-With`(CSRF 兜底);安全头与 admin 一致(HSTS / CSP / no-store)。
 
 ---
 

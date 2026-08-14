@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Nwflash · 我的账户</title>
+<style>
+  /* ============================================================
+     Nwflash 用户自助门户 - 高级白 + 毛玻璃
+     面向授权客户的个人账户表面:我的查询日志 / 在线会话(可强制下线)/ 修改密码。
+     冷白画布 + 磨砂玻璃卡片(Double-Bezel)+ 单一深青强调。
+     与暗色管理台同品牌,但更个人、更安静。
+     ============================================================ */
+  :root{
+    --canvas:#F5F7F9;            /* 冷白画布 */
+    --ink:#1A2430;               /* 主文字(≈14:1) */
+    --muted:#50606F;             /* 次级文字(≈5.9:1) */
+    --faint:#627286;             /* 时间戳/提示(≈4.7:1) */
+    --teal:#0E7A6F;              /* 唯一强调:在线/激活/OKAY/主操作(≈5.4:1) */
+    --teal-deep:#0A6157;
+    --teal-soft:rgba(14,122,111,.10);
+    --rose:#C23E38;              /* 危险:失败/强制下线(≈5.7:1) */
+    --rose-soft:rgba(194,62,56,.09);
+    --line:rgba(26,36,48,.10);   /* 发丝细线 */
+    --line2:rgba(26,36,48,.18);  /* 结构线 */
+    --shell:rgba(26,36,48,.05);  /* 外框衬底(Double-Bezel 外层) */
+    --glass-hi:rgba(255,255,255,.78);
+    --glass-lo:rgba(255,255,255,.5);
+    --display:"Segoe UI Variable","Segoe UI",-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;
+    --mono:"Cascadia Mono","JetBrains Mono","Cascadia Code",Consolas,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--display);color:var(--ink);
+    background:
+      radial-gradient(900px 480px at 12% -6%, rgba(14,122,111,.07), transparent 60%),
+      radial-gradient(760px 420px at 92% 108%, rgba(38,84,116,.06), transparent 60%),
+      var(--canvas);
+    background-attachment:fixed;
+    -webkit-font-smoothing:antialiased;font-size:14px;min-height:100dvh;
+  }
+  button{font-family:inherit}
+  input,select{font-family:inherit}
+  .mono{font-family:var(--mono);font-feature-settings:"tnum"}
+  ::selection{background:rgba(14,122,111,.16)}
+
+  a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--teal);outline-offset:2px;border-radius:6px}
+
+  /* ---------- 按钮 ---------- */
+  .btn{height:40px;border:1px solid var(--line2);border-radius:12px;padding:0 18px;background:rgba(255,255,255,.66);color:var(--ink);font-size:13.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:background .18s,border-color .18s,color .18s,box-shadow .18s,transform .08s;box-shadow:0 1px 2px rgba(26,36,48,.04), inset 0 1px 0 rgba(255,255,255,.7)}
+  .btn:hover{border-color:var(--teal);color:var(--teal)}
+  .btn:active{transform:scale(.98)}
+  .btn-primary{background:linear-gradient(135deg,var(--teal),#0B6A60);border-color:var(--teal);color:#fff;box-shadow:0 10px 26px -10px rgba(14,122,111,.55), inset 0 1px 0 rgba(255,255,255,.22)}
+  .btn-primary:hover{background:linear-gradient(135deg,var(--teal-deep),#0B6A60);border-color:var(--teal-deep);color:#fff}
+  .btn-ghost{background:transparent;color:var(--teal);border-color:var(--line2)}
+  .btn-ghost:hover{background:var(--teal-soft);border-color:var(--teal)}
+  .btn-danger{background:transparent;color:var(--rose);border-color:rgba(194,62,56,.5)}
+  .btn-danger:hover{background:var(--rose-soft);border-color:var(--rose)}
+  .btn-sm{height:30px;padding:0 12px;font-size:12px;border-radius:9px;font-weight:600}
+  .btn-block{width:100%}
+  .btn[disabled]{opacity:.5;cursor:not-allowed}
+
+  /* 强制下线 = 玫瑰色急停(⟠ 字形 + 文字) */
+  .kick{color:var(--rose);border-color:rgba(194,62,56,.55)}
+  .kick:hover{background:var(--rose);border-color:var(--rose);color:#fff;box-shadow:0 8px 20px -8px rgba(194,62,56,.5)}
+
+  /* ---------- 输入 ---------- */
+  .field{margin-bottom:16px}
+  .field label{display:block;font-size:12.5px;font-weight:600;color:var(--muted);margin-bottom:7px;letter-spacing:.1px}
+  .field input{width:100%;height:44px;border:1px solid var(--line2);border-radius:12px;padding:0 14px;font-size:14px;background:rgba(255,255,255,.72);color:var(--ink);box-shadow:inset 0 1px 0 rgba(255,255,255,.7);transition:border-color .16s,box-shadow .16s}
+  .field input::placeholder{color:var(--faint)}
+  .field input:focus{border-color:var(--teal);box-shadow:0 0 0 3px rgba(14,122,111,.13), inset 0 1px 0 rgba(255,255,255,.7)}
+  .remember{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);cursor:pointer;margin:2px 0 14px}
+  .remember input{accent-color:var(--teal);width:16px;height:16px;cursor:pointer}
+
+  /* ---------- Double-Bezel 磨砂玻璃 ---------- */
+  .shell{border-radius:24px;padding:9px;background:var(--shell);border:1px solid var(--line);box-shadow:0 18px 50px -24px rgba(14,122,111,.16), 0 2px 6px rgba(26,36,48,.03)}
+  .glass{border-radius:16px;background:linear-gradient(150deg,var(--glass-hi),var(--glass-lo));backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);border:1px solid rgba(255,255,255,.8);box-shadow:inset 0 1px 0 rgba(255,255,255,.95), inset 0 -1px 0 rgba(26,36,48,.04)}
+
+  /* ---------- 登录 ---------- */
+  .login{min-height:100dvh;display:grid;place-items:center;padding:24px}
+  .login-card{width:100%;max-width:404px;padding:30px 30px 26px}
+  .login-brand{display:flex;align-items:center;gap:13px;margin-bottom:30px}
+  .brand-mark{width:38px;height:38px;border-radius:12px;background:linear-gradient(135deg,var(--teal),#0B6A60);color:#fff;display:grid;place-items:center;font-family:var(--mono);font-weight:700;font-size:14px;letter-spacing:.5px;box-shadow:0 10px 22px -8px rgba(14,122,111,.6), inset 0 1px 0 rgba(255,255,255,.25)}
+  .login-brand .t{font-size:16px;font-weight:700;letter-spacing:.2px}
+  .login-brand .s{display:block;font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:1.4px;margin-top:2px}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:2.4px;color:var(--teal);font-weight:600;display:flex;align-items:center;gap:8px}
+  .eyebrow::before{content:"";width:18px;height:1.5px;background:var(--teal)}
+  .login-title{font-size:24px;font-weight:700;margin:12px 0 8px}
+  .login-sub{color:var(--muted);font-size:13px;line-height:1.7;margin-bottom:26px}
+  .err{color:var(--rose);font-size:12.5px;min-height:18px;margin:0 0 6px}
+
+  /* ---------- 顶栏(浮动磨砂 pill) ---------- */
+  .app{min-height:100dvh}
+  .mast{max-width:1000px;margin:22px auto 0;padding:7px}
+  .mast-in{display:flex;align-items:center;gap:14px;padding:10px 12px 10px 16px}
+  .mast .brand{display:flex;align-items:center;gap:11px;margin-right:auto}
+  .mast .brand .mark{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--teal),#0B6A60);color:#fff;display:grid;place-items:center;font-family:var(--mono);font-weight:700;font-size:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25)}
+  .mast .brand .t{font-size:14px;font-weight:700}
+  .mast .brand .s{font-family:var(--mono);font-size:9.5px;color:var(--faint);letter-spacing:1.2px;margin-top:1px}
+  .who{display:flex;align-items:center;gap:9px}
+  .who .av{width:28px;height:28px;border-radius:9px;background:var(--teal-soft);color:var(--teal);display:grid;place-items:center;font-size:12px;font-weight:700}
+  .who .nm{font-size:13px;font-weight:600}
+  .who .op{display:flex;gap:6px}
+
+  /* 在线身份片(签名) */
+  .live-chip{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;letter-spacing:.6px;color:var(--faint);padding:7px 12px;border-radius:999px;background:rgba(255,255,255,.6);border:1px solid var(--line)}
+  .live-chip .dot{width:8px;height:8px;border-radius:50%;background:#B8C2CC;transition:background .3s}
+  .live-chip.on{color:var(--teal);border-color:rgba(14,122,111,.3)}
+  .live-chip.on .dot{background:var(--teal);box-shadow:0 0 0 0 rgba(14,122,111,.5);animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(14,122,111,.45)}70%{box-shadow:0 0 0 6px rgba(14,122,111,0)}100%{box-shadow:0 0 0 0 rgba(14,122,111,0)}}
+
+  /* ---------- 主区 ---------- */
+  .stage{max-width:1000px;margin:22px auto 80px;padding:0 18px}
+  .tabs{display:flex;gap:6px;margin-bottom:18px;padding:6px;border-radius:16px;background:rgba(255,255,255,.5);border:1px solid var(--line);backdrop-filter:blur(12px)}
+  .tab{appearance:none;border:none;background:transparent;padding:10px 20px;font-size:13.5px;font-weight:600;color:var(--muted);cursor:pointer;border-radius:11px;transition:background .18s,color .18s,box-shadow .18s;white-space:nowrap}
+  .tab:hover{color:var(--ink)}
+  .tab.active{background:linear-gradient(135deg,var(--teal),#0B6A60);color:#fff;box-shadow:0 8px 20px -8px rgba(14,122,111,.6)}
+  .tab .n{font-family:var(--mono);font-size:10px;opacity:.7;margin-right:7px}
+
+  .panel{padding:22px 24px}
+  .panel-head{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+  .panel-title{font-size:14px;font-weight:700;display:flex;align-items:center;gap:9px}
+  .panel-title::before{content:"";width:3px;height:15px;background:var(--teal);border-radius:2px}
+  .panel-title .hint{font-family:var(--mono);font-size:10px;color:var(--faint);font-weight:400}
+  .panel-head .live{font-family:var(--mono);font-size:10px;letter-spacing:1.4px;color:var(--teal);display:inline-flex;align-items:center;gap:6px;margin-left:auto}
+  .panel-head .live .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);animation:pulse 2.4s ease-in-out infinite}
+
+  /* ---------- 日志账页 ---------- */
+  .ledger{min-height:120px}
+  .lbl-row{display:flex;gap:12px;padding:8px 2px;border-bottom:1px solid var(--line2);font-family:var(--mono);font-size:9.5px;letter-spacing:1px;color:var(--faint)}
+  .lbl-row span{flex:none}
+  .log-row{display:flex;gap:12px;align-items:baseline;padding:11px 2px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12.5px;white-space:nowrap;transition:background .1s}
+  .log-row:hover{background:rgba(14,122,111,.04)}
+  .log-row:last-child{border-bottom:none}
+  .log-row .t{flex:0 0 74px;color:var(--faint)}
+  .log-row .p{flex:0 0 78px;color:var(--ink);font-weight:600}
+  .log-row .v{flex:0 0 178px;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+  .log-row .st{flex:0 0 72px;font-weight:600}
+  .log-row .st.ok{color:var(--teal)}
+  .log-row .st.fail{color:var(--rose)}
+  .log-row .url{flex:1;min-width:0;color:#3A6B8C;overflow:hidden;text-overflow:ellipsis}
+  .log-row .url .arr{color:var(--faint);margin-right:5px}
+  .empty{color:var(--faint);font-size:13px;text-align:center;padding:38px 10px;font-family:var(--mono)}
+  .foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--line)}
+  .foot input{height:34px;border:1px solid var(--line2);border-radius:10px;padding:0 12px;font-size:12px;font-family:var(--mono);background:rgba(255,255,255,.7);color:var(--ink);outline:none;width:160px}
+  .foot input:focus-visible{outline:2px solid var(--teal);outline-offset:2px;border-color:var(--teal)}
+  .foot .pg{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .foot .pg .info{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+
+  /* ---------- 在线会话 ---------- */
+  .sess-row{display:flex;gap:14px;align-items:center;padding:14px 2px;border-bottom:1px solid var(--line)}
+  .sess-row:last-child{border-bottom:none}
+  .sess-row .dev{flex:1;min-width:0}
+  .sess-row .dev .d{font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:8px}
+  .sess-row .dev .d .tag{font-family:var(--mono);font-size:10px;color:var(--faint);font-weight:400}
+  .sess-row .dev .m{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:4px}
+  .sess-row .dur{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right}
+  .sess-row .dur .k{display:block;font-size:9.5px;color:var(--faint);letter-spacing:1px;margin-bottom:3px}
+  .sess-row .ops{flex:none}
+  .tally{display:flex;align-items:center;gap:14px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--muted);flex-wrap:wrap}
+  .tally b{color:var(--ink);font-weight:600}
+  .tally .right{margin-left:auto;color:var(--faint)}
+
+  /* ---------- toast ---------- */
+  .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(8px);background:rgba(255,255,255,.82);border:1px solid var(--line2);border-left:3px solid var(--teal);border-radius:12px;padding:11px 18px;font-family:var(--mono);font-size:12.5px;color:var(--ink);display:flex;align-items:center;gap:10px;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;box-shadow:0 18px 40px -16px rgba(26,36,48,.25), inset 0 1px 0 rgba(255,255,255,.8);backdrop-filter:blur(14px);max-width:min(92vw,640px);z-index:60}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast .p-t{color:var(--faint);flex-shrink:0}
+  .toast .p-k{font-weight:600;flex-shrink:0}
+  .toast .p-k.ok{color:var(--teal)}
+  .toast .p-k.fail{color:var(--rose)}
+  .toast .p-m{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+    .live-chip.on .dot,.panel-head .live .dot{box-shadow:none}
+  }
+  @media (max-width:820px){
+    .mast{margin-top:14px}
+    .mast-in{flex-wrap:wrap;gap:10px}
+    .mast .brand{margin-right:0;width:100%}
+    .who{margin-left:auto}
+    .stage{padding:0 12px;margin-top:16px}
+    .panel{padding:18px 16px}
+    .log-row .url{display:none}
+    .log-row .v{flex:1;min-width:0}
+    .foot .pg{margin-left:0;width:100%;justify-content:flex-end}
+    .sess-row{flex-wrap:wrap}
+    .sess-row .dur{text-align:left}
+    .tabs{overflow-x:auto}
+    .tab{flex:none}
+  }
+</style>
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="loginView" class="login">
+  <div class="shell">
+    <div class="glass login-card">
+      <div class="login-brand">
+        <div class="brand-mark">NWF</div>
+        <div><div class="t">Nwflash</div><div class="s">奶娃Flash · 我的账户</div></div>
+      </div>
+      <div class="eyebrow">SECURE SIGN IN</div>
+      <h1 class="login-title">登录我的账户</h1>
+      <p class="login-sub">查看你的查询日志、在线会话与账户设置。<br>使用授权账号登录,密码与桌面端一致。</p>
+      <div class="field"><label for="loginUser">账号</label><input id="loginUser" autocomplete="username" placeholder="登录账号"></div>
+      <div class="field"><label for="loginPass">密码</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+      <label class="remember" for="loginRemember"><input type="checkbox" id="loginRemember" checked> 记住登录</label>
+      <div class="err" id="loginErr" role="alert"></div>
+      <button id="loginBtn" class="btn btn-primary btn-block" style="height:46px">登录</button>
+    </div>
+  </div>
+</div>
+
+<!-- 应用 -->
+<div id="appView" class="app" style="display:none">
+  <!-- 浮动磨砂顶栏 -->
+  <header class="mast shell">
+    <div class="glass mast-in">
+      <div class="brand">
+        <div class="mark">NWF</div>
+        <div><div class="t">Nwflash · 我的账户</div><div class="s">MY NWFLASH</div></div>
+      </div>
+      <span class="live-chip" id="onlineChip" role="status"><span class="dot"></span><span id="onlineChipText">离线</span></span>
+      <div class="who">
+        <div class="av" id="meAv">A</div>
+        <span class="nm" id="meLabel"></span>
+        <div class="op"><button class="btn btn-sm btn-ghost" id="logoutBtn">退出</button></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="stage">
+    <nav class="tabs" role="tablist" aria-label="账户菜单">
+      <button class="tab active" data-tab="logs" role="tab" aria-selected="true" tabindex="0"><span class="n">01</span>我的日志</button>
+      <button class="tab" data-tab="sessions" role="tab" aria-selected="false" tabindex="-1"><span class="n">02</span>在线会话</button>
+      <button class="tab" data-tab="password" role="tab" aria-selected="false" tabindex="-1"><span class="n">03</span>修改密码</button>
+    </nav>
+
+    <!-- 我的日志 -->
+    <section class="page" id="sec-logs" role="tabpanel">
+      <div class="shell">
+        <div class="glass panel">
+          <div class="panel-head">
+            <h2 class="panel-title">我的查询日志 <span class="hint">· 你的 ROM 查询流水</span></h2>
+            <span class="live" id="logsLive"><span class="dot"></span>LIVE</span>
+          </div>
+          <div class="lbl-row"><span style="flex:0 0 74px">时间</span><span style="flex:0 0 78px">PD</span><span style="flex:0 0 178px">版本</span><span style="flex:0 0 72px">状态</span><span>URL</span></div>
+          <div class="ledger" id="logBody"><div class="empty">正在加载日志…</div></div>
+          <div class="foot">
+            <input id="logPd" placeholder="按 PD 过滤" class="mono" aria-label="按 PD 过滤">
+            <button id="logRefresh" class="btn btn-sm btn-ghost">刷新</button>
+            <div class="pg">
+              <button id="logPrev" class="btn btn-sm btn-ghost">‹ 上一页</button>
+              <span class="info" id="logInfo"></span>
+              <button id="logNext" class="btn btn-sm btn-ghost">下一页 ›</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 在线会话 -->
+    <section class="page" id="sec-sessions" role="tabpanel" hidden>
+      <div class="shell">
+        <div class="glass panel">
+          <div class="panel-head">
+            <h2 class="panel-title">在线会话 <span class="hint">· 桌面端登录实例</span></h2>
+            <span class="live" id="sessLive"><span class="dot"></span>LIVE</span>
+          </div>
+          <div class="ledger" id="sessionBody"></div>
+          <div class="empty" id="sessionEmpty" style="display:none">当前没有在线会话。桌面端登录后每 5s 心跳,会出现在这里。</div>
+          <div class="tally" id="sessionTally"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 修改密码 -->
+    <section class="page" id="sec-password" role="tabpanel" hidden>
+      <div class="shell" style="max-width:480px">
+        <div class="glass panel">
+          <div class="panel-head">
+            <h2 class="panel-title">修改密码 <span class="hint">· 修改后桌面端请用新密码登录</span></h2>
+          </div>
+          <div class="field"><label for="pwCurrent">当前密码</label><input id="pwCurrent" type="password" autocomplete="current-password" placeholder="••••••"></div>
+          <div class="field"><label for="pwNew">新密码(至少 6 位)</label><input id="pwNew" type="password" autocomplete="new-password" placeholder="••••••"></div>
+          <div class="field"><label for="pwConfirm">确认新密码</label><input id="pwConfirm" type="password" autocomplete="new-password" placeholder="••••••"></div>
+          <div class="err" id="pwErr" role="alert"></div>
+          <button id="pwSave" class="btn btn-primary btn-block" style="height:44px">保存新密码</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast" aria-live="polite"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = null;
+let me = null;
+let currentTab = "logs";
+
+/* ---------- 通用 ---------- */
+async function api(path, method = "GET", body) {
+  const headers = { "X-Requested-With": "XMLHttpRequest", ...(body ? { "Content-Type": "application/json" } : {}) };
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && !path.includes("/login")) { await logoutLocal(); throw new Error(data.error || "会话已失效"); }
+  if (!r.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+let toastTimer;
+function toast(msg, kind = "info") {
+  const k = kind === "ok" ? "ok" : kind === "fail" ? "fail" : "info";
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0"), mm = String(now.getMinutes()).padStart(2, "0"), ss = String(now.getSeconds()).padStart(2, "0");
+  const word = k === "ok" ? "OKAY" : k === "fail" ? "FAIL" : "INFO";
+  $("toast").innerHTML = `<span class="p-t">[${hh}:${mm}:${ss}]</span><span class="p-k ${k}">${word}</span><span class="p-m">${esc(msg)}</span>`;
+  $("toast").className = "toast show";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 2600);
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+function stampTime(s) { const d = new Date((s||"").replace(" ","T")+"Z"); if (isNaN(d)) return s; return d.toLocaleString("zh-CN", {hour12:false}); }
+function fmtClock(epochSec) { const d = new Date(Number(epochSec)*1000); if (isNaN(d)) return "-"; const p=n=>String(n).padStart(2,"0"); return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+function fmtDur(sec) { sec=Math.max(0,Math.floor(Number(sec)||0)); const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; const p=n=>String(n).padStart(2,"0"); return h>0?`${h}:${p(m)}:${p(s)}`:`${p(m)}:${p(s)}`; }
+
+/* ---------- 会话存取 ---------- */
+const STORE_KEY = "nwflash_portal_token";
+function saveToken(t, remember) { token = t; if (remember) localStorage.setItem(STORE_KEY, t); else sessionStorage.setItem(STORE_KEY, t); }
+function loadToken() { return localStorage.getItem(STORE_KEY) || sessionStorage.getItem(STORE_KEY); }
+async function logoutLocal() { token = null; me = null; localStorage.removeItem(STORE_KEY); sessionStorage.removeItem(STORE_KEY); showLogin(); }
+
+/* ---------- 视图 ---------- */
+function showLogin() { $("loginView").style.display = "grid"; $("appView").style.display = "none"; }
+function showApp() {
+  $("loginView").style.display = "none"; $("appView").style.display = "block";
+  $("meLabel").textContent = me.name || me.username;
+  $("meAv").textContent = (me.name || me.username || "A").charAt(0).toUpperCase();
+  switchTab("logs");
+  refreshMe();
+}
+
+/* ---------- 登录 ---------- */
+async function doLogin() {
+  const err = $("loginErr"); err.textContent = "";
+  const btn = $("loginBtn"); btn.disabled = true; btn.textContent = "登录中…";
+  try {
+    const data = await api("/api/login", "POST", { username: $("loginUser").value.trim(), password: $("loginPass").value });
+    me = { username: data.username, name: data.name };
+    saveToken(data.token, $("loginRemember").checked);
+    showApp();
+    toast("已登录," + (data.name || data.username), "ok");
+  } catch (e) { err.textContent = e.message; }
+  finally { btn.disabled = false; btn.textContent = "登录"; }
+}
+$("loginBtn").onclick = doLogin;
+$("loginPass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+$("loginUser").addEventListener("keydown", e => { if (e.key === "Enter") $("loginPass").focus(); });
+$("logoutBtn").onclick = () => logoutLocal();
+
+/* ---------- 页签 ---------- */
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".tab").forEach(x => {
+    const on = x.dataset.tab === tab;
+    x.classList.toggle("active", on);
+    x.setAttribute("aria-selected", on ? "true" : "false");
+    x.setAttribute("tabindex", on ? "0" : "-1");
+  });
+  document.querySelectorAll(".page").forEach(p => p.hidden = p.id !== "sec-" + tab);
+  if (tab === "logs") loadLogs();
+  if (tab === "sessions") { loadSessions(); startSessPoll(); } else stopSessPoll();
+  if (tab === "password") $("pwCurrent").focus();
+}
+document.querySelectorAll(".tab").forEach(n => n.onclick = () => switchTab(n.dataset.tab));
+
+/* ---------- 我的信息 / 在线状态 ---------- */
+let meTimer = null;
+async function refreshMe() {
+  try {
+    const data = await api("/api/me");
+    me = { username: data.username, name: data.name };
+    const chip = $("onlineChip");
+    chip.classList.toggle("on", (data.online || 0) > 0);
+    $("onlineChipText").textContent = (data.online || 0) > 0 ? `当前在线 · ${data.online} 会话` : "离线";
+  } catch (e) { if (e.message !== "会话已失效") { /* 静默 */ } }
+  clearTimeout(meTimer); meTimer = setTimeout(refreshMe, 30000);
+}
+
+/* ---------- 我的日志 ---------- */
+let logPage = 0;
+let logTotal = 0;
+const LOG_PAGE_SIZE = 60;
+async function loadLogs() {
+  try {
+    const q = new URLSearchParams({ limit: String(LOG_PAGE_SIZE), offset: String(logPage * LOG_PAGE_SIZE) });
+    if ($("logPd").value.trim()) q.set("pd", $("logPd").value.trim());
+    const data = await api("/api/me/logs?" + q.toString());
+    const rows = data.logs || [];
+    logTotal = data.total || 0;
+    const body = $("logBody");
+    body.innerHTML = "";
+    if (!rows.length) { body.innerHTML = '<div class="empty">还没有查询记录。在桌面端发起一次 ROM 查询后会出现在这里。</div>'; }
+    rows.forEach(l => {
+      const ts = new Date((l.created_at || "").replace(" ","T") + "Z");
+      const t = isNaN(ts) ? l.created_at : ts.toLocaleTimeString("zh-CN", {hour12:false});
+      const cls = l.status >= 400 ? "fail" : "ok";
+      const status = l.status >= 400 ? "✕ FAILED" : "✓ OKAY";
+      const row = document.createElement("div");
+      row.className = "log-row";
+      row.innerHTML =
+        `<span class="t">[${esc(t)}]</span>` +
+        `<span class="p">${esc(l.pd)}</span>` +
+        `<span class="v">${esc(l.version)}</span>` +
+        `<span class="st ${cls}">${status}</span>` +
+        `<span class="url">${l.url ? `<span class="arr">→</span>${esc(l.url)}` : ""}</span>`;
+      body.appendChild(row);
+    });
+    const totalPages = Math.max(1, Math.ceil(logTotal / LOG_PAGE_SIZE));
+    if (logPage >= totalPages) logPage = totalPages - 1;
+    $("logInfo").textContent = "第 " + (logPage + 1) + " / " + totalPages + " 页 · 共 " + logTotal + " 条";
+    $("logNext").disabled = logPage + 1 >= totalPages;
+    $("logPrev").disabled = logPage <= 0;
+  } catch (e) { if (currentTab === "logs") toast(e.message, "fail"); }
+}
+$("logPrev").onclick = () => { if (logPage > 0) { logPage--; loadLogs(); } };
+$("logNext").onclick = () => { logPage++; loadLogs(); };
+$("logRefresh").onclick = () => { logPage = 0; loadLogs(); };
+$("logPd").addEventListener("keydown", e => { if (e.key === "Enter") { logPage = 0; loadLogs(); } });
+
+/* ---------- 在线会话 ---------- */
+const SESS_POLL_MS = 10000;
+let sessTimer = null;
+let sessionCache = [];
+function startSessPoll() { stopSessPoll(); loadSessions(); sessTimer = setInterval(loadSessions, SESS_POLL_MS); }
+function stopSessPoll() { if (sessTimer) { clearInterval(sessTimer); sessTimer = null; } }
+async function loadSessions() {
+  try {
+    const data = await api("/api/me/sessions");
+    const rows = data.sessions || [];
+    sessionCache = rows;
+    $("sessionEmpty").style.display = rows.length ? "none" : "block";
+    $("sessionBody").innerHTML = rows.map((s, i) => `
+      <div class="sess-row">
+        <div class="dev">
+          <div class="d"><span>${esc(me ? me.name || me.username : "我的会话")}</span><span class="tag">${esc(s.client_version || "v?")}</span>${s.force_exit ? '<span class="tag" style="color:var(--rose)">已强制下线</span>' : ""}</div>
+          <div class="m">${esc(s.ip || "-")} · 上线 ${fmtClock(s.connected_at)} · 最后心跳 ${fmtClock(s.last_seen_at)}</div>
+        </div>
+        <div class="dur"><span class="k">ONLINE</span>${fmtDur(s.duration_seconds)}</div>
+        <div class="ops">${s.force_exit ? "" : `<button class="btn btn-sm kick" onclick="kickSessionIndex(${i})">⟠ 强制下线</button>`}</div>
+      </div>`).join("");
+    $("sessionTally").innerHTML = `<span>当前在线 <b>${data.count || 0}</b> 会话</span><span class="right">每 ${SESS_POLL_MS / 1000}s 刷新 · 强制下线后桌面端 ≤5s 退出</span>`;
+    refreshMe();
+  } catch (e) { if (currentTab === "sessions") toast(e.message, "fail"); }
+}
+function kickSessionIndex(i) {
+  const s = sessionCache[i];
+  if (!s) return;
+  const ok = confirm("确认强制下线这个会话?桌面端将在下一个心跳(≤5s)退出进程。");
+  if (!ok) return;
+  kickSession(s.session_id);
+}
+async function kickSession(sessionId) {
+  try {
+    await api("/api/me/sessions/kick", "POST", { sessionId });
+    toast("已下发强制下线", "ok");
+    loadSessions();
+  } catch (e) { toast(e.message, "fail"); }
+}
+
+/* ---------- 修改密码 ---------- */
+$("pwSave").onclick = async () => {
+  const err = $("pwErr"); err.textContent = "";
+  const cur = $("pwCurrent").value, nw = $("pwNew").value, cf = $("pwConfirm").value;
+  if (!cur) { err.textContent = "请输入当前密码。"; return; }
+  if (nw.length < 6) { err.textContent = "新密码至少 6 位。"; return; }
+  if (nw !== cf) { err.textContent = "两次输入的新密码不一致。"; return; }
+  const btn = $("pwSave"); btn.disabled = true;
+  try {
+    await api("/api/me/password", "POST", { current: cur, newPassword: nw });
+    $("pwCurrent").value = ""; $("pwNew").value = ""; $("pwConfirm").value = "";
+    toast("密码已修改", "ok");
+  } catch (e) { err.textContent = e.message; }
+  finally { btn.disabled = false; }
+};
+
+/* ---------- 启动 ---------- */
+(async () => {
+  const saved = loadToken();
+  if (saved) {
+    token = saved;
+    try {
+      const data = await api("/api/me");
+      me = { username: data.username, name: data.name };
+      showApp();
+      return;
+    } catch (e) { /* token 失效 → 回登录页 */ await logoutLocal(); }
+  }
+  showLogin();
+})();
+</script>
+</body>
+</html>

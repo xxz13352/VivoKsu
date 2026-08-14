@@ -1,0 +1,18 @@
+name = "nwflash-user"
+main = "src/index.ts"
+compatibility_date = "2026-08-13"
+
+# 让 worker 能把 user.html 当作纯文本导入
+rules = [
+  { type = "Text", globs = ["**/*.html"], fallthrough = true }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "nwflash-db"
+database_id = "a35d1ea1-620f-436c-9eb5-7f58312c1cf6"
+
+# 自定义域:user.nwflash.cc.cd(与 api/web 同域名 nwflash.cc.cd)
+[[routes]]
+pattern = "user.nwflash.cc.cd"
+custom_domain = true

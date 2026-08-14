@@ -6,6 +6,18 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8866", "--directory", "cloudflare/web/src"],
       "port": 8866
+    },
+    {
+      "name": "user-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8867", "--directory", "cloudflare/user/src"],
+      "port": 8867
+    },
+    {
+      "name": "site-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8868", "--directory", "cloudflare/website/src"],
+      "port": 8868
     }
   ]
 }

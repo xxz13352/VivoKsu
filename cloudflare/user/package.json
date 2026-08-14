@@ -1,0 +1,15 @@
+{
+  "name": "nwflash-user",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nwflash 用户自助门户(user.nwflash.cc.cd):我的日志 / 修改密码 / 在线会话",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260811.0",
+    "wrangler": "^4.122.0"
+  }
+}
