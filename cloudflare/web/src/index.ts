@@ -86,11 +86,11 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   if (path === "/api/change-password" && method === "POST")
     return changePassword(request, admin, env);
 
-  // 版本号控制
-  if (path === "/api/versions" && method === "GET") return listVersions(env);
-  if (path === "/api/versions" && method === "POST") return addVersion(request, env);
-  if (path.startsWith("/api/versions/") && method === "PUT") return updateVersion(request, path, env);
-  if (path.startsWith("/api/versions/") && method === "DELETE") return deleteVersion(path, env);
+  // VivoKsu 版本控制(强制更新)
+  if (path === "/api/app-versions" && method === "GET") return listAppVersions(env);
+  if (path === "/api/app-versions" && method === "POST") return addAppVersion(request, env);
+  if (path.startsWith("/api/app-versions/") && method === "PUT") return updateAppVersion(request, path, env);
+  if (path.startsWith("/api/app-versions/") && method === "DELETE") return deleteAppVersion(path, env);
 
   // 用户管理
   if (path === "/api/users" && method === "GET") return listUsers(env);
@@ -206,48 +206,65 @@ async function changePassword(request: Request, admin: AdminRow, env: Env): Prom
 }
 
 /* ------------------------------------------------------------------ */
-/* 版本号控制                                                           */
+/* VivoKsu 版本控制(强制更新)                                            */
 /* ------------------------------------------------------------------ */
 
-async function listVersions(env: Env): Promise<Response> {
+async function listAppVersions(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
-    "SELECT id, pd, version, enabled, created_at FROM versions ORDER BY pd, version"
-  ).all<VersionRow>();
+    "SELECT id, version, min_version, download_url, note, enabled, created_at FROM app_versions ORDER BY id DESC"
+  ).all<AppVersionRow>();
   return json({ versions: rows.results }, 200);
 }
 
-async function addVersion(request: Request, env: Env): Promise<Response> {
+async function addAppVersion(request: Request, env: Env): Promise<Response> {
   const body = await request.json().catch(() => null);
-  const pd = (body?.pd as string || "").trim();
   const version = (body?.version as string || "").trim();
-  if (!pd || !version) return json({ error: "缺少 pd 或 version。" }, 400);
+  if (!version) return json({ error: "缺少版本号。" }, 400);
+  const minVersion = (body?.min_version as string || "").trim() || "0.0.0";
+  const downloadUrl = (body?.download_url as string || "").trim();
+  const note = (body?.note as string || "").trim();
 
-  const existing = await env.DB.prepare("SELECT id FROM versions WHERE pd = ? AND version = ?")
-    .bind(pd, version)
-    .first();
-  if (existing) return json({ error: "该 PD + 版本已存在。" }, 409);
+  const existing = await env.DB.prepare("SELECT id FROM app_versions WHERE version = ?").bind(version).first();
+  if (existing) return json({ error: "该版本号已存在。" }, 409);
 
-  await env.DB.prepare("INSERT INTO versions (pd, version) VALUES (?, ?)").bind(pd, version).run();
+  await env.DB.prepare("INSERT INTO app_versions (version, min_version, download_url, note) VALUES (?, ?, ?, ?)")
+    .bind(version, minVersion, downloadUrl, note)
+    .run();
   return json({ ok: true }, 201);
 }
 
-async function updateVersion(request: Request, path: string, env: Env): Promise<Response> {
+async function updateAppVersion(request: Request, path: string, env: Env): Promise<Response> {
   const id = Number(path.split("/")[3]);
   if (!Number.isFinite(id)) return json({ error: "无效 id。" }, 400);
   const body = await request.json().catch(() => null);
-  const enabled = body?.enabled;
-  if (typeof enabled !== "boolean") return json({ error: "缺少 enabled。" }, 400);
 
-  await env.DB.prepare("UPDATE versions SET enabled = ? WHERE id = ?")
-    .bind(enabled ? 1 : 0, id)
-    .run();
+  if (typeof body?.enabled === "boolean") {
+    await env.DB.prepare("UPDATE app_versions SET enabled = ? WHERE id = ?")
+      .bind(body.enabled ? 1 : 0, id)
+      .run();
+  }
+  if (typeof body?.min_version === "string" && body.min_version.trim()) {
+    await env.DB.prepare("UPDATE app_versions SET min_version = ? WHERE id = ?")
+      .bind(body.min_version.trim(), id)
+      .run();
+  }
+  if (typeof body?.download_url === "string") {
+    await env.DB.prepare("UPDATE app_versions SET download_url = ? WHERE id = ?")
+      .bind(body.download_url.trim(), id)
+      .run();
+  }
+  if (typeof body?.note === "string") {
+    await env.DB.prepare("UPDATE app_versions SET note = ? WHERE id = ?")
+      .bind(body.note.trim(), id)
+      .run();
+  }
   return json({ ok: true }, 200);
 }
 
-async function deleteVersion(path: string, env: Env): Promise<Response> {
+async function deleteAppVersion(path: string, env: Env): Promise<Response> {
   const id = Number(path.split("/")[3]);
   if (!Number.isFinite(id)) return json({ error: "无效 id。" }, 400);
-  await env.DB.prepare("DELETE FROM versions WHERE id = ?").bind(id).run();
+  await env.DB.prepare("DELETE FROM app_versions WHERE id = ?").bind(id).run();
   return json({ ok: true }, 200);
 }
 
@@ -405,10 +422,12 @@ interface AdminSessionRow {
   expires_at: string;
 }
 
-interface VersionRow {
+interface AppVersionRow {
   id: number;
-  pd: string;
   version: string;
+  min_version: string;
+  download_url: string;
+  note: string;
   enabled: number;
   created_at: string;
 }

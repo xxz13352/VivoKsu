@@ -26,6 +26,8 @@ public sealed class OtaApiClient
     {
         this.http = http;
         BaseUrl = baseUrl;
+        // 每个请求带客户端版本号,服务端据此做强制更新校验。
+        http.DefaultRequestHeaders.TryAddWithoutValidation("X-VivoKsu-Version", AppInfo.Version);
     }
 
     /// <summary>默认服务端地址:Cloudflare Worker 上的 VivoKsu ROM 代理(域名 nwflash.cc.cd)。</summary>
@@ -74,6 +76,11 @@ public sealed class OtaApiClient
         };
 
         using var response = await http.GetAsync(builder.Uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.UpgradeRequired)
+        {
+            var payload = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+            throw UpdateRequiredException.FromResponse(payload);
+        }
         if (!response.IsSuccessStatusCode)
         {
             throw await OtaApiException.FromResponseAsync(response);

@@ -49,8 +49,8 @@ VivoKsu 工具/
 
 | 域 | Worker | 角色 |
 | --- | --- | --- |
-| `api.nwflash.cc.cd` | `nwflash-rom` | 桌面登录(`/api/login`)、ROM 查询(`/api/rom`,强制 token + 版本控制 + 记日志) |
-| `web.nwflash.cc.cd` | `nwflash-web` | 管理控制台:管理员登录 / 版本号控制 / 用户管理 / 访问日志 |
+| `api.nwflash.cc.cd` | `nwflash-rom` | 桌面登录(`/api/login`)、ROM 查询(`/api/rom`,强制 token + 版本门禁 + 记日志)、版本策略(`/api/app/version`) |
+| `web.nwflash.cc.cd` | `nwflash-web` | 管理控制台:管理员登录 / VivoKsu 版本控制(强制更新) / 用户管理 / 访问日志 |
 
 **D1 `nwflash-db`** 由两个 Worker 共用:
 
@@ -58,7 +58,7 @@ VivoKsu 工具/
 | --- | --- |
 | `admins` / `admin_sessions` | 后台管理员 + 会话(PBKDF2 + HttpOnly Cookie) |
 | `api_users` | 客户端账号 = 桌面登录账号(username + password + token + enabled + banned) |
-| `versions` | 版本号控制(pd + version + enabled) |
+| `app_versions` | VivoKsu 版本控制(version + min_version + download_url + enabled) |
 | `access_logs` | 每次 `/api/rom` 查询的审计(用户 / PD / 版本 / URL / 状态) |
 
 ## 五、常见任务 → 去哪

@@ -7,7 +7,7 @@
 - **协议**: HTTPS + JSON(Cloudflare 边缘 TLS 1.3)
 - **CORS**: 已允许跨域(`Access-Control-Allow-Origin: *`)
 - **鉴权**: 可选 `Authorization: Bearer <API token>`(token 由后台「用户管理」生成;不带则记为匿名)
-- **版本控制**: 只有后台「版本号控制」里启用的 PD+版本才返回链接,否则 404
+- **版本门禁**: 所有请求带 `X-VivoKsu-Version` 头;版本低于后台「版本号控制」的最低版本 → **426 强制更新**(见 [版本门禁](#版本门禁强制更新))
 - **日志**: 每次查询记入 D1(按用户),可在 `web.nwflash.cc.cd` 查看
 
 ## 端点
@@ -25,6 +25,60 @@
 | --- | --- | --- |
 | `status` | string | 固定 `ok` |
 | `source` | string | 数据源类型(当前恒为 `VotaApiRomSource`,即真实 VOTA 代理) |
+
+---
+
+### `GET /api/app/version?current=<客户端版本>`
+
+VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)。返回后台「版本号控制」的生效策略(启用的版本中最高者)。
+
+**参数**
+
+| 参数 | 必填 | 说明 | 示例 |
+| --- | --- | --- | --- |
+| `current` | 否 | 客户端当前版本号;缺省按 `0.0.0` 处理 | `1.0.0` |
+
+**成功响应 200**
+```json
+{
+  "latest": "1.2.0",
+  "min": "1.0.0",
+  "download_url": "https://example.com/VivoKsu-1.2.0.zip",
+  "update_required": true,
+  "force_update": true
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `latest` | string \| null | 当前最新启用版本;后台未登记版本时为 `null` |
+| `min` | string \| null | 允许的最低版本,低于此 `force_update = true` |
+| `download_url` | string \| null | 更新下载链接(后台可配,可能为空) |
+| `update_required` | bool | `current < latest`(有可更新版本) |
+| `force_update` | bool | `current < min`(**必须更新,客户端应拦截**) |
+
+---
+
+### 版本门禁(强制更新)
+
+**所有请求**(`/api/login`、`/api/me`、`/api/rom`)都必须携带客户端版本号,服务端每次校验:
+
+| 头 | 必填 | 说明 |
+| --- | --- | --- |
+| `X-VivoKsu-Version` | ✅ | 桌面端当前版本号(如 `1.0.0`)。低于后台「版本号控制」最低版本 → **426** |
+
+**426 响应**(`code: UPDATE_REQUIRED`)
+```json
+{
+  "error": "请更新 VivoKsu 到最新版本后继续使用。",
+  "code": "UPDATE_REQUIRED",
+  "latest": "1.2.0",
+  "min": "1.0.0",
+  "download_url": "https://example.com/VivoKsu-1.2.0.zip"
+}
+```
+
+客户端收到 426 应弹强制更新窗(展示 `latest` / `min` / `download_url`),**无跳过路径**。
 
 ---
 
@@ -60,20 +114,21 @@
 
 ### `GET /api/rom?pd=<PD>&version=<版本>`
 
-按 **PD 码 + 版本号** 解析 OTA 下载链接。**必须携带登录 token**,且版本需在后台启用。
+按 **PD 码 + 版本号** 解析 OTA 下载链接。**必须携带登录 token**。所有请求也须带 `X-VivoKsu-Version`(见 [版本门禁](#版本门禁强制更新))。
 
 **请求头**
 
 | 头 | 说明 |
 | --- | --- |
 | `Authorization: Bearer <token>` | **必填**。API 用户 token(登录或后台「用户管理」获取)。无 / 无效 → 401;封禁 → 403 |
+| `X-VivoKsu-Version` | **必填**。客户端版本号,低于后台最低版本 → 426 |
 
 **参数**
 
 | 参数 | 必填 | 说明 | 示例 |
 | --- | --- | --- | --- |
 | `pd` | ✅ | 设备 PD 码(`ro.product.device`) | `PD2417` |
-| `version` | ✅ | 固件版本号(需在后台启用) | `16.2.12.0.W10.V000L1` |
+| `version` | ✅ | 固件版本号 | `16.2.12.0.W10.V000L1` |
 
 **成功响应 200**
 ```json
@@ -106,11 +161,11 @@
 | `401` | `请先登录。` | 未携带 `Authorization: Bearer` token |
 | `401` | `API token 无效或已停用。` | token 无效 / 账号被停用 |
 | `403` | `账号已被封禁。` | 账号被封禁(后台操作) |
+| `426` | `请更新 VivoKsu 到最新版本后继续使用。` | **客户端版本低于后台最低版本,强制更新**(详见 [版本门禁](#版本门禁强制更新)) |
 | `401` | `AUTH_FAIL` 文本 | VOTA 认证失败(worker 的 token 无效 / 被吊销) |
 | `402` | `INSUFFICIENT_CREDITS` 文本 | 运营方(VOTA)账户信用点不足 —— 仅影响该版本解析,非用户计费 |
 | `403` | `FORBIDDEN` 文本 | VOTA 拒绝(VOTA_VER 不在白名单等) |
-| `404` | `该版本未授权或不存在。` | **该 PD+版本未在后台「版本号控制」启用**(最常见) |
-| `404` | `record not found` | 版本已启用但 VOTA 平台无记录 |
+| `404` | `record not found` | VOTA 平台无此 PD+版本记录 |
 | `429` | `RATE_LIMITED` 文本 | 请求过于频繁 |
 | `500` | `服务端未配置 VOTA 凭据。` / `内部错误。` | worker 缺 token / 未捕获异常 |
 | `502` | `无法连接上游 ROM API。` / `上游返回异常。` | 连不上 VOTA 或上游响应异常 |
@@ -164,11 +219,12 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | 2026-08-13 | **桌面端登录(商业工具)**:api_users 加 username/password(PBKDF2);新增 `POST /api/login`(账号密码→token)与 `GET /api/me`(校验 token);VivoKsu 桌面端启动强制登录 |
 | 2026-08-13 | **强制登录 + 封禁**:`/api/rom` 必须携带 token(无→401 请先登录);api_users 加 `banned`,封禁用户禁止登录与查询(登录 401 / 查询 403);后台支持封禁/解封 |
 | 2026-08-13 | 明确商业模型:账号授权制 —— 用户登录即可查询、不按次计费;上游 VOTA 信用点由运营方承担 |
+| 2026-08-14 | **VivoKsu 版本门禁(强制更新)**:新增 `GET /api/app/version`(免登录策略查询);所有请求带 `X-VivoKsu-Version` 头,低于后台最低版本 → **426 UPDATE_REQUIRED**;**移除 ROM 白名单** —— `/api/rom` 不再做 PD+版本门禁,登录即可解析任意版本 |
 
 ## 管理后台
 
 - 地址:`https://web.nwflash.cc.cd`(详见 `web/README.md`)。
-- 功能:管理员登录、版本号控制、API 用户管理(token 生成/轮换/停用)、访问日志查看。
+- 功能:管理员登录、**VivoKsu 版本控制(强制更新)**、API 用户管理(token 生成/轮换/停用)、访问日志查看。
 
 ## 代码结构
 

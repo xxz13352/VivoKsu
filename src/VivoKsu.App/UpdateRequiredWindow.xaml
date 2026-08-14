@@ -1,0 +1,166 @@
+<Window x:Class="VivoKsu.App.UpdateRequiredWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="VivoKsu 需要更新" Width="420" SizeToContent="Height"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
+        FontFamily="Microsoft YaHei UI" TextOptions.TextFormattingMode="Display"
+        ShowInTaskbar="True">
+  <Window.Resources>
+    <!-- 低饱和 teal 体系(与 LoginWindow 同款) -->
+    <SolidColorBrush x:Key="Ink" Color="#0A2E2B"/>
+    <SolidColorBrush x:Key="Teal" Color="#0B6E68"/>
+    <SolidColorBrush x:Key="TealDark" Color="#085B56"/>
+    <SolidColorBrush x:Key="TealSoft" Color="#E3F0EE"/>
+    <SolidColorBrush x:Key="Muted" Color="#5C6E69"/>
+    <SolidColorBrush x:Key="Danger" Color="#C23B30"/>
+    <SolidColorBrush x:Key="DangerSoft" Color="#FBEFED"/>
+    <SolidColorBrush x:Key="CardLine" Color="#D9E3E0"/>
+
+    <!-- 主按钮:teal,悬停加深,按下 0.97 缩放 + 0.85 透明 -->
+    <Style x:Key="UpdatePrimaryButtonStyle" TargetType="Button">
+      <Setter Property="Height" Value="44"/>
+      <Setter Property="Background" Value="{StaticResource Teal}"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid>
+              <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="9" SnapsToDevicePixels="True"/>
+              <Border x:Name="HoverShade" Background="#14FFFFFF" CornerRadius="9" Opacity="0" IsHitTestVisible="False"/>
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <EventTrigger RoutedEvent="Mouse.MouseEnter"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="HoverShade" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/></Storyboard></BeginStoryboard></EventTrigger>
+              <EventTrigger RoutedEvent="Mouse.MouseLeave"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="HoverShade" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.2"/></Storyboard></BeginStoryboard></EventTrigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.85"/>
+                <Setter Property="RenderTransform"><Setter.Value><ScaleTransform ScaleX="0.97" ScaleY="0.97"/></Setter.Value></Setter>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.45"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 次级按钮:细描边透明底 -->
+    <Style x:Key="UpdateGhostButtonStyle" TargetType="Button">
+      <Setter Property="Height" Value="38"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource CardLine}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="9">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="{StaticResource TealSoft}"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.8"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- 右上角关闭:悬停软红 -->
+    <Style x:Key="UpdateCloseButtonStyle" TargetType="Button">
+      <Setter Property="Width" Value="28"/>
+      <Setter Property="Height" Value="28"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="7">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="{StaticResource DangerSoft}"/>
+                <Setter Property="Foreground" Value="{StaticResource Danger}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Border Background="Transparent" Padding="24">
+    <Border Background="#FFFFFF" CornerRadius="16" BorderBrush="{StaticResource CardLine}" BorderThickness="1" SnapsToDevicePixels="True">
+      <Border.Effect>
+        <DropShadowEffect BlurRadius="18" ShadowDepth="0" Color="#0A2E2B" Opacity="0.10"/>
+      </Border.Effect>
+      <Grid Margin="28,26,28,24">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 品牌 + 关闭 -->
+        <Grid>
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <Border Width="38" Height="38" CornerRadius="10" Background="{StaticResource Teal}" BorderBrush="#1F7B73" BorderThickness="1">
+              <TextBlock Text="VK" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+              <TextBlock Text="VivoKsu" Foreground="{StaticResource Ink}" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock Text="UPDATE REQUIRED" FontFamily="Cascadia Mono" FontSize="8" FontWeight="SemiBold" Foreground="{StaticResource Muted}" Margin="0,2,0,0"/>
+            </StackPanel>
+          </StackPanel>
+          <Button x:Name="CloseButton" Content="✕" Style="{StaticResource UpdateCloseButtonStyle}" HorizontalAlignment="Right" VerticalAlignment="Top" ToolTip="退出" AutomationProperties.Name="退出"/>
+        </Grid>
+
+        <!-- 标题 + 说明 -->
+        <StackPanel Grid.Row="1" Margin="0,24,0,0">
+          <TextBlock Text="SECURE GATE · 版本门禁" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource Teal}"/>
+          <TextBlock Text="需要更新 VivoKsu" Margin="0,6,0,0" Foreground="{StaticResource Ink}" FontSize="22" FontWeight="Bold"/>
+          <TextBlock x:Name="ReasonText" Text="当前版本已被服务端停用,必须更新后才能继续使用。" Margin="0,8,0,0" Foreground="{StaticResource Muted}" FontSize="12.5" TextWrapping="Wrap" LineHeight="20"/>
+        </StackPanel>
+
+        <!-- 版本信息卡 -->
+        <Border Grid.Row="2" Margin="0,20,0,0" Background="{StaticResource TealSoft}" CornerRadius="10" Padding="16,13">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+              <TextBlock Text="最新版本" FontSize="11" Foreground="{StaticResource Muted}"/>
+              <TextBlock x:Name="LatestText" FontFamily="Cascadia Mono" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource TealDark}" Margin="0,3,0,0"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1">
+              <TextBlock Text="你的版本" FontSize="11" Foreground="{StaticResource Muted}"/>
+              <TextBlock x:Name="CurrentText" FontFamily="Cascadia Mono" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource Ink}" Margin="0,3,0,0"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <!-- 操作 -->
+        <StackPanel Grid.Row="3" Margin="0,24,0,0">
+          <Button x:Name="DownloadButton" Content="打开下载链接" Style="{StaticResource UpdatePrimaryButtonStyle}" AutomationProperties.Name="打开下载链接"/>
+          <Button x:Name="QuitButton" Content="退 出" Style="{StaticResource UpdateGhostButtonStyle}" Margin="0,10,0,0" AutomationProperties.Name="退出"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+  </Border>
+</Window>

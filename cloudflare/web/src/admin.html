@@ -149,6 +149,7 @@
   td .pn{font-weight:600;letter-spacing:.6px;font-size:13px}
   td .ver{font-family:var(--mono);font-size:12.5px}
   td .time{font-family:var(--mono);font-size:11.5px;color:var(--faint);white-space:nowrap}
+  td .url-cell{max-width:260px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11px;color:var(--blue);vertical-align:middle}
   .ops{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 
   /* 双墨状态标记(形+色,非纯色) */
@@ -291,38 +292,40 @@
 
   <!-- 服务健康带(活结算) -->
   <div class="health" id="healthStrip">
-    <div class="cell"><div class="k">版本 · 启用</div><div class="v" id="kpiVer">—<small>/启用总数</small></div></div>
+    <div class="cell"><div class="k">VivoKsu 版本</div><div class="v" id="kpiVer">—<small>当前</small></div></div>
     <div class="cell"><div class="k">API 用户</div><div class="v" id="kpiUsr">—<small>户</small></div></div>
     <div class="cell"><div class="k">查询 · 近 24h</div><div class="v" id="kpiQry">—<small>次</small></div></div>
     <div class="cell"><div class="k">失败 · 近 24h</div><div class="v danger" id="kpiFail">—<small>次</small></div></div>
   </div>
 
   <main class="main">
-    <!-- 版本号控制 -->
+    <!-- VivoKsu 版本控制 -->
     <section class="page" id="sec-versions" role="tabpanel" aria-labelledby="tab-versions">
       <div class="page-head">
-        <div class="eyebrow">VERSION CONTROL</div>
-        <h2 class="page-title">版本号控制</h2>
-        <p class="page-desc">只有此处启用的 PD + 版本,<code>api.nwflash.cc.cd</code> 才会返回 OTA 链接。</p>
+        <div class="eyebrow">VIVO KSU VERSION</div>
+        <h2 class="page-title">VivoKsu 版本控制</h2>
+        <p class="page-desc">控制 VivoKsu 客户端版本与强制更新。客户端版本低于「最低版本」→ 服务端 426 拦截;<code>X-VivoKsu-Version</code> 每个请求校验。启用的版本中最高者为当前版本。</p>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">登记新条目 <span class="hint">· 列宽与下方登记册对齐</span></span></div>
+        <div class="panel-head"><span class="panel-title">登记版本 <span class="hint">· 新版本号 · 最低版本默认 0.0.0</span></span></div>
         <div class="form-row">
-          <div class="field w-pd"><label for="vPd">PD 码</label><input id="vPd" placeholder="PD2417" class="mono"></div>
-          <div class="field w-ver"><label for="vVer">版本号</label><input id="vVer" placeholder="16.2.12.0.W10.V000L1" class="mono"></div>
-          <button id="vAdd" class="btn btn-primary">登记入册</button>
+          <div class="field w-pd"><label for="aVer">版本号</label><input id="aVer" placeholder="1.2.0" class="mono"></div>
+          <div class="field w-user"><label for="aMin">最低版本</label><input id="aMin" placeholder="1.0.0" class="mono"></div>
+          <div class="field" style="flex:2;min-width:240px"><label for="aUrl">下载地址</label><input id="aUrl" placeholder="https://…/VivoKsu-1.2.0.zip"></div>
+          <div class="field w-note"><label for="aNote">备注</label><input id="aNote" placeholder="可选"></div>
+          <button id="aAdd" class="btn btn-primary">登记版本</button>
         </div>
       </div>
       <div class="panel">
-        <div class="panel-head"><span class="panel-title">固件登记册 <span class="hint">· whitelist manifest</span></span></div>
+        <div class="panel-head"><span class="panel-title">版本登记册 <span class="hint">· release register</span></span></div>
         <div class="tbl-scroll">
           <table>
-            <thead><tr><th class="mono-lbl">№</th><th>PD</th><th>版本</th><th>状态</th><th>登记时间</th><th style="width:170px;text-align:right">操作</th></tr></thead>
-            <tbody id="versionBody"></tbody>
+            <thead><tr><th class="mono-lbl">№</th><th>版本</th><th>最低版本</th><th>下载地址</th><th>状态</th><th>登记时间</th><th style="width:170px;text-align:right">操作</th></tr></thead>
+            <tbody id="appVerBody"></tbody>
           </table>
         </div>
-        <div class="empty" id="versionEmpty" style="display:none"><span class="big">◇</span>还没有登记条目。先在左上登记一个 PD + 版本。</div>
-        <div class="tally" id="versionTally"></div>
+        <div class="empty" id="appVerEmpty" style="display:none"><span class="big">◇</span>还没有登记版本。登记首个版本号后,客户端据此做强制更新校验。</div>
+        <div class="tally" id="appVerTally"></div>
       </div>
     </section>
 
@@ -494,7 +497,7 @@ function switchTab(tab) {
   document.querySelectorAll(".page").forEach(p => p.style.display = p.id === "sec-" + tab ? "block" : "none");
   if (tab === "logs") loadLogs();
   if (tab === "users") loadUsers();
-  if (tab === "versions") loadVersions();
+  if (tab === "versions") loadAppVersions();
 }
 document.querySelectorAll(".tab").forEach(n => n.onclick = () => switchTab(n.dataset.tab));
 $("tabList").addEventListener("keydown", (e) => {
@@ -510,12 +513,13 @@ $("tabList").addEventListener("keydown", (e) => {
 /* ---------- 服务健康带 ---------- */
 async function loadHealth() {
   try {
-    const [v, u] = await Promise.all([api("/api/versions"), api("/api/users")]);
+    const [v, u] = await Promise.all([api("/api/app-versions"), api("/api/users")]);
     const versions = v.versions || [];
     const users = u.users || [];
-    $("kpiVer").innerHTML = `${versions.filter(x => x.enabled).length}<small> / 共 ${versions.length}</small>`;
+    const currentVer = versions.filter(x => x.enabled).sort((a, b) => cmpVersion(b.version, a.version))[0];
+    $("kpiVer").innerHTML = currentVer ? `${esc(currentVer.version)}<small> 当前</small>` : `<span style="color:var(--faint)">—</span><small>未设置</small>`;
     $("kpiUsr").innerHTML = `${users.length}<small> 户</small>`;
-    $("tabCntVer").textContent = versions.length + " 条";
+    $("tabCntVer").textContent = versions.length + " 版";
     $("tabCntUsr").textContent = users.length + " 户";
     const logs = (await api("/api/logs?limit=500")).logs || [];
     const cutoff = Date.now() - 24 * 3600 * 1000;
@@ -526,54 +530,71 @@ async function loadHealth() {
   } catch (e) { /* 静默:健康带不是关键路径 */ }
 }
 
-/* ---------- 版本 ---------- */
-async function loadVersions() {
+/* ---------- VivoKsu 版本 ---------- */
+function cmpVersion(a, b) {
+  const pa = String(a || "").split(".").map(s => parseInt(s, 10) || 0);
+  const pb = String(b || "").split(".").map(s => parseInt(s, 10) || 0);
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d; }
+  return 0;
+}
+async function loadAppVersions() {
   try {
-    const data = await api("/api/versions");
+    const data = await api("/api/app-versions");
     const rows = data.versions || [];
-    $("versionEmpty").style.display = rows.length ? "none" : "block";
-    $("versionBody").innerHTML = rows.map(v => `
+    $("appVerEmpty").style.display = rows.length ? "none" : "block";
+    $("appVerBody").innerHTML = rows.map(v => `
       <tr>
         <td class="num">№${v.id}</td>
-        <td><span class="pn">${esc(v.pd)}</span></td>
-        <td><span class="ver">${esc(v.version)}</span></td>
+        <td><span class="pn">${esc(v.version)}</span></td>
+        <td><span class="ver">${esc(v.min_version)}</span></td>
+        <td>${v.download_url
+          ? `<a href="${esc(v.download_url)}" target="_blank" rel="noopener" class="url-cell" title="${esc(v.download_url)}">${esc(v.download_url)}</a>`
+          : `<span class="url-cell" style="color:var(--faint)">—</span>`}</td>
         <td><span class="mark ${v.enabled ? "on" : "off"}"><span class="glyph">${v.enabled ? "●" : "○"}</span>${v.enabled ? "启用" : "停用"}</span></td>
         <td><span class="time">${esc(stamp(v.created_at))}</span></td>
         <td><div class="ops">
-          <button class="btn btn-sm btn-ghost" onclick="toggleVersion(${v.id}, ${!v.enabled})">${v.enabled ? "停用" : "启用"}</button>
-          <button class="btn btn-sm btn-danger" onclick="delVersion(${v.id})">删除</button>
+          <button class="btn btn-sm btn-ghost" onclick="toggleAppVersion(${v.id}, ${!v.enabled})">${v.enabled ? "停用" : "启用"}</button>
+          <button class="btn btn-sm btn-danger" onclick="delAppVersion(${v.id})">删除</button>
         </div></td>
       </tr>`).join("");
-    renderVersionTally(rows);
+    renderAppVersionTally(rows);
     loadHealth();
   } catch (e) { toast(e.message, "fail"); }
 }
-function renderVersionTally(rows) {
+function renderAppVersionTally(rows) {
   const total = rows.length;
-  const pdCount = new Set(rows.map(r => r.pd)).size;
-  const on = rows.filter(r => r.enabled).length;
+  const enabled = rows.filter(r => r.enabled);
+  const current = enabled.slice().sort((a, b) => cmpVersion(b.version, a.version))[0];
   const last = rows.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
-  $("versionTally").innerHTML =
-    `<span>总计 <b>${total}</b> 条</span><span>· <b>${pdCount}</b> 个 PD 家族</span><span>· 启用 <b>${on}</b> 条</span>` +
-    (last ? `<span class="right">最近登记 <span class="recent">№${last.id}</span> · ${esc(last.pd)}</span>` : "");
+  let html = `<span>登记 <b>${total}</b> 版</span>`;
+  if (current) {
+    html += `<span>· 当前 <b>${esc(current.version)}</b></span>`;
+    html += `<span class="right">最低 <span class="recent">${esc(current.min_version)}</span> · 低于即强制更新</span>`;
+  } else {
+    html += `<span class="right">无启用版本 → 客户端不拦截</span>`;
+  }
+  if (last && total > 0) html += `<span style="margin-left:14px">最近登记 <span class="recent">№${last.id}</span> · ${esc(last.version)}</span>`;
+  $("appVerTally").innerHTML = html;
 }
-$("vAdd").onclick = async () => {
-  const pd = $("vPd").value.trim(), ver = $("vVer").value.trim();
-  if (!pd || !ver) { toast("请填写 PD 码与版本号", "fail"); return; }
+$("aAdd").onclick = async () => {
+  const ver = $("aVer").value.trim();
+  if (!ver) { toast("请填写版本号", "fail"); return; }
+  const min = $("aMin").value.trim() || "0.0.0";
   try {
-    await api("/api/versions", "POST", { pd, version: ver });
-    $("vPd").value = ""; $("vVer").value = "";
-    toast("已登记 " + pd + " / " + ver, "ok");
-    loadVersions();
+    await api("/api/app-versions", "POST", { version: ver, min_version: min, download_url: $("aUrl").value.trim(), note: $("aNote").value.trim() });
+    $("aVer").value = ""; $("aMin").value = ""; $("aUrl").value = ""; $("aNote").value = "";
+    toast("已登记版本 " + ver, "ok");
+    loadAppVersions();
   } catch (e) { toast(e.message, "fail"); }
 };
-async function toggleVersion(id, enabled) {
-  try { await api("/api/versions/" + id, "PUT", { enabled }); loadVersions(); toast(enabled ? "已启用" : "已停用", "ok"); }
+async function toggleAppVersion(id, enabled) {
+  try { await api("/api/app-versions/" + id, "PUT", { enabled }); loadAppVersions(); toast(enabled ? "已启用" : "已停用", "ok"); }
   catch (e) { toast(e.message, "fail"); }
 }
-async function delVersion(id) {
-  if (!confirm("删除该版本后,此 PD+版本将不再返回 OTA 链接。确认?")) return;
-  try { await api("/api/versions/" + id, "DELETE"); loadVersions(); toast("已删除版本条目", "ok"); }
+async function delAppVersion(id) {
+  if (!confirm("删除该版本后,客户端版本策略据此变化。确认?")) return;
+  try { await api("/api/app-versions/" + id, "DELETE"); loadAppVersions(); toast("已删除版本", "ok"); }
   catch (e) { toast(e.message, "fail"); }
 }
 

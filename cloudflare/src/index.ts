@@ -1,14 +1,17 @@
 /**
- * Cloudflare Worker —— Vivo ROM OTA 链接代理。
+ * Cloudflare Worker —— Vivo ROM OTA 链接代理 + VivoKsu 版本门禁。
  * 桌面应用带 PD + 版本号查询,Worker 持 VOTA 凭据,
  * 转发到 VOTA API(https://api.otau.cc.cd)取 OTA 下载链接,不向客户端暴露 token。
  *
  * 端点:
- *   GET /health                 -> { status, source }
- *   GET /api/rom?pd=X&version=Y -> { pd, version, url, name, sizeBytes, sha256 }
+ *   GET /health                          -> { status, source }
+ *   GET /api/app/version?current=X       -> VivoKsu 版本策略(免登录,启动拦截用)
+ *   GET /api/rom?pd=X&version=Y          -> { pd, version, url, name, sizeBytes, sha256 }
  *
- * 错误映射与 .NET 版一致:NOT_FOUND/not found->404, AUTH_FAIL->401, INSUFFICIENT_CREDITS->402,
- * FORBIDDEN->403, RATE_LIMITED->429, 其它->502。
+ * 版本门禁:所有请求必须带 X-VivoKsu-Version 头;低于后台「版本号控制」的最低版本 → 426。
+ *
+ * 错误映射:NOT_FOUND/not found->404, AUTH_FAIL->401, INSUFFICIENT_CREDITS->402,
+ * FORBIDDEN->403, RATE_LIMITED->429, UPDATE_REQUIRED->426, 其它->502。
  */
 
 export interface Env {
@@ -20,14 +23,14 @@ export interface Env {
   VOTA_ACTION?: string;
   /** 平台版本白名单,默认 0.1.0。 */
   VOTA_VER?: string;
-  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):版本控制 + 访问日志。 */
+  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):访问日志 + VivoKsu 版本控制。 */
   DB: D1Database;
 }
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-VivoKsu-Version",
 };
 
 export default {
@@ -42,19 +45,30 @@ export default {
         return json({ status: "ok", source: "VotaApiRomSource" }, 200);
       }
 
+      // VivoKsu 版本策略(免登录,桌面端启动拦截用)。
+      if (url.pathname === "/api/app/version" && request.method === "GET") {
+        return appVersion(env, request, url);
+      }
+
       // 桌面端登录:账号+密码 → 返回 API token(商业工具门禁)。
       if (url.pathname === "/api/login" && request.method === "POST") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
         return login(env, request);
       }
 
       // 校验本地 token(记住登录):有效返回用户信息。
       if (url.pathname === "/api/me") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
         const user = await authenticateUser(env, request);
         if (user instanceof Response) return json({ loggedIn: false }, 200);
         return json({ loggedIn: true, name: user.name }, 200);
       }
 
       if (url.pathname === "/api/rom") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
         const pd = url.searchParams.get("pd");
         const version = url.searchParams.get("version");
         if (!pd || !version) {
@@ -82,17 +96,7 @@ async function resolveRom(env: Env, pd: string, version: string, request: Reques
   const userId = auth.id;
   const userName = auth.name;
 
-  // 2. 版本号控制:只允许后台「版本号控制」里启用的 PD+版本。
-  const allowed = await env.DB
-    .prepare("SELECT id FROM versions WHERE pd = ? AND version = ? AND enabled = 1")
-    .bind(pd, version)
-    .first();
-  if (!allowed) {
-    await logAccess(env, userId, userName, pd, version, null, 404);
-    return json({ error: "该版本未授权或不存在。" }, 404);
-  }
-
-  // 3. 代理 VOTA。
+  // 2. 代理 VOTA。
   const baseUrl = env.VOTA_BASE_URL ?? "https://api.otau.cc.cd";
   const action = env.VOTA_ACTION ?? "resolve_url";
   const upstream = `${baseUrl}?action=${encodeURIComponent(action)}`;
@@ -171,6 +175,79 @@ async function logAccess(
   } catch {
     // 日志写失败不阻塞解析。
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* VivoKsu 版本控制(强制更新)                                           */
+/* ------------------------------------------------------------------ */
+
+/** 版本号 "1.0.0" 式逐段比较:返回 <0 / 0 / >0。非法段按 0。 */
+function compareVersions(a: string, b: string): number {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+function parseVersion(v: string): number[] {
+  return v.split(".").map((s) => {
+    const n = Number.parseInt(s, 10);
+    return Number.isFinite(n) ? n : 0;
+  });
+}
+
+/** 请求携带的客户端版本(X-VivoKsu-Version 头)。 */
+function clientVersion(request: Request): string {
+  return request.headers.get("X-VivoKsu-Version")?.trim() || "";
+}
+
+/** 生效策略:启用的 app_versions 行中版本最高者;无启用行 → null。 */
+async function getAppVersionPolicy(env: Env): Promise<{ version: string; min_version: string; download_url: string } | null> {
+  const rows = await env.DB.prepare(
+    "SELECT version, min_version, download_url FROM app_versions WHERE enabled = 1",
+  ).all<{ version: string; min_version: string; download_url: string }>();
+  let best: { version: string; min_version: string; download_url: string } | null = null;
+  for (const row of rows.results) {
+    if (!best || compareVersions(row.version, best.version) > 0) best = row;
+  }
+  return best;
+}
+
+/** GET /api/app/version?current=X —— 免登录,返回版本策略(桌面端启动拦截用)。 */
+async function appVersion(env: Env, request: Request, url: URL): Promise<Response> {
+  const policy = await getAppVersionPolicy(env);
+  if (!policy) {
+    return json({ latest: null, min: null, download_url: null, update_required: false, force_update: false }, 200);
+  }
+  const current = url.searchParams.get("current")?.trim() || clientVersion(request) || "0.0.0";
+  return json({
+    latest: policy.version,
+    min: policy.min_version,
+    download_url: policy.download_url,
+    update_required: compareVersions(current, policy.version) < 0,
+    force_update: compareVersions(current, policy.min_version) < 0,
+  }, 200);
+}
+
+/** 版本门禁:当前版本低于最低版本 → 426;否则 null。所有请求统一调用。 */
+async function checkAppVersion(env: Env, request: Request): Promise<Response | null> {
+  const policy = await getAppVersionPolicy(env);
+  if (!policy) return null;
+  const current = clientVersion(request);
+  if (current && compareVersions(current, policy.min_version) < 0) {
+    return json({
+      error: "请更新 VivoKsu 到最新版本后继续使用。",
+      code: "UPDATE_REQUIRED",
+      latest: policy.version,
+      min: policy.min_version,
+      download_url: policy.download_url,
+    }, 426);
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */

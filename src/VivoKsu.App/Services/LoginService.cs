@@ -18,6 +18,7 @@ public sealed class LoginService : IDisposable
     {
         this.baseUrl = baseUrl;
         http = new HttpClient();
+        http.DefaultRequestHeaders.TryAddWithoutValidation("X-VivoKsu-Version", AppInfo.Version);
     }
 
     /// <summary>账号密码登录。成功返回 token + 用户信息。</summary>
@@ -31,6 +32,12 @@ public sealed class LoginService : IDisposable
         using var response = await http.PostAsJsonAsync(
             $"{baseUrl}/api/login", new { username, password }, cancellationToken).ConfigureAwait(false);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        // 版本过低 → 服务端 426,直接抛强制更新异常(由 App 全局捕获弹更新窗)。
+        if (response.StatusCode == System.Net.HttpStatusCode.UpgradeRequired)
+        {
+            throw UpdateRequiredException.FromResponse(payload);
+        }
 
         if (!response.IsSuccessStatusCode)
         {
@@ -56,12 +63,18 @@ public sealed class LoginService : IDisposable
         try
         {
             using var response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            var payload = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (payload.TryGetProperty("loggedIn", out var ok) && ok.GetBoolean())
+            if (response.StatusCode == System.Net.HttpStatusCode.UpgradeRequired)
             {
-                return payload.TryGetProperty("name", out var n) ? n.GetString() : null;
+                var payload = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw UpdateRequiredException.FromResponse(payload);
+            }
+            var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (json.TryGetProperty("loggedIn", out var ok) && ok.GetBoolean())
+            {
+                return json.TryGetProperty("name", out var n) ? n.GetString() : null;
             }
         }
+        catch (UpdateRequiredException) { throw; }
         catch
         {
             // 网络异常按未登录处理。

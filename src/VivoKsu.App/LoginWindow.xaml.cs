@@ -81,6 +81,11 @@ public partial class LoginWindow : Window
         {
             ErrorText.Text = exception.Message;
         }
+        catch (UpdateRequiredException)
+        {
+            // 版本过低 → 426:冒泡给 App 全局处理器弹强制更新窗。
+            throw;
+        }
         catch (Exception)
         {
             ErrorText.Text = "无法连接服务器，请检查网络后重试。";

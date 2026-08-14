@@ -32,14 +32,16 @@ CREATE TABLE IF NOT EXISTS api_users (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- 版本号控制(允许解析的 PD + 版本)
-CREATE TABLE IF NOT EXISTS versions (
+-- VivoKsu 客户端版本控制(强制更新)
+CREATE TABLE IF NOT EXISTS app_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  pd TEXT NOT NULL,
-  version TEXT NOT NULL,
+  version TEXT NOT NULL,                      -- 客户端版本号,如 "1.2.0"
+  min_version TEXT NOT NULL DEFAULT '0.0.0',  -- 最低允许版本,低于此强制更新
+  download_url TEXT NOT NULL DEFAULT '',      -- 更新下载链接
+  note TEXT NOT NULL DEFAULT '',
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(pd, version)
+  UNIQUE(version)
 );
 
 -- 访问日志(每次 API 查询)
