@@ -77,6 +77,8 @@
           <Button Content="可视刷写" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.LineFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.LineFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
           <Button Content="固件提取" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.FirmwareExtract}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FirmwareExtract}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
           <Button Content="VIVO 线刷" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.SafeFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+          <Border Height="1" Background="{StaticResource EdgeBrush}" Margin="13,16,13,14"/>
+          <Button Content="在线状态" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.OnlineStatus}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.OnlineStatus}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
         </StackPanel>
       </Grid>
     </Border>
@@ -1092,6 +1094,124 @@
               <Button Content="停止操作" Style="{StaticResource SignalButtonStyle}" Command="{Binding SafeFlash.StopCommand}" AutomationProperties.Name="停止操作" Margin="0"/>
             </StackPanel>
           </Grid>
+        </Border>
+      </Grid>
+    </Grid>
+
+    <!-- 在线状态(心跳 / 在线用户 / 时长) -->
+    <Grid>
+      <Grid.Style>
+        <Style TargetType="Grid">
+          <Setter Property="Visibility" Value="Collapsed"/>
+          <Style.Triggers>
+            <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.OnlineStatus}">
+              <Setter Property="Visibility" Value="Visible"/>
+            </DataTrigger>
+          </Style.Triggers>
+        </Style>
+      </Grid.Style>
+      <Grid Margin="12,30,12,32">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Grid Margin="0,0,0,18">
+          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel>
+            <TextBlock Text="ONLINE / SESSION" Style="{StaticResource PageEyebrowStyle}"/>
+            <TextBlock Text="在线状态" Style="{StaticResource PageTitleStyle}"/>
+            <TextBlock Text="实时查看当前在线的 VivoKsu 用户与在线时长（每 5 秒同步）" Style="{StaticResource PageSubtitleStyle}"/>
+          </StackPanel>
+          <Border Grid.Column="1" Style="{StaticResource StatusChipStyle}" VerticalAlignment="Bottom">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="{Binding Online.HeartbeatHealthText}" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource ConnectionBrush}"/>
+            </StackPanel>
+          </Border>
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource PanelBorderStyle}" Padding="0">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <Border Background="#F6FAFA" BorderBrush="#D8E8E5" BorderThickness="0,0,0,1" CornerRadius="8,8,0,0" Padding="18,14">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                  <TextBlock Text="在线会话" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  <TextBlock Text="{Binding Online.OnlineCount, StringFormat={}{0} 人在线}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Online.LastUpdatedText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                  <Button Content="刷新" Style="{StaticResource ToolButtonStyle}" Command="{Binding Online.RefreshCommand}" Padding="10,5" Margin="0" FontSize="11"/>
+                </StackPanel>
+              </Grid>
+            </Border>
+            <Grid Grid.Row="1">
+              <ListBox ItemsSource="{Binding Online.Sessions}" Background="Transparent" BorderThickness="0" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch" Padding="14,4,14,14">
+                <ListBox.ItemContainerStyle>
+                  <Style TargetType="ListBoxItem">
+                    <Setter Property="Padding" Value="0"/>
+                    <Setter Property="Margin" Value="0,2"/>
+                    <Setter Property="Background" Value="Transparent"/>
+                    <Setter Property="BorderThickness" Value="0"/>
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                  </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                  <DataTemplate>
+                    <Grid Margin="2,8">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                      </Grid.ColumnDefinitions>
+                      <Ellipse Width="9" Height="9" Fill="{StaticResource ConnectionBrush}" VerticalAlignment="Center" Margin="6,0,14,0"/>
+                      <StackPanel Grid.Column="1">
+                        <StackPanel Orientation="Horizontal">
+                          <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                          <Border Background="#EAF7F5" CornerRadius="3" Padding="6,1" Margin="8,0,0,0" VerticalAlignment="Center" Visibility="{Binding IsSelf, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <TextBlock Text="自己" FontSize="9" Foreground="{StaticResource ConnectionBrush}"/>
+                          </Border>
+                        </StackPanel>
+                        <TextBlock Text="{Binding ClientVersion, StringFormat=版本 {0}}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+                      </StackPanel>
+                      <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="14,0,6,0">
+                        <TextBlock Text="在线时长" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right"/>
+                        <TextBlock Text="{Binding DurationText}" FontFamily="Cascadia Mono" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource ConnectionBrush}" Margin="0,3,0,0"/>
+                      </StackPanel>
+                    </Grid>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <Border Background="{StaticResource RailBrush}" IsHitTestVisible="False">
+                <Border.Style>
+                  <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding Online.Sessions.Count}" Value="0">
+                        <Setter Property="Visibility" Value="Visible"/>
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Border.Style>
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="28">
+                  <Border Width="38" Height="4" Background="#BDD8D5" CornerRadius="2" HorizontalAlignment="Center"/>
+                  <TextBlock Text="NO ACTIVE SESSION" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Center" Margin="0,15,0,0"/>
+                  <TextBlock Text="暂无在线用户" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,7,0,0"/>
+                  <TextBlock Text="其他客户端登录后将显示在这里" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" Margin="0,6,0,0"/>
+                </StackPanel>
+              </Border>
+            </Grid>
+          </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Background="#F2F8F7" BorderBrush="{StaticResource EdgeBrush}" BorderThickness="0,1,0,0" Padding="18,0">
+          <TextBlock Text="{Binding Online.StatusText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
         </Border>
       </Grid>
     </Grid>

@@ -5,8 +5,8 @@
 
 VivoKsu 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 
-- **API**:Worker `nwflash-rom`,部署在 **`api.nwflash.cc.cd`** —— 登录、版本控制、ROM 解析、访问日志。
-- **后台**:Worker `nwflash-web`,部署在 **`web.nwflash.cc.cd`** —— 管理员 / 版本 / 用户 / 日志管理。
+- **API**:Worker `nwflash-rom`,部署在 **`api.nwflash.cc.cd`** —— 登录、版本控制、ROM 解析、访问日志、**在线会话(心跳 / 强制下线 / 在线列表)**。
+- **后台**:Worker `nwflash-web`,部署在 **`web.nwflash.cc.cd`** —— 管理员 / 版本 / 用户 / 日志 / **在线状态(强制下线)** 管理。
 - **数据库**:D1 `nwflash-db`,两个 Worker 共用。
 
 桌面应用 `OtaApiClient.DefaultBaseUrl` 默认就是 `https://api.nwflash.cc.cd`,无需配置、无需本地起 .NET 服务端。
@@ -20,6 +20,8 @@ VivoKsu 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 | `GET /health` | 健康检查 |
 | `POST /api/login` | 账号密码 → API token(桌面端登录门禁) |
 | `GET /api/me` | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
+| `POST /api/heartbeat` | 在线会话心跳(登录后每 5s;检测强制下线 / 封禁 / 426) |
+| `GET /api/online` | 在线用户列表(鉴权;显示名/版本/时长,不含 username/IP) |
 | `GET /api/rom?pd=X&version=Y` | 解析 OTA 直链(**强制登录** + 版本控制 + 记日志) |
 
 错误映射:NOT_FOUND/`not found`→404, AUTH_FAIL→401, INSUFFICIENT_CREDITS→402, FORBIDDEN→403, RATE_LIMITED→429, 其它→502。

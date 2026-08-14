@@ -9,6 +9,7 @@
 - **鉴权**: 可选 `Authorization: Bearer <API token>`(token 由后台「用户管理」生成;不带则记为匿名)
 - **版本门禁**: 所有请求带 `X-VivoKsu-Version` 头;版本低于后台「版本号控制」的最低版本 → **426 强制更新**(见 [版本门禁](#版本门禁强制更新))
 - **日志**: 每次查询记入 D1(按用户),可在 `web.nwflash.cc.cd` 查看
+- **在线会话**: 登录后客户端每 5s 心跳(`POST /api/heartbeat`)保持在线、接收强制下线;`GET /api/online` 查在线用户(显示名/时长)。管理端「在线状态」可强制下线。心跳数据存 D1 `online_sessions`,会话超过 120s 未心跳即视为离线(Worker Cron 兜底清理)
 
 ## 端点
 
@@ -112,6 +113,68 @@ VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 ---
 
+### `POST /api/heartbeat`
+
+**在线会话心跳**(登录后客户端每 5s 一次):保持「在线」并可接收服务端指令(强制下线 / 封禁 / 强制更新)。必须带 `Authorization: Bearer <token>`;也走版本门禁(低于最低版本 → 426,客户端弹更新窗)。
+
+**请求体**
+```json
+{ "sessionId": "<客户端启动时生成的 GUID>", "clientVersion": "1.0.0", "active": true }
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `sessionId` | ✅ | 客户端每次启动生成,标识本次会话(在线列表/踢人/时长以此为单位) |
+| `clientVersion` | 否 | 客户端版本号 |
+| `active` | 否 | `false` = goodbye:服务端删除该会话行(正常退出/强制退出前发送) |
+
+**成功 200**
+```json
+{ "ok": true, "force_exit": false }
+```
+```json
+{ "ok": true, "force_exit": true, "reason": "违规下线" }
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `force_exit` | bool | `true` = **服务端要求本进程立即退出**。客户端应停止心跳、弹窗提示 reason 后退出进程 |
+| `reason` | string \| null | 强制下线原因(管理端填写,≤200 字符) |
+
+**强制退出触发点**:管理端「在线状态」强制下线(下一个心跳 ≤5s 收到);账号被封禁;token 被停用/轮换(心跳返回 401/403)。kick 是**瞬态**(仅当前会话),持续封禁靠 `banned` 在登录与业务层阻断。
+
+**服务端节流/配额防护**:同一会话 `last_seen_at` 至少隔 60s 写一次 D1(写节流,`connected_at` 永不被触碰 → 在线时长单调准确);per-token 最小心跳间隔 3s(防换 sessionId 刷写配额);每用户在线会话数上限 3(超出删最旧)。
+
+---
+
+### `GET /api/online`
+
+**在线用户列表(客户端视角)**:在线总数 + 各会话的显示名 / 版本 / 上线时间 / 时长。必须带 `Authorization: Bearer <token>`;**不返回登录 username / IP / user_id**(最小暴露:在线时段不给任意持 token 用户)。
+
+**成功 200**
+```json
+{
+  "count": 2,
+  "sessions": [
+    { "name": "演示用户", "client_version": "1.0.0", "connected_at": 1786700000, "last_seen_at": 1786703600, "duration_seconds": 3600, "is_self": true },
+    { "name": "另一用户", "client_version": "1.0.0", "connected_at": 1786701000, "last_seen_at": 1786701000, "duration_seconds": 2600, "is_self": false }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `count` | number | 在线会话数(last_seen 在 120s 窗口内) |
+| `name` | string | 显示名(非登录账号) |
+| `client_version` | string | 客户端版本 |
+| `connected_at` / `last_seen_at` | number | **epoch 秒** |
+| `duration_seconds` | number | 已在线时长(秒,自 `connected_at` 起算) |
+| `is_self` | bool | 该会话是否为当前 token 的会话 |
+
+完整列表(含 username/IP/session_id + 强制下线操作)在 `web.nwflash.cc.cd` 后台「在线状态」。在线判定窗口与 stale 清理见 `ONLINE_TIMEOUT_MS`(默认 120s,由 Worker Cron `*/3 * * * *` 兜底清理)。
+
+---
+
 ### `GET /api/rom?pd=<PD>&version=<版本>`
 
 按 **PD 码 + 版本号** 解析 OTA 下载链接。**必须携带登录 token**。所有请求也须带 `X-VivoKsu-Version`(见 [版本门禁](#版本门禁强制更新))。
@@ -193,6 +256,11 @@ curl "https://api.nwflash.cc.cd/api/rom?pd=PD2417&version=99.99"
 | `VOTA_BASE_URL` | `https://api.otau.cc.cd` | 上游地址 |
 | `VOTA_ACTION` | `resolve_url` | `resolve_url`(OTA,-1)/ `resolve_flash_url`(线刷,-3) |
 | `VOTA_VER` | `0.1.0` | 平台客户端版本白名单 |
+| `HEARTBEAT_WRITE_INTERVAL_MS` | `60000` | 同一会话 `last_seen_at` 至少隔这么久写一次 D1(写节流,配额防护) |
+| `ONLINE_TIMEOUT_MS` | `120000` | 在线判定窗口;超过未心跳的会话视为离线并被清理(API 与 web 后台一致) |
+| `ONLINE_SESSION_CAP` | `3` | 每用户同时在线会话数上限(超出删最旧) |
+
+**Cron**:`wrangler.toml [triggers]` 每 3 分钟跑一次 `scheduled()`,兜底清理 stale 会话行(客户端全崩溃时也可靠过期)。
 
 机密(不进代码,`wrangler secret put` 设置):
 
@@ -220,18 +288,19 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | 2026-08-13 | **强制登录 + 封禁**:`/api/rom` 必须携带 token(无→401 请先登录);api_users 加 `banned`,封禁用户禁止登录与查询(登录 401 / 查询 403);后台支持封禁/解封 |
 | 2026-08-13 | 明确商业模型:账号授权制 —— 用户登录即可查询、不按次计费;上游 VOTA 信用点由运营方承担 |
 | 2026-08-14 | **VivoKsu 版本门禁(强制更新)**:新增 `GET /api/app/version`(免登录策略查询);所有请求带 `X-VivoKsu-Version` 头,低于后台最低版本 → **426 UPDATE_REQUIRED**;**移除 ROM 白名单** —— `/api/rom` 不再做 PD+版本门禁,登录即可解析任意版本 |
+| 2026-08-14 | **在线会话心跳 + 强制下线**:D1 新增 `online_sessions` / `admin_audit_log`;`POST /api/heartbeat`(每 5s,检测强制下线/封禁/426)、`GET /api/online`(客户端视角在线列表,仅显示名/版本/时长,不含 username/IP);管理端「在线状态」可强制下线。服务端:per-token 心跳限速 + 每用户会话数上限 + 60s 写节流 + epoch 秒时间戳 + `last_seen` 索引 + Cron 兜底清理 |
 
 ## 管理后台
 
 - 地址:`https://web.nwflash.cc.cd`(详见 `web/README.md`)。
-- 功能:管理员登录、**VivoKsu 版本控制(强制更新)**、API 用户管理(token 生成/轮换/停用)、访问日志查看。
+- 功能:管理员登录、**VivoKsu 版本控制(强制更新)**、API 用户管理(token 生成/轮换/停用)、访问日志查看、**在线状态(实时会话 + 强制下线)**。
 
 ## 代码结构
 
 ```
 cloudflare/
-├─ src/index.ts        # Worker 入口:路由 + resolveRom + 错误映射
-├─ wrangler.toml       # 变量与自定义域路由
+├─ src/index.ts        # Worker 入口:路由 + resolveRom + 心跳/在线 + 错误映射
+├─ wrangler.toml       # 变量与自定义域路由 + Cron 触发器
 ├─ README.md           # 部署/使用说明
 └─ API.md              # 本文档(接口契约)
 ```

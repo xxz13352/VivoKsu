@@ -58,3 +58,31 @@ CREATE TABLE IF NOT EXISTS access_logs (
 
 CREATE INDEX IF NOT EXISTS idx_logs_created ON access_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_user ON access_logs(api_user_id);
+
+-- 在线会话(心跳 + 强制下线)。时间戳一律 INTEGER epoch 秒(与 JS 对齐,避免 T/Z 时区坑)。
+CREATE TABLE IF NOT EXISTS online_sessions (
+  session_id TEXT PRIMARY KEY,            -- 客户端每次启动生成的 GUID
+  user_id INTEGER NOT NULL,               -- api_users.id(归属,upsert/goodbye 都绑定它)
+  user_name TEXT NOT NULL,                -- 显示名(冗余,免 JOIN)
+  client_version TEXT NOT NULL DEFAULT '',
+  ip TEXT NOT NULL DEFAULT '',            -- CF-Connecting-IP,仅展示用,不作鉴权依据;过期即随行删除
+  connected_at INTEGER NOT NULL,          -- 首跳时间(epoch 秒);此后永不被 upsert 触碰(时长基准)
+  last_seen_at INTEGER NOT NULL,          -- 最近心跳(epoch 秒)
+  force_exit_at INTEGER,                  -- 非空 = 服务端已要求该会话强制下线
+  force_exit_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_online_last_seen ON online_sessions(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_online_user ON online_sessions(user_id);
+
+-- 管理员操作审计(kick 等;查看入口后续再加)
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  admin_id INTEGER,
+  admin_username TEXT,
+  action TEXT NOT NULL,                   -- 'kick' 等
+  target_user_id INTEGER,
+  target_session_id TEXT,
+  reason TEXT,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_log(created_at DESC);

@@ -1,3 +1,4 @@
+using FluentAssertions;
 using VivoKsu.App.Models;
 using VivoKsu.App.Services;
 using VivoKsu.App.ViewModels;
@@ -15,6 +16,26 @@ public class AppCompositionTests
         Assert.Same(composition.LogService.Entries, composition.MainViewModel.Logs.Entries);
         Assert.Same(composition.Coordinator, composition.MainViewModel.Coordinator);
         Assert.Same(composition.Coordinator, composition.MainViewModel.Root.Coordinator);
+    }
+
+    [Fact]
+    public void Composition_exposes_heartbeat_and_online_and_wires_online_into_main()
+    {
+        var composition = AppComposition.CreateForTesting(new EmptyNativeApi(), new FakeProcessRunner());
+
+        Assert.NotNull(composition.Heartbeat);
+        Assert.NotNull(composition.Online);
+        Assert.Same(composition.Online, composition.MainViewModel.Online);
+    }
+
+    [Fact]
+    public async Task StopAsync_stops_heartbeat_and_online_without_throwing_when_session_was_never_started()
+    {
+        var composition = AppComposition.CreateForTesting(new EmptyNativeApi(), new FakeProcessRunner());
+
+        await composition.StopAsync();
+
+        composition.Heartbeat.IsRunning.Should().BeFalse();
     }
 
     private sealed class EmptyNativeApi : IFastbootRsNativeApi

@@ -10,17 +10,19 @@ VivoKsu ROM 服务的管理控制台(Cloudflare Worker `nwflash-web`),与 `api.n
 | **VivoKsu 版本控制** | 登记 VivoKsu 客户端版本号(版本 / 最低版本 / 下载地址),启用的最高版本为当前策略;**客户端版本低于「最低版本」→ 服务端 426 强制更新拦截**(所有请求带 `X-VivoKsu-Version` 校验) |
 | **用户管理** | 创建 API 用户 → 生成 API token(仅显示一次);支持换 token / 停用 / **封禁** / 删除。封禁后该用户无法登录与查询 |
 | **用户日志记录** | 每次 `api.nwflash.cc.cd/api/rom` 查询都记入 D1(用户/PD/版本/状态/链接/时间),可按用户、PD 过滤,分页 |
+| **在线状态** | 实时查看客户端在线会话(用户/版本/IP/上线/最后心跳/时长);**强制下线** = 给会话打 `force_exit`,客户端下一个心跳(≤5s)收到后退出进程;kick 动作写 `admin_audit_log` 审计 |
 
 ## 界面「固件登记簿」(2026-08 重写)
 
 后台为最高规格 taste 重写的系统控制台(设计方向经 4 方向 + 3 对抗评审胜出):
 
-- **恰好三个菜单** —— 版本号控制 / 用户管理 / 访问日志;**改密为头部维护按钮,不是第四菜单**。
+- **恰好四个菜单** —— 版本号控制 / 用户管理 / 访问日志 / **在线状态(LIVE)**;**改密为头部维护按钮,不是第五菜单**。
 - **视觉语言**:机加工纸面画布 + 发丝刻线 + 单一账簿蓝;数据一律等宽 mono;无阴影堆叠、无渐变。系统字体栈(Segoe UI Variable + Cascadia Mono)—— Google Fonts 在中国大陆不可达,且被 CSP 拦。
-- **服务健康带**:VivoKsu 当前版本 / API 用户 / 近 24h 查询 / 近 24h 失败(客户端 best-effort 统计,基于最近 500 条日志)。
+- **服务健康带**:VivoKsu 当前版本 / API 用户 / **在线人数** / 近 24h 查询 / 近 24h 失败(客户端 best-effort 统计,基于最近 500 条日志)。
 - **VivoKsu 版本控制**:登记版本号(版本 / 最低版本 / 下载地址)→ № 页边码登记册 + 双墨状态(● 启用 / ○ 停用)+ 当前策略结算(客户端版本低于「最低版本」→ 强制更新)。
 - **用户管理**:建号 → **撕口一次性 token 凭证**(可复制);重置密码 / 换 token / 封禁 / 停用 / 删除。
 - **访问日志**:带列标尺的查询读出口,OKAY / FAIL 双墨。
+- **在线状态**:实时会话登记册(显示名 + 登录账号 / 版本 / IP / 上线 / 最后心跳 / 在线时长),每 10s 刷新;**强制下线**按钮给会话打 force_exit(原因可选,≤200 字符,显示在客户端)。
 - **操作反馈以 OKAY/FAIL/INFO 协议行回显** —— 每次操作都写成协议行,操作历史即审计轨迹。
 
 ## 安全(最高规格)
@@ -29,15 +31,16 @@ VivoKsu ROM 服务的管理控制台(Cloudflare Worker `nwflash-web`),与 `api.n
 - `HSTS: max-age=31536000; includeSubDomains`、CSP、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy`、`Permissions-Policy`。
 - 密码 **PBKDF2-SHA256**(100k 迭代)+ 随机盐;会话 token 随机 64 hex,Cookie HttpOnly + Secure + SameSite=Lax。
 - http → https 301 跳转。
+- **CSRF 兜底**:所有状态变更 API(`/api/online/kick`、改密、版本、用户管理)校验 `X-Requested-With: XMLHttpRequest` 头(admin.html 的 fetch 一律携带),跨站表单无法伪造。
 
 ## 目录
 
 ```
 web/
-├─ wrangler.toml       # D1 绑定 + 自定义域 web.nwflash.cc.cd
-├─ schema.sql          # D1 表结构(admins / admin_sessions / api_users / app_versions / access_logs)
-├─ src/index.ts        # Worker:admin API + 鉴权 + 安全头 + SPA 托管
-└─ src/admin.html      # 后台单页(「固件登记簿」:登录 / 版本 / 用户 / 日志)
+├─ wrangler.toml       # D1 绑定 + 自定义域 web.nwflash.cc.cd + vars
+├─ schema.sql          # D1 表结构(admins / admin_sessions / api_users / app_versions / access_logs / online_sessions / admin_audit_log)
+├─ src/index.ts        # Worker:admin API + 鉴权 + 安全头 + SPA 托管 + 在线/强制下线
+└─ src/admin.html      # 后台单页(「固件登记簿」:登录 / 版本 / 用户 / 日志 / 在线状态)
 ```
 
 ## 部署

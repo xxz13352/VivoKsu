@@ -77,7 +77,8 @@ public partial class App : Application
             var token = login.Token;
 
             composition = AppComposition.CreateDefault();
-            composition.SetAuthToken(token!);
+            // 注入 token + 启动在线会话(心跳 / 强制下线监听 / 在线状态轮询)。
+            composition.StartSessionAsync(token!, login.Username ?? string.Empty);
             var mainWindow = new MainWindow(composition);
             mainWindow.Closed += (_, _) => Shutdown();
             MainWindow = mainWindow;

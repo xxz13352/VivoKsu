@@ -6,6 +6,8 @@
  * 端点:
  *   GET /health                          -> { status, source }
  *   GET /api/app/version?current=X       -> VivoKsu 版本策略(免登录,启动拦截用)
+ *   POST /api/heartbeat                  -> 在线会话心跳(鉴权;检测强制下线 / 封禁 / 426)
+ *   GET /api/online                      -> 在线用户列表(鉴权;仅显示名/版本/时长,不含 username/IP)
  *   GET /api/rom?pd=X&version=Y          -> { pd, version, url, name, sizeBytes, sha256 }
  *
  * 版本门禁:所有请求必须带 X-VivoKsu-Version 头;低于后台「版本号控制」的最低版本 → 426。
@@ -23,8 +25,14 @@ export interface Env {
   VOTA_ACTION?: string;
   /** 平台版本白名单,默认 0.1.0。 */
   VOTA_VER?: string;
-  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):访问日志 + VivoKsu 版本控制。 */
+  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):访问日志 + VivoKsu 版本控制 + 在线会话。 */
   DB: D1Database;
+  /** 心跳写节流(ms):同一会话 last_seen 至少隔这么久才写一次 D1。默认 60000。 */
+  HEARTBEAT_WRITE_INTERVAL_MS?: string;
+  /** 在线判定窗口(ms):last_seen 在此窗口内的会话视为在线;超窗即 stale 并被清理。默认 120000。 */
+  ONLINE_TIMEOUT_MS?: string;
+  /** 每用户同时在线会话数上限(超出删最旧的)。默认 3。 */
+  ONLINE_SESSION_CAP?: string;
 }
 
 const CORS = {
@@ -66,6 +74,19 @@ export default {
         return json({ loggedIn: true, name: user.name }, 200);
       }
 
+      // 在线会话心跳:客户端每 5s 一次;鉴权 + 检测强制下线/封禁 + 写节流。
+      if (url.pathname === "/api/heartbeat" && request.method === "POST") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
+        return heartbeat(env, request);
+      }
+
+      // 在线用户列表(客户端视角):仅显示名/版本/时长,不含 username/IP(user_id)。版本门禁跳过——
+      // 低版本客户端由心跳 426 兜底,这里重复拦截会导致客户端同时弹两个更新窗。
+      if (url.pathname === "/api/online" && request.method === "GET") {
+        return onlineClients(env, request);
+      }
+
       if (url.pathname === "/api/rom") {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
@@ -84,6 +105,14 @@ export default {
     } catch {
       return json({ error: "内部错误。" }, 500);
     }
+  },
+
+  /**
+   * Cron 兜底:客户端全部崩溃/断网后,online_sessions 的 stale 行仍会残留到请求路径清理
+   * 不再触发时。每几分钟定时清理一次,保证「崩溃后可靠过期」。
+   */
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await purgeStaleSessions(env, /* force */ true);
   },
 };
 
@@ -175,6 +204,175 @@ async function logAccess(
   } catch {
     // 日志写失败不阻塞解析。
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 在线会话心跳 + 在线列表 + 强制下线(数据在此侧写入/读取)                  */
+/* 存储统一 INTEGER epoch 秒;upsert 只动 last_seen_at/client_version,      */
+/* 绝不触碰 connected_at/user_id(时长基准与归属)。                          */
+/* ------------------------------------------------------------------ */
+
+/** per-token 心跳最小间隔(ms):换 sessionId 刷 D1 写配额的 DoS 防线。内存 Map,按 isolate 共享(Cloudflare 通常粘性路由)。 */
+const HEARTBEAT_MIN_INTERVAL_MS = 3_000;
+const HEARTBEAT_LIMIT_MAP_CAP = 10_000;
+const heartbeatLimits = new Map<string, number>();
+/** 请求路径内联清理的 per-isolate 节流;真正的兜底是 scheduled() Cron。 */
+let lastPurgeAt = 0;
+
+/** per-token 心跳限速:超频返回 false(调用方应跳过读写)。 */
+function allowHeartbeat(token: string): boolean {
+  const now = Date.now();
+  const last = heartbeatLimits.get(token);
+  if (last !== undefined && now - last < HEARTBEAT_MIN_INTERVAL_MS) return false;
+  heartbeatLimits.set(token, now);
+  if (heartbeatLimits.size > HEARTBEAT_LIMIT_MAP_CAP) heartbeatLimits.clear();
+  return true;
+}
+
+/** 清理 stale 会话(超过在线窗口未心跳)。带 force_exit 的会话保留 24h,保证「踢后离线再回来」仍能收到 kick。 */
+async function purgeStaleSessions(env: Env, force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - lastPurgeAt < 60_000) return;
+  lastPurgeAt = now;
+  const timeoutSec = Math.floor((Number(env.ONLINE_TIMEOUT_MS) || 120_000) / 1000);
+  const cutoff = Math.floor(now / 1000) - timeoutSec;
+  const forceExitCutoff = Math.floor(now / 1000) - 24 * 3600;
+  try {
+    // 删除超过在线窗口未心跳的会话;但保留「已强制下线、客户端尚未回来确认」的行(24h 上限,防无限残留)。
+    // 走 idx_online_last_seen 索引,仅触及 stale 行(每用户行数有上限)。
+    await env.DB.prepare(
+      "DELETE FROM online_sessions WHERE last_seen_at < ? AND (force_exit_at IS NULL OR force_exit_at < ?)",
+    )
+      .bind(cutoff, forceExitCutoff)
+      .run();
+  } catch {
+    // 清理失败不影响心跳主流程。
+  }
+}
+
+/** POST /api/heartbeat —— 客户端每 5s 一次。鉴权;返回是否应强制退出。 */
+async function heartbeat(env: Env, request: Request): Promise<Response> {
+  const auth = await authenticateUser(env, request);
+  if (auth instanceof Response) return auth;
+  if (auth === null) return json({ error: "请先登录。" }, 401);
+  if (auth.banned) return json({ ok: true, force_exit: true, reason: "账号已被封禁,请联系管理员。" }, 200);
+
+  const body = await request.json().catch(() => null);
+  const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
+  // 字符集白名单:sessionId 只允许 URL 安全字符,杜绝任意字符串进库(配合后台 XSS 修复,纵深防御)。
+  if (!/^[A-Za-z0-9._:-]{1,64}$/.test(sessionId)) return json({ error: "sessionId 不合法。" }, 400);
+
+  // goodbye(客户端正常/强制退出):删除会话行,绑定 user_id 防跨用户误删。
+  if (body?.active === false) {
+    await env.DB.prepare("DELETE FROM online_sessions WHERE session_id = ? AND user_id = ?")
+      .bind(sessionId, auth.id)
+      .run();
+    return json({ ok: true, force_exit: false }, 200);
+  }
+
+  // per-token 限速只拦「写入」,不拦「读取」:被限速的心跳仍要读 force_exit,避免吞掉 kick 一轮。
+  const header = request.headers.get("Authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  const rateLimited = !allowHeartbeat(token);
+
+  const now = Math.floor(Date.now() / 1000);
+  const writeIntervalSec = Math.floor((Number(env.HEARTBEAT_WRITE_INTERVAL_MS) || 60_000) / 1000);
+  const sessionCap = Number(env.ONLINE_SESSION_CAP) || 3;
+  const clientVersion = typeof body?.clientVersion === "string" ? body.clientVersion.slice(0, 32) : "";
+  // 仅展示用,绝不作鉴权依据(仅 Cloudflare 边缘覆写,不可伪造,但 wrangler dev 等环境可能被伪造)。
+  const ip = request.headers.get("CF-Connecting-IP") || "";
+
+  const row = await env.DB.prepare(
+    "SELECT user_id, last_seen_at, force_exit_at, force_exit_reason FROM online_sessions WHERE session_id = ?",
+  )
+    .bind(sessionId)
+    .first<{ user_id: number; last_seen_at: number; force_exit_at: number | null; force_exit_reason: string | null }>();
+
+  if (!row) {
+    // 新会话(或被裁掉的会话):若被限速则跳过建行(下个心跳再建),否则插入 + 清理多余 stale 行。
+    if (rateLimited) {
+      return json({ ok: true, force_exit: false }, 200);
+    }
+
+    // ON CONFLICT 仅当归属相同用户才更新(防并发竞态/跨用户篡改),且绝不触碰 connected_at。
+    await env.DB.prepare(
+      `INSERT INTO online_sessions (session_id, user_id, user_name, client_version, ip, connected_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         last_seen_at = excluded.last_seen_at,
+         client_version = excluded.client_version
+       WHERE online_sessions.user_id = excluded.user_id`,
+    )
+      .bind(sessionId, auth.id, auth.name, clientVersion, ip, now, now)
+      .run();
+
+    // 每用户会话数上限:只裁「已 stale」的多余行(不裁仍活跃的,避免 churn:活跃会话被裁后下次心跳
+    // 又重建并再触发裁剪,cap 永达不到;配额防线主要靠 per-token 限速 + purge)。
+    const staleCutoff = now - writeIntervalSec;
+    await env.DB.prepare(
+      `DELETE FROM online_sessions
+       WHERE user_id = ? AND last_seen_at < ? AND session_id NOT IN (
+         SELECT session_id FROM online_sessions WHERE user_id = ? ORDER BY last_seen_at DESC LIMIT ?
+       )`,
+    )
+      .bind(auth.id, staleCutoff, auth.id, sessionCap)
+      .run();
+
+    await purgeStaleSessions(env);
+    return json({ ok: true, force_exit: false }, 200);
+  }
+
+  // 会话已存在但归属其它用户 → 不触碰(防跨用户保活/伪造离线)。
+  if (row.user_id !== auth.id) {
+    return json({ ok: true, force_exit: false }, 200);
+  }
+
+  // 先判强制下线:被 kick 的会话不再刷新 last_seen(拒绝退出的客户端也不能靠心跳保活永不超时)。
+  if (row.force_exit_at) {
+    return json({ ok: true, force_exit: true, reason: row.force_exit_reason || "已被服务端强制下线。" }, 200);
+  }
+
+  // 写节流:距上次写 >= 间隔才写,且只动 last_seen_at/client_version/ip。被限速时跳过写入。
+  if (!rateLimited && now - row.last_seen_at >= writeIntervalSec) {
+    await env.DB
+      .prepare("UPDATE online_sessions SET last_seen_at = ?, client_version = ?, ip = ? WHERE session_id = ?")
+      .bind(now, clientVersion, ip, sessionId)
+      .run();
+  }
+
+  return json({ ok: true, force_exit: false }, 200);
+}
+
+/** GET /api/online(客户端视角)—— 在线总数 + 各会话显示名/版本/时长,不含 username/IP/user_id。 */
+async function onlineClients(env: Env, request: Request): Promise<Response> {
+  const auth = await authenticateUser(env, request);
+  if (auth instanceof Response) return auth;
+  if (auth === null) return json({ error: "请先登录。" }, 401);
+  if (auth.banned) return json({ error: "账号已被封禁。" }, 403);
+
+  const timeoutSec = Math.floor((Number(env.ONLINE_TIMEOUT_MS) || 120_000) / 1000);
+  const cutoff = Math.floor(Date.now() / 1000) - timeoutSec;
+  const rows = await env.DB.prepare(
+    `SELECT user_id, user_name AS name, client_version, connected_at, last_seen_at
+     FROM online_sessions
+     WHERE last_seen_at >= ?
+     ORDER BY last_seen_at DESC`,
+  )
+    .bind(cutoff)
+    .all<{ user_id: number; name: string; client_version: string; connected_at: number; last_seen_at: number }>();
+
+  const now = Math.floor(Date.now() / 1000);
+  const sessions = rows.results.map((r) => ({
+    name: r.name,
+    client_version: r.client_version,
+    connected_at: r.connected_at,
+    last_seen_at: r.last_seen_at,
+    duration_seconds: Math.max(0, now - r.connected_at),
+    is_self: r.user_id === auth.id,
+  }));
+
+  await purgeStaleSessions(env);
+  return json({ count: sessions.length, sessions }, 200);
 }
 
 /* ------------------------------------------------------------------ */

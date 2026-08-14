@@ -16,3 +16,7 @@ database_id = "a35d1ea1-620f-436c-9eb5-7f58312c1cf6"
 [[routes]]
 pattern = "web.nwflash.cc.cd"
 custom_domain = true
+
+[vars]
+# 在线判定窗口(ms):与 api worker 保持一致。默认 120000。
+ONLINE_TIMEOUT_MS = "120000"

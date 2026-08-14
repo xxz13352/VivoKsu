@@ -12,6 +12,16 @@ database_id = "a35d1ea1-620f-436c-9eb5-7f58312c1cf6"
 VOTA_BASE_URL = "https://api.otau.cc.cd"
 VOTA_ACTION = "resolve_url"
 VOTA_VER = "0.1.0"
+# 心跳写节流(ms):同一会话 last_seen 至少隔这么久才写一次 D1。默认 60000。
+HEARTBEAT_WRITE_INTERVAL_MS = "60000"
+# 在线判定窗口(ms):last_seen 在此窗口内的会话视为在线。默认 120000。
+ONLINE_TIMEOUT_MS = "120000"
+# 每用户同时在线会话数上限。默认 3。
+ONLINE_SESSION_CAP = "3"
+
+# Cron:在线会话 stale 行兜底清理(客户端全崩溃时仍能可靠过期)。
+[triggers]
+crons = ["*/3 * * * *"]
 
 # 自定义域:api.nwflash.cc.cd(域名 nwflash.cc.cd 需已在 Cloudflare)。
 # 首次 deploy 前确保域名在账户里;wrangler 会自动创建 DNS 与证书。

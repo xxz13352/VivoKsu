@@ -37,6 +37,8 @@ public partial class MainViewModel : ObservableObject
 
     public SafeFlashViewModel SafeFlash { get; }
 
+    public OnlineViewModel Online { get; }
+
     public OperationLogViewModel Logs { get; }
 
     public IOperationCoordinator? Coordinator => coordinator;
@@ -59,10 +61,12 @@ public partial class MainViewModel : ObservableObject
         FirmwareExtractViewModel? firmwareExtract = null,
         SafeFlashViewModel? safeFlash = null,
         IDeviceMonitor? deviceMonitor = null,
-        IOperationCoordinator? coordinator = null)
+        IOperationCoordinator? coordinator = null,
+        OnlineViewModel? online = null)
     {
         var fallbackLogs = new OperationLogService();
         var fallbackCliRunner = new FastbootCliRunner(Path.Combine(Path.GetTempPath(), "unavailable-fastboot.exe"));
+        var fallbackOtaClient = new OtaApiClient();
         var unavailableBackend = new FastbootRsBackend(new UnavailableNativeApi());
         this.deviceSessionService = deviceSessionService;
         this.deviceMonitor = deviceMonitor;
@@ -95,6 +99,7 @@ public partial class MainViewModel : ObservableObject
             new FirmwarePartitionExtractor(payloadDumper: null),
             coordinator,
             fallbackCliRunner);
+        Online = online ?? new OnlineViewModel(fallbackOtaClient, new HeartbeatService(fallbackOtaClient));
         SelectPageCommand = new RelayCommand<AppPage>(page => SelectedPage = page);
         RefreshDeviceCommand = new AsyncRelayCommand(() => RefreshDeviceAsync(logActivity: true));
     }

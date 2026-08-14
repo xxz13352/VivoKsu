@@ -1,12 +1,12 @@
 /**
  * web.nwflash.cc.cd —— VivoKsu ROM 服务后台管理。
  *
- * 功能:管理员登录 / 版本号控制 / API 用户管理 / 访问日志。
+ * 功能:管理员登录 / 版本号控制 / API 用户管理 / 访问日志 / 在线会话管理(强制下线)。
  * 与 api.nwflash.cc.cd 共用 D1 数据库(nwflash-db):版本控制与访问日志由 API 侧执行,
- * 本后台负责管理。
+ * 本后台负责管理;在线会话行由 API 侧写入,本后台读取并设置 force_exit。
  *
  * 安全:全站 HTTPS(Cloudflare 边缘 TLS 1.3)+ HSTS + CSP + HttpOnly/Secure 会话 Cookie
- * + PBKDF2-SHA256 密码哈希 + 随机 session token。
+ * + PBKDF2-SHA256 密码哈希 + 随机 session token + 状态变更请求校验 X-Requested-With(CSRF 兜底)。
  */
 
 import adminHtml from "./admin.html";
@@ -17,6 +17,8 @@ export interface Env {
   /** 首次部署时若库内无管理员,用此密码创建初始管理员(用户名 ADMIN_SEED_USERNAME,默认 admin)。部署后建议移除/改密。 */
   ADMIN_SEED_PASSWORD?: string;
   ADMIN_SEED_USERNAME?: string;
+  /** 在线判定窗口(ms):与 api worker 的 ONLINE_TIMEOUT_MS 保持一致。默认 120000。 */
+  ONLINE_TIMEOUT_MS?: string;
 }
 
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000; // 7 天
@@ -79,6 +81,12 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   if (method === "GET" && path === "/api/me") return me(request, env);
   if (method === "POST" && path === "/api/logout") return logout(request, env);
 
+  // CSRF 兜底:所有状态变更请求必须带 X-Requested-With(与 admin.html 的 fetch 配套)。
+  // 登录除外(跨站表单无法自定义该头,此处覆盖登录后的全部写操作)。
+  if (method !== "GET" && request.headers.get("X-Requested-With") !== "XMLHttpRequest") {
+    return json({ error: "请求缺少必要请求头。" }, 403);
+  }
+
   // 以下全部需要管理员会话
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin; // 401
@@ -102,6 +110,10 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
 
   // 日志
   if (path === "/api/logs" && method === "GET") return listLogs(url, env);
+
+  // 在线会话(管理端)
+  if (path === "/api/online" && method === "GET") return onlineAdmin(env);
+  if (path === "/api/online/kick" && method === "POST") return kickOnline(request, admin, env);
 
   return json({ error: "Not found" }, 404);
 }
@@ -370,6 +382,97 @@ async function listLogs(url: URL, env: Env): Promise<Response> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 在线会话(管理端):读取 + 强制下线                                       */
+/* ------------------------------------------------------------------ */
+
+/** GET /api/online(管理端)—— 完整字段(含 username/IP/session_id),仅 admin 可见。 */
+async function onlineAdmin(env: Env): Promise<Response> {
+  const timeoutSec = Math.floor((Number(env.ONLINE_TIMEOUT_MS) || 120_000) / 1000);
+  const cutoff = Math.floor(Date.now() / 1000) - timeoutSec;
+  const rows = await env.DB.prepare(
+    `SELECT s.session_id, s.user_id, u.username, s.user_name AS name,
+            s.client_version, s.ip, s.connected_at, s.last_seen_at,
+            s.force_exit_at, s.force_exit_reason
+     FROM online_sessions s
+     JOIN api_users u ON u.id = s.user_id
+     WHERE s.last_seen_at >= ?
+     ORDER BY s.last_seen_at DESC`,
+  )
+    .bind(cutoff)
+    .all<OnlineSessionRow>();
+
+  const now = Math.floor(Date.now() / 1000);
+  const sessions = rows.results.map((r) => ({
+    session_id: r.session_id,
+    user_id: r.user_id,
+    username: r.username,
+    name: r.name,
+    client_version: r.client_version,
+    ip: r.ip,
+    connected_at: r.connected_at,
+    last_seen_at: r.last_seen_at,
+    duration_seconds: Math.max(0, now - r.connected_at),
+    force_exit: r.force_exit_at !== null,
+  }));
+  return json({ count: sessions.length, sessions }, 200);
+}
+
+/** POST /api/online/kick —— 设 force_exit,客户端下一个心跳(≤5s)收到后退出进程。 */
+async function kickOnline(request: Request, admin: AdminRow, env: Env): Promise<Response> {
+  const body = await request.json().catch(() => null);
+  const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
+  const userId = Number(body?.userId);
+  const reason = typeof body?.reason === "string" ? body.reason.slice(0, 200).trim() : "";
+  const now = Math.floor(Date.now() / 1000);
+
+  // 只审计成功 kick;目标 user_id 由 RETURNING 取回(不依赖调用方传)。
+  if (sessionId) {
+    const target = await env.DB.prepare(
+      "UPDATE online_sessions SET force_exit_at = ?, force_exit_reason = ? WHERE session_id = ? RETURNING user_id",
+    )
+      .bind(now, reason, sessionId)
+      .first<{ user_id: number }>();
+    if (!target) return json({ error: "目标不在线或不存在。" }, 404);
+    await writeAudit(env, admin, "kick", target.user_id, sessionId, reason);
+    return json({ ok: true, affected: 1 }, 200);
+  }
+
+  if (Number.isFinite(userId)) {
+    // kick-by-user 更新该用户全部会话(否则第二台设备/新会话逃逸)。
+    const target = await env.DB.prepare(
+      "UPDATE online_sessions SET force_exit_at = ?, force_exit_reason = ? WHERE user_id = ? RETURNING user_id",
+    )
+      .bind(now, reason, userId)
+      .first<{ user_id: number }>();
+    if (!target) return json({ error: "目标不在线或不存在。" }, 404);
+    await writeAudit(env, admin, "kick", userId, null, reason);
+    return json({ ok: true, affected: 1 }, 200);
+  }
+
+  return json({ error: "缺少 sessionId 或 userId。" }, 400);
+}
+
+/** 写一条管理动作审计(尽力而为,失败不影响踢人结果)。 */
+async function writeAudit(
+  env: Env,
+  admin: AdminRow,
+  action: string,
+  targetUserId: number | null,
+  targetSessionId: string | null,
+  reason: string,
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      "INSERT INTO admin_audit_log (admin_id, admin_username, action, target_user_id, target_session_id, reason) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+      .bind(admin.id, admin.username, action, targetUserId, targetSessionId, reason)
+      .run();
+  } catch {
+    // 审计失败不影响踢人结果。
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 工具                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -450,4 +553,17 @@ interface LogRow {
   url: string | null;
   status: number;
   created_at: string;
+}
+
+interface OnlineSessionRow {
+  session_id: string;
+  user_id: number;
+  username: string;
+  name: string;
+  client_version: string;
+  ip: string;
+  connected_at: number;
+  last_seen_at: number;
+  force_exit_at: number | null;
+  force_exit_reason: string | null;
 }

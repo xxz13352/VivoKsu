@@ -102,7 +102,7 @@
   @keyframes beat{0%,100%{opacity:1}50%{opacity:.3}}
 
   /* ---------- 服务健康带 ---------- */
-  .health{max-width:1180px;margin:0 auto;padding:14px 26px 4px;display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--rule)}
+  .health{max-width:1180px;margin:0 auto;padding:14px 26px 4px;display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--rule)}
   .health .cell{padding:2px 16px 12px;border-right:1px solid var(--rule2)}
   .health .cell:first-child{padding-left:0}
   .health .cell:last-child{border-right:none}
@@ -283,17 +283,19 @@
     </div>
   </header>
 
-  <!-- 登记册索引(三页签) -->
+  <!-- 登记册索引(四页签) -->
   <nav class="tabs" id="tabList" role="tablist" aria-label="管理页签">
     <button class="tab active" id="tab-versions" data-tab="versions" role="tab" aria-controls="sec-versions" aria-selected="true" tabindex="0"><span class="n">01</span>版本号控制 <span class="cnt" id="tabCntVer"></span></button>
     <button class="tab" id="tab-users" data-tab="users" role="tab" aria-controls="sec-users" aria-selected="false" tabindex="-1"><span class="n">02</span>用户管理 <span class="cnt" id="tabCntUsr"></span></button>
     <button class="tab" id="tab-logs" data-tab="logs" role="tab" aria-controls="sec-logs" aria-selected="false" tabindex="-1"><span class="n">03</span>访问日志 <span class="live"><span class="dot"></span>LIVE</span></button>
+    <button class="tab" id="tab-online" data-tab="online" role="tab" aria-controls="sec-online" aria-selected="false" tabindex="-1"><span class="n">04</span>在线状态 <span class="live"><span class="dot"></span>LIVE</span><span class="cnt" id="tabCntOnline"></span></button>
   </nav>
 
   <!-- 服务健康带(活结算) -->
   <div class="health" id="healthStrip">
     <div class="cell"><div class="k">VivoKsu 版本</div><div class="v" id="kpiVer">—<small>当前</small></div></div>
     <div class="cell"><div class="k">API 用户</div><div class="v" id="kpiUsr">—<small>户</small></div></div>
+    <div class="cell"><div class="k">在线</div><div class="v" id="kpiOnline">—<small>人</small></div></div>
     <div class="cell"><div class="k">查询 · 近 24h</div><div class="v" id="kpiQry">—<small>次</small></div></div>
     <div class="cell"><div class="k">失败 · 近 24h</div><div class="v danger" id="kpiFail">—<small>次</small></div></div>
   </div>
@@ -393,6 +395,26 @@
       </div>
     </section>
 
+    <!-- 在线状态(管理端,强制下线) -->
+    <section class="page" id="sec-online" role="tabpanel" aria-labelledby="tab-online" style="display:none">
+      <div class="page-head">
+        <div class="eyebrow">ONLINE · LIVE</div>
+        <h2 class="page-title">在线状态</h2>
+        <p class="page-desc">实时查看客户端在线会话与时长。<code>强制下线</code> 后客户端在下一个心跳(≤5s)收到 <code>force_exit</code> 并退出进程;会话行在客户端退出或超时后过期。</p>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><span class="panel-title">在线会话 <span class="hint">· 最近 2 分钟内活跃</span></span></div>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>用户</th><th>版本</th><th>IP</th><th>上线时间</th><th>最后心跳</th><th>在线时长</th><th style="width:150px;text-align:right">操作</th></tr></thead>
+            <tbody id="onlineBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="onlineEmpty" style="display:none"><span class="big">◇</span>当前没有在线会话。客户端登录后每 5s 心跳,出现在这里。</div>
+        <div class="tally" id="onlineTally"></div>
+      </div>
+    </section>
+
     <!-- 账号(非主菜单,从头部「改密」进入) -->
     <section class="page" id="sec-account" style="display:none">
       <div class="page-head">
@@ -421,7 +443,11 @@ let currentTab = "versions";
 async function api(path, method = "GET", body) {
   const r = await fetch(path, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: {
+      // 服务端校验,CSRF 兜底(所有状态变更请求必须带)。
+      "X-Requested-With": "XMLHttpRequest",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await r.json().catch(() => ({}));
@@ -445,7 +471,11 @@ function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;"
 function stamp(s) { const d = new Date((s||"").replace(" ","T")+"Z"); if (isNaN(d)) return s; const p = n => String(n).padStart(2,"0"); return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
 
 /* ---------- 视图 ---------- */
-function showLogin() { admin = null; $("loginView").style.display = "grid"; $("appView").style.display = "none"; }
+function showLogin() {
+  admin = null;
+  stopOnlinePoll(); // 登出后不再轮询在线状态(否则每 10s 弹一次 401)
+  $("loginView").style.display = "grid"; $("appView").style.display = "none";
+}
 function showApp() {
   $("loginView").style.display = "none"; $("appView").style.display = "block";
   $("meLabel").textContent = admin || "admin";
@@ -498,6 +528,7 @@ function switchTab(tab) {
   if (tab === "logs") loadLogs();
   if (tab === "users") loadUsers();
   if (tab === "versions") loadAppVersions();
+  if (tab === "online") startOnlinePoll(); else stopOnlinePoll();
 }
 document.querySelectorAll(".tab").forEach(n => n.onclick = () => switchTab(n.dataset.tab));
 $("tabList").addEventListener("keydown", (e) => {
@@ -513,14 +544,16 @@ $("tabList").addEventListener("keydown", (e) => {
 /* ---------- 服务健康带 ---------- */
 async function loadHealth() {
   try {
-    const [v, u] = await Promise.all([api("/api/app-versions"), api("/api/users")]);
+    const [v, u, onl] = await Promise.all([api("/api/app-versions"), api("/api/users"), api("/api/online")]);
     const versions = v.versions || [];
     const users = u.users || [];
     const currentVer = versions.filter(x => x.enabled).sort((a, b) => cmpVersion(b.version, a.version))[0];
     $("kpiVer").innerHTML = currentVer ? `${esc(currentVer.version)}<small> 当前</small>` : `<span style="color:var(--faint)">—</span><small>未设置</small>`;
     $("kpiUsr").innerHTML = `${users.length}<small> 户</small>`;
+    $("kpiOnline").innerHTML = `${onl.count || 0}<small> 在线</small>`;
     $("tabCntVer").textContent = versions.length + " 版";
     $("tabCntUsr").textContent = users.length + " 户";
+    $("tabCntOnline").textContent = (onl.count || 0) + " 在线";
     const logs = (await api("/api/logs?limit=500")).logs || [];
     const cutoff = Date.now() - 24 * 3600 * 1000;
     const recent = logs.filter(l => { const t = new Date((l.created_at || "").replace(" ","T") + "Z").getTime(); return !isNaN(t) && t >= cutoff; });
@@ -730,6 +763,64 @@ $("logNext").onclick = () => { logPage++; loadLogs(); };
 $("logRefresh").onclick = () => { logPage = 0; loadLogs(); };
 $("logUser").onchange = () => { logPage = 0; loadLogs(); };
 $("logPd").addEventListener("keydown", e => { if (e.key === "Enter") { logPage = 0; loadLogs(); } });
+
+/* ---------- 在线状态(管理端) ---------- */
+const ONLINE_POLL_MS = 10000;
+let onlineTimer = null;
+let onlineCache = []; // 渲染期间保存会话对象;onclick 只传索引,绝不把 session_id 内联进 HTML(防 XSS)
+function startOnlinePoll() { stopOnlinePoll(); loadOnline(); onlineTimer = setInterval(loadOnline, ONLINE_POLL_MS); }
+function stopOnlinePoll() { if (onlineTimer) { clearInterval(onlineTimer); onlineTimer = null; } }
+function fmtDur(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const p = n => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
+}
+function fmtClock(epochSec) {
+  const d = new Date(Number(epochSec) * 1000);
+  if (isNaN(d)) return "—";
+  const p = n => String(n).padStart(2, "0");
+  return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+async function loadOnline() {
+  try {
+    const data = await api("/api/online");
+    const rows = data.sessions || [];
+    onlineCache = rows;
+    $("onlineEmpty").style.display = rows.length ? "none" : "block";
+    $("onlineBody").innerHTML = rows.map((s, i) => `
+      <tr>
+        <td>
+          <div class="pn" style="font-weight:600">${esc(s.name)}</div>
+          <div class="ver" style="font-size:11px;color:var(--faint)">${esc(s.username)}</div>
+        </td>
+        <td><span class="ver">${esc(s.client_version || "—")}</span></td>
+        <td><span class="time" title="仅展示,不作鉴权依据">${esc(s.ip || "—")}</span></td>
+        <td><span class="time">${fmtClock(s.connected_at)}</span></td>
+        <td><span class="time">${fmtClock(s.last_seen_at)}</span></td>
+        <td><span class="ver" style="color:var(--lead)">${fmtDur(s.duration_seconds)}</span></td>
+        <td><div class="ops">
+          <button class="btn btn-sm btn-danger" onclick="kickSessionIndex(${i})">强制下线</button>
+        </div></td>
+      </tr>`).join("");
+    $("onlineTally").innerHTML = `<span>在线 <b>${data.count || 0}</b> 会话</span><span class="right">每 ${ONLINE_POLL_MS / 1000}s 刷新 · 强制下线后客户端 ≤5s 退出</span>`;
+    loadHealth();
+  } catch (e) { if (currentTab === "online") toast(e.message, "fail"); }
+}
+function kickSessionIndex(i) {
+  const s = onlineCache[i];
+  if (!s) return;
+  const reason = prompt("强制下线原因(可选,≤200 字符,将显示在客户端):");
+  if (reason === null) return;
+  kickSession(s.session_id, reason);
+}
+async function kickSession(sessionId, reason) {
+  try {
+    await api("/api/online/kick", "POST", { sessionId, reason });
+    toast("已下发强制下线", "ok");
+    loadOnline();
+  } catch (e) { toast(e.message, "fail"); }
+}
 
 /* ---------- 启动 ---------- */
 (async () => {

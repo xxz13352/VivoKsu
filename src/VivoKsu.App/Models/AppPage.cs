@@ -10,5 +10,6 @@ public enum AppPage
     LineFlash,
     FirmwareExtract,
     OperationLog,
-    SafeFlash
+    SafeFlash,
+    OnlineStatus
 }

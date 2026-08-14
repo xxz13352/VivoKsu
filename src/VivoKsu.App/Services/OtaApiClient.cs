@@ -94,6 +94,86 @@ public sealed class OtaApiClient
 
         return rom;
     }
+
+    /// <summary>
+    /// 在线会话心跳:保持本实例「在线」并可接收服务端指令(强制下线 / 封禁 / 强制更新)。
+    /// <paramref name="active"/>=false 为 goodbye,服务端删除会话行。
+    /// </summary>
+    public async Task<HeartbeatResult> HeartbeatAsync(string sessionId, bool active, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+
+        using var response = await http.PostAsJsonAsync(
+            $"{BaseUrl}/api/heartbeat",
+            new { sessionId, clientVersion = AppInfo.Version, active },
+            cancellationToken).ConfigureAwait(false);
+
+        // 先判状态码再解析 body:空/非 JSON 响应体(如 WAF HTML 403)不得被当作网络抖动静默吞掉。
+        if (response.StatusCode == System.Net.HttpStatusCode.UpgradeRequired)
+        {
+            var payload = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+            throw UpdateRequiredException.FromResponse(payload);
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await OtaApiException.FromResponseAsync(response);
+        }
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+        var forceExit = body.TryGetProperty("force_exit", out var fe)
+            && fe.ValueKind == JsonValueKind.True;
+        var reason = body.TryGetProperty("reason", out var r)
+            ? r.GetString()
+            : null;
+        return new HeartbeatResult(forceExit, reason);
+    }
+
+    /// <summary>查询在线用户列表(显示名/版本/时长,不含 username/IP)。</summary>
+    public async Task<IReadOnlyList<OnlineSession>> GetOnlineAsync(CancellationToken cancellationToken)
+    {
+        using var response = await http.GetAsync($"{BaseUrl}/api/online", cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == System.Net.HttpStatusCode.UpgradeRequired)
+        {
+            var payload = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+            throw UpdateRequiredException.FromResponse(payload);
+        }
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await OtaApiException.FromResponseAsync(response);
+        }
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (!body.TryGetProperty("sessions", out var sessions) || sessions.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var list = new List<OnlineSession>();
+        foreach (var item in sessions.EnumerateArray())
+        {
+            list.Add(new OnlineSession(
+                GetString(item, "name"),
+                GetString(item, "client_version"),
+                GetInt64(item, "connected_at"),
+                GetInt64(item, "last_seen_at"),
+                GetInt64(item, "duration_seconds"),
+                item.TryGetProperty("is_self", out var self) && self.ValueKind == JsonValueKind.True));
+        }
+
+        return list;
+    }
+
+    private static string GetString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
+
+    private static long GetInt64(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value)
+            && (value.ValueKind == JsonValueKind.Number || value.ValueKind == JsonValueKind.String)
+            && value.TryGetInt64(out var number)
+            ? number
+            : 0;
 }
 
 /// <summary>查询 OTA 链接失败时的业务异常。</summary>
