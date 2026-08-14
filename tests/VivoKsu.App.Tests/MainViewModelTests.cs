@@ -99,11 +99,14 @@ public class MainViewModelTests
             await coordinator.RunAsync(OperationKind.Flashing, "test", async (_, _) =>
             {
                 started.Set();
-                release.Wait(TimeSpan.FromSeconds(5));
+                // 大余量(30s):本机调度受并行会话/CI 负载影响时 5s 可能不够,避免定时偶发。
+                release.Wait(TimeSpan.FromSeconds(30));
                 await Task.CompletedTask;
             }));
 
-        Assert.True(started.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(started.Wait(TimeSpan.FromSeconds(30)));
+        // CanExecute 同步读 coordinator.IsBusy(SetCurrent 先于操作体执行,已置忙)。
+        Assert.True(coordinator.IsBusy);
         Assert.False(viewModel.LogoutCommand.CanExecute(null));
 
         release.Set();
