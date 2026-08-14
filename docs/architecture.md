@@ -100,7 +100,7 @@ VivoKsu 工具/
 │  │  ├─ platform-tools/            # adb.exe + 唯一 fastboot.exe(带进度)
 │  │  ├─ root-tools/                # magiskboot.so
 │  │  └─ scrcpy/                    # scrcpy(发布脚本自动补齐)
-├─ cloudflare/                      # Worker + 后台 + 用户门户(见 §4 §5)
+├─ cloudflare/                      # Worker + 后台 + 用户门户 + 官网(见 §4 §5)
 ├─ tests/
 │  └─ VivoKsu.App.Tests/            # 桌面应用单元测试(约 50 个文件)
 ├─ scripts/
@@ -455,6 +455,16 @@ flowchart LR
 - **修改密码**:校验当前密码后更新(`api_users.salt + password`)。
 - 写操作校验 `X-Requested-With`(CSRF 兜底);安全头与 admin 一致(HSTS / CSP / no-store)。
 
+### 5.2 官网 `nwflash.cc.cd`(营销落地页)
+
+`nwflash.cc.cd`(`cloudflare/website/src/index.html` + Worker `nwflash-site`,高级白 + 液态玻璃设计,详见 [cloudflare/website/README.md](../cloudflare/website/README.md)):
+
+- **对外营销面**,不鉴权、无 D1;Worker 仅托管单页 `index.html`(任何路径统一返回),安全头与后台一致。
+- **设计语言**:高级白 + 液态玻璃(磨砂半透明白玻璃面板 + `backdrop-filter` 高斯模糊 + 内高光 + 发丝描边,Apple Liquid Glass 网页近似);单一深青强调;数据等宽 mono。
+- **区块**:HERO(动能排字 + 液态玻璃设备控制台迷你 UI)、功能 Bento、VIVO 线刷五步、技术栈条、更新日志、下载 CTA、页脚。
+- **更新日志**:在官网单页内维护(发版时在 `index.html` 更新日志区块登记版本号与变更)。
+- 部署:`cd cloudflare/website && npx wrangler deploy`(绑定根域 `nwflash.cc.cd`)。
+
 ---
 
 ## 6. 数据流与关键时序
@@ -579,4 +589,6 @@ sequenceDiagram
 - [cloudflare/API.md](../cloudflare/API.md) —— **api.nwflash.cc.cd 接口契约**(端点 / 参数 / 错误码 / 计费 / 功能记录)。
 - [cloudflare/README.md](../cloudflare/README.md) —— Cloudflare Worker 部署说明。
 - [cloudflare/web/README.md](../cloudflare/web/README.md) —— **web.nwflash.cc.cd 后台管理**。
+- [cloudflare/user/README.md](../cloudflare/user/README.md) —— **user.nwflash.cc.cd 用户门户**。
+- [cloudflare/website/README.md](../cloudflare/website/README.md) —— **nwflash.cc.cd 官网**(液态玻璃落地页)。
 - [README.md](../README.md) —— 项目总览与快速上手。

@@ -2,12 +2,16 @@
 
 > **接口契约见 [API.md](API.md)** —— 端点、参数、响应、错误码、计费、功能记录。
 > **后台管理见 [web/README.md](web/README.md)** —— `web.nwflash.cc.cd`。
+> **用户门户见 [user/README.md](user/README.md)** —— `user.nwflash.cc.cd`。
+> **官网见 [website/README.md](website/README.md)** —— `nwflash.cc.cd`。
 
 Nwflash 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 
+- **官网**:Worker `nwflash-site`,部署在 **`nwflash.cc.cd`** —— 对外营销落地页(高级白 + 液态玻璃,产品介绍 / 功能 / 更新日志)。
 - **API**:Worker `nwflash-rom`,部署在 **`api.nwflash.cc.cd`** —— 登录、版本控制、ROM 解析、访问日志、**在线会话(心跳 / 强制下线 / 在线列表)**。
 - **后台**:Worker `nwflash-web`,部署在 **`web.nwflash.cc.cd`** —— 管理员 / 版本 / 用户 / 日志 / **在线状态(强制下线)** 管理。
-- **数据库**:D1 `nwflash-db`,两个 Worker 共用。
+- **用户门户**:Worker `nwflash-user`,部署在 **`user.nwflash.cc.cd`** —— 授权客户自助后台(我的日志 / 在线会话 / 修改密码)。
+- **数据库**:D1 `nwflash-db`,API / 后台 / 用户门户三个 Worker 共用(官网不连 D1)。
 
 桌面应用 `OtaApiClient.DefaultBaseUrl` 默认就是 `https://api.nwflash.cc.cd`,无需配置、无需本地起 .NET 服务端。
 
