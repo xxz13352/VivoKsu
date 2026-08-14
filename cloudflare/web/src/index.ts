@@ -1,5 +1,5 @@
 /**
- * web.nwflash.cc.cd —— VivoKsu ROM 服务后台管理。
+ * web.nwflash.cc.cd —— Nwflash ROM 服务后台管理。
  *
  * 功能:管理员登录 / 版本号控制 / API 用户管理 / 访问日志 / 在线会话管理(强制下线)。
  * 与 api.nwflash.cc.cd 共用 D1 数据库(nwflash-db):版本控制与访问日志由 API 侧执行,
@@ -94,7 +94,7 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   if (path === "/api/change-password" && method === "POST")
     return changePassword(request, admin, env);
 
-  // VivoKsu 版本控制(强制更新)
+  // Nwflash 版本控制(强制更新)
   if (path === "/api/app-versions" && method === "GET") return listAppVersions(env);
   if (path === "/api/app-versions" && method === "POST") return addAppVersion(request, env);
   if (path.startsWith("/api/app-versions/") && method === "PUT") return updateAppVersion(request, path, env);
@@ -222,7 +222,7 @@ async function changePassword(request: Request, admin: AdminRow, env: Env): Prom
 }
 
 /* ------------------------------------------------------------------ */
-/* VivoKsu 版本控制(强制更新)                                            */
+/* Nwflash 版本控制(强制更新)                                            */
 /* ------------------------------------------------------------------ */
 
 async function listAppVersions(env: Env): Promise<Response> {

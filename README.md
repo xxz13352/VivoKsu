@@ -1,12 +1,12 @@
-# VivoKsu
+# Nwflash(奶娃Flash)
 
-Vivo 手机刷机 / Root 工具箱 —— **商业付费工具**,Windows WPF 桌面应用(.NET 8)。
+Vivo 手机刷机 / Root 工具箱 —— **商业付费工具**,Windows WPF 桌面应用(.NET 8)。中文名 **奶娃Flash**,英文名 **Nwflash**,缩写 **NWF**。
 
 提供 ADB / Fastboot 设备检测、分区可视刷写、快速刷写(KernelSU)、payload 解包与云端提取、ADB 投屏、文件管理等能力,全程中文界面、teal 主题。
 
 ## 项目定位与商业模式
 
-VivoKsu 是**商业付费工具**:
+Nwflash 是**商业付费工具**:
 
 - **登录授权**:桌面端启动必须用后台创建的账号登录,未登录不可进入主界面(登录门禁)。账号由 `web.nwflash.cc.cd` 后台「用户管理」创建。
 - **服务端全在 Cloudflare,零自有服务器**:API `api.nwflash.cc.cd`(Worker `nwflash-rom`)+ 后台 `web.nwflash.cc.cd`(Worker `nwflash-web`)+ 数据库 D1 `nwflash-db`,认证、版本授权、审计、后台管理全在 Cloudflare Edge。
@@ -54,7 +54,7 @@ VivoKsu 工具/
 │  │  ├─ platform-tools/            # adb / fastboot
 │  │  ├─ root-tools/                # magiskboot.so
 │  │  └─ scrcpy/                    # scrcpy(发布时由脚本自动补齐)
-├─ cloudflare/                      # Cloudflare Worker:VivoKsu ROM 代理(api.nwflash.cc.cd)
+├─ cloudflare/                      # Cloudflare Worker:Nwflash ROM 代理(api.nwflash.cc.cd)
 ├─ tests/
 │  └─ VivoKsu.App.Tests/            # 桌面应用单元测试
 ├─ scripts/
@@ -119,7 +119,7 @@ VivoKsu 工具/
 | `POST /api/operation/authorize` | 操作许可门禁(每个操作运行前询问;默认放行、封禁/停用拒绝) |
 | `POST /api/usage/logs` | 使用日志批量上传(按操作分类存储) |
 
-**凭据隔离**:VOTA API Token 以 Worker 机密(`wrangler secret put VOTA_API_TOKEN`)存在 `api.nwflash.cc.cd` 上,**不进入 VivoKsu 桌面端**。VivoKsu 代码里没有任何 `api.otau.cc.cd` / token 信息,只连 `api.nwflash.cc.cd`。
+**凭据隔离**:VOTA API Token 以 Worker 机密(`wrangler secret put VOTA_API_TOKEN`)存在 `api.nwflash.cc.cd` 上,**不进入 Nwflash 桌面端**。Nwflash 代码里没有任何 `api.otau.cc.cd` / token 信息,只连 `api.nwflash.cc.cd`。
 
 **计费**:上游 VOTA 的信用点由**运营方**(Worker 所持 token 账户)承担,**不对用户扣点计费** —— 用户登录即可查询,不限制次数。
 
@@ -139,7 +139,7 @@ npx wrangler deploy                   # 部署并绑定自定义域 api.nwflash.
 
 **已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁、**在线会话(心跳 / 在线状态 / 强制下线)**、**操作许可门禁 + 使用日志分类上传**,均已在 Cloudflare 上。**商业模型**:账号授权制 —— 登录即用,不对用户按次扣点 / 限制次数;上游 VOTA 信用点为运营方成本。
 
-> 早期自建 .NET 服务端(`src/VivoKsu.Server/`)已整体删除 —— 线上后端 100% 跑在 Cloudflare Workers(仅支持 JavaScript/TypeScript)+ D1,桌面端直连 `api.nwflash.cc.cd`;VOTA 凭据只存在 Worker 机密里,不再有自托管代码。
+> 早期自建 .NET 服务端(`src/Nwflash.Server/`)已整体删除 —— 线上后端 100% 跑在 Cloudflare Workers(仅支持 JavaScript/TypeScript)+ D1,桌面端直连 `api.nwflash.cc.cd`;VOTA 凭据只存在 Worker 机密里,不再有自托管代码。
 
 ## 构建与测试
 

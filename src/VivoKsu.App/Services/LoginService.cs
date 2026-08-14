@@ -18,7 +18,7 @@ public sealed class LoginService : IDisposable
     {
         this.baseUrl = baseUrl;
         http = new HttpClient();
-        http.DefaultRequestHeaders.TryAddWithoutValidation("X-VivoKsu-Version", AppInfo.Version);
+        http.DefaultRequestHeaders.TryAddWithoutValidation("X-Nwflash-Version", AppInfo.Version);
     }
 
     /// <summary>账号密码登录。成功返回 token + 用户信息。</summary>

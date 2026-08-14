@@ -19,7 +19,7 @@
 
 ## 登录与授权
 
-VivoKsu 是商业工具,桌面端启动须登录。VIVO 线刷页查 ROM 走 `OtaApiClient`(登录后已注入 token,请求带 `Authorization: Bearer`),`/api/rom` **强制登录**:无 token → 401「请先登录」、封禁 → 403、版本未在后台启用 → 404。上游 VOTA 信用点由运营方承担,**不对用户扣点计费**。
+Nwflash 是商业工具,桌面端启动须登录。VIVO 线刷页查 ROM 走 `OtaApiClient`(登录后已注入 token,请求带 `Authorization: Bearer`),`/api/rom` **强制登录**:无 token → 401「请先登录」、封禁 → 403、版本未在后台启用 → 404。上游 VOTA 信用点由运营方承担,**不对用户扣点计费**。
 
 ## 设备版本读取
 
@@ -56,7 +56,7 @@ PD 码用 `ro.product.device`(= `Details.Codename`)。bbk 为空 / 版本是通�
 3. **磁盘不足 → OOM**:下载前 `EnsureDiskSpace` 预检(中文提示);`MaximumMemoryBufferBytes` 保持 0(无上限),健康盘上 watcher 持续落盘、内存平稳。
 4. **慢盘(HDD)会停滞**:bezzad 多分片随机写 HDD(如 D 盘)跟不上 → 背压死锁。**staging 优先系统盘(SSD,≥15GB)**,否则选最大空闲盘。
 
-staging 目录在剩余空间最大的固定盘 `VivoKsu\safe-flash\<guid>\`,下载与解包都在此,刷完清理。
+staging 目录在剩余空间最大的固定盘 `Nwflash\safe-flash\<guid>\`,下载与解包都在此,刷完清理。
 
 ## 刷写(唯一 fastboot.exe)
 
@@ -99,4 +99,4 @@ staging 目录在剩余空间最大的固定盘 `VivoKsu\safe-flash\<guid>\`,下
 ## 相关文档
 
 - `README.md` —— 项目总览 / 页面 / 服务端(Cloudflare Worker)架构。
-- [vivoksu-safeflash.md](../../../.claude/projects/C--Users-17254-Desktop-TOOL-VivoKsu---/memory/vivoksu-safeflash.md) —— 会话记忆(坑与要点)。
+- [vivoksu-safeflash.md](../../../.claude/projects/C--Users-17254-Desktop-TOOL-Nwflash---/memory/vivoksu-safeflash.md) —— 会话记忆(坑与要点)。

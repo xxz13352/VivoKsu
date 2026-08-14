@@ -1,11 +1,11 @@
-# VivoKsu 项目索引
+# Nwflash 项目索引
 
 > **导航地图**:从这一页定位所有文档、代码、服务与数据。
 > 快速上手看 [README](../README.md);深入理解看 [架构文档](architecture.md)。
 
 ## 一、这是什么
 
-**VivoKsu** —— Vivo 手机刷机 / Root 商业付费工具。Windows WPF 桌面应用(.NET 8)+ **100% Cloudflare 托管后端**(Workers + D1,零自有服务器)。
+**Nwflash(奶娃Flash)** —— Vivo 手机刷机 / Root 商业付费工具。Windows WPF 桌面应用(.NET 8)+ **100% Cloudflare 托管后端**(Workers + D1,零自有服务器)。中文名 **奶娃Flash**,英文名 **Nwflash**,缩写 **NWF**。
 
 - 桌面端启动**强制登录**(账号由后台创建),登录后即可使用,不对用户扣点 / 限次。
 - 拿 ROM 链路:`api.nwflash.cc.cd`(Worker)持 VOTA 凭据 → 版本授权校验 → 返回 OTA 直链 → 桌面端下载解包刷写。
@@ -50,7 +50,7 @@ VivoKsu 工具/
 | 域 | Worker | 角色 |
 | --- | --- | --- |
 | `api.nwflash.cc.cd` | `nwflash-rom` | 桌面登录(`/api/login`)、ROM 查询(`/api/rom`,强制 token + 版本门禁 + 记日志)、版本策略(`/api/app/version`) |
-| `web.nwflash.cc.cd` | `nwflash-web` | 管理控制台:管理员登录 / VivoKsu 版本控制(强制更新) / 用户管理 / 访问日志 |
+| `web.nwflash.cc.cd` | `nwflash-web` | 管理控制台:管理员登录 / Nwflash 版本控制(强制更新) / 用户管理 / 访问日志 |
 
 **D1 `nwflash-db`** 由两个 Worker 共用:
 
@@ -58,7 +58,7 @@ VivoKsu 工具/
 | --- | --- |
 | `admins` / `admin_sessions` | 后台管理员 + 会话(PBKDF2 + HttpOnly Cookie) |
 | `api_users` | 客户端账号 = 桌面登录账号(username + password + token + enabled + banned) |
-| `app_versions` | VivoKsu 版本控制(version + min_version + download_url + enabled) |
+| `app_versions` | Nwflash 版本控制(version + min_version + download_url + enabled) |
 | `access_logs` | 每次 `/api/rom` 查询的审计(用户 / PD / 版本 / URL / 状态) |
 
 ## 五、常见任务 → 去哪
@@ -84,4 +84,4 @@ VivoKsu 工具/
 - **桌面端**:336 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
 - **在线会话**:客户端每 5s 心跳保持在线;后台「在线状态」实时查看会话(用户/版本/IP/时长)并**强制下线**(≤5s 内客户端退出);客户端「在线状态」页查看在线用户与时长;心跳 force_exit / 封禁 / 426 均走防变砖退出(刷写中先取消、等 Idle 再退)。
 - **操作门禁 + 使用日志**:客户端每个用户操作运行前经服务端 `POST /api/operation/authorize` 许可(默认放行、封禁/停用拒绝);执行后批量上传使用日志,后台「使用日志」按操作分类查看。
-- **软件菜单 + 驱动安装**:「软件」页展示 VivoKsu 版本 / USB 驱动 / scrcpy / payload_dumper 就绪状态;启动检测到未装 vivo USB 驱动时弹窗提醒,一键以管理员权限静默安装(pnputil 通配符递归装 ADB / fastboot / 联发科驱动 + 写 adb_usb.ini)。
+- **软件菜单 + 驱动安装**:「软件」页展示 Nwflash 版本 / USB 驱动 / scrcpy / payload_dumper 就绪状态;启动检测到未装 vivo USB 驱动时弹窗提醒,一键以管理员权限静默安装(pnputil 通配符递归装 ADB / fastboot / 联发科驱动 + 写 adb_usb.ini)。

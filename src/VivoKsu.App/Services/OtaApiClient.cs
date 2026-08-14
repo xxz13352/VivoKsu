@@ -27,7 +27,7 @@ public sealed class OtaApiClient
         this.http = http;
         BaseUrl = baseUrl;
         // 每个请求带客户端版本号,服务端据此做强制更新校验。
-        http.DefaultRequestHeaders.TryAddWithoutValidation("X-VivoKsu-Version", AppInfo.Version);
+        http.DefaultRequestHeaders.TryAddWithoutValidation("X-Nwflash-Version", AppInfo.Version);
     }
 
     /// <summary>默认服务端地址:Cloudflare Worker 上的 VivoKsu ROM 代理(域名 nwflash.cc.cd)。</summary>

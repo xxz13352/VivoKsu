@@ -22,7 +22,7 @@ public sealed class AppVersionService : IDisposable
     {
         this.baseUrl = baseUrl;
         this.http = http;
-        http.DefaultRequestHeaders.TryAddWithoutValidation("X-VivoKsu-Version", AppInfo.Version);
+        http.DefaultRequestHeaders.TryAddWithoutValidation("X-Nwflash-Version", AppInfo.Version);
     }
 
     /// <summary>查询版本策略。任何失败都返回 <see cref="VersionCheckResult.AllowAll"/>(不阻塞启动)。</summary>

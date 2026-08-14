@@ -1,16 +1,16 @@
 /**
- * Cloudflare Worker —— Vivo ROM OTA 链接代理 + VivoKsu 版本门禁。
+ * Cloudflare Worker —— Vivo ROM OTA 链接代理 + Nwflash 版本门禁。
  * 桌面应用带 PD + 版本号查询,Worker 持 VOTA 凭据,
  * 转发到 VOTA API(https://api.otau.cc.cd)取 OTA 下载链接,不向客户端暴露 token。
  *
  * 端点:
  *   GET /health                          -> { status, source }
- *   GET /api/app/version?current=X       -> VivoKsu 版本策略(免登录,启动拦截用)
+ *   GET /api/app/version?current=X       -> Nwflash 版本策略(免登录,启动拦截用)
  *   POST /api/heartbeat                  -> 在线会话心跳(鉴权;检测强制下线 / 封禁 / 426)
  *   GET /api/online                      -> 在线用户列表(鉴权;仅显示名/版本/时长,不含 username/IP)
  *   GET /api/rom?pd=X&version=Y          -> { pd, version, url, name, sizeBytes, sha256 }
  *
- * 版本门禁:所有请求必须带 X-VivoKsu-Version 头;低于后台「版本号控制」的最低版本 → 426。
+ * 版本门禁:所有请求必须带 X-Nwflash-Version 头;低于后台「版本号控制」的最低版本 → 426。
  *
  * 错误映射:NOT_FOUND/not found->404, AUTH_FAIL->401, INSUFFICIENT_CREDITS->402,
  * FORBIDDEN->403, RATE_LIMITED->429, UPDATE_REQUIRED->426, 其它->502。
@@ -25,7 +25,7 @@ export interface Env {
   VOTA_ACTION?: string;
   /** 平台版本白名单,默认 0.1.0。 */
   VOTA_VER?: string;
-  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):访问日志 + VivoKsu 版本控制 + 在线会话。 */
+  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):访问日志 + Nwflash 版本控制 + 在线会话。 */
   DB: D1Database;
   /** 心跳写节流(ms):同一会话 last_seen 至少隔这么久才写一次 D1。默认 60000。 */
   HEARTBEAT_WRITE_INTERVAL_MS?: string;
@@ -38,7 +38,7 @@ export interface Env {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-VivoKsu-Version",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Nwflash-Version",
 };
 
 export default {
@@ -53,7 +53,7 @@ export default {
         return json({ status: "ok", source: "VotaApiRomSource" }, 200);
       }
 
-      // VivoKsu 版本策略(免登录,桌面端启动拦截用)。
+      // Nwflash 版本策略(免登录,桌面端启动拦截用)。
       if (url.pathname === "/api/app/version" && request.method === "GET") {
         return appVersion(env, request, url);
       }
@@ -454,7 +454,7 @@ async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
 }
 
 /* ------------------------------------------------------------------ */
-/* VivoKsu 版本控制(强制更新)                                           */
+/* Nwflash 版本控制(强制更新)                                           */
 /* ------------------------------------------------------------------ */
 
 /** 版本号 "1.0.0" 式逐段比较:返回 <0 / 0 / >0。非法段按 0。 */
@@ -476,9 +476,9 @@ function parseVersion(v: string): number[] {
   });
 }
 
-/** 请求携带的客户端版本(X-VivoKsu-Version 头)。 */
+/** 请求携带的客户端版本(X-Nwflash-Version 头)。 */
 function clientVersion(request: Request): string {
-  return request.headers.get("X-VivoKsu-Version")?.trim() || "";
+  return request.headers.get("X-Nwflash-Version")?.trim() || "";
 }
 
 /** 生效策略:启用的 app_versions 行中版本最高者;无启用行 → null。 */
@@ -516,7 +516,7 @@ async function checkAppVersion(env: Env, request: Request): Promise<Response | n
   const current = clientVersion(request);
   if (current && compareVersions(current, policy.min_version) < 0) {
     return json({
-      error: "请更新 VivoKsu 到最新版本后继续使用。",
+      error: "请更新 Nwflash 到最新版本后继续使用。",
       code: "UPDATE_REQUIRED",
       latest: policy.version,
       min: policy.min_version,

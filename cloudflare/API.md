@@ -1,13 +1,13 @@
 # api.nwflash.cc.cd —— API 文档
 
-`api.nwflash.cc.cd` 是 VivoKsu 的 ROM OTA 链接代理服务(Cloudflare Worker `nwflash-rom`)。它唯一持有 VOTA API Token,接收客户端的 **PD + 版本号**,转发到 VOTA 取回 OTA 下载链接。
+`api.nwflash.cc.cd` 是 Nwflash 的 ROM OTA 链接代理服务(Cloudflare Worker `nwflash-rom`)。它唯一持有 VOTA API Token,接收客户端的 **PD + 版本号**,转发到 VOTA 取回 OTA 下载链接。
 
 - **Base URL**: `https://api.nwflash.cc.cd`
 - **上游**: `https://api.otau.cc.cd`(VOTA,不对外暴露,不改动)
 - **协议**: HTTPS + JSON(Cloudflare 边缘 TLS 1.3)
 - **CORS**: 已允许跨域(`Access-Control-Allow-Origin: *`)
 - **鉴权**: 可选 `Authorization: Bearer <API token>`(token 由后台「用户管理」生成;不带则记为匿名)
-- **版本门禁**: 所有请求带 `X-VivoKsu-Version` 头;版本低于后台「版本号控制」的最低版本 → **426 强制更新**(见 [版本门禁](#版本门禁强制更新))
+- **版本门禁**: 所有请求带 `X-Nwflash-Version` 头;版本低于后台「版本号控制」的最低版本 → **426 强制更新**(见 [版本门禁](#版本门禁强制更新))
 - **日志**: 每次查询记入 D1(按用户),可在 `web.nwflash.cc.cd` 查看
 - **在线会话**: 登录后客户端每 5s 心跳(`POST /api/heartbeat`)保持在线、接收强制下线;`GET /api/online` 查在线用户(显示名/时长)。管理端「在线状态」可强制下线。心跳数据存 D1 `online_sessions`,会话超过 120s 未心跳即视为离线(Worker Cron 兜底清理)
 - **操作门禁**: 客户端每个用户操作运行前询问 `POST /api/operation/authorize`(默认放行;封禁/停用拒绝);执行后批量上传 `POST /api/usage/logs` 使用日志(按操作分类存储)
@@ -32,7 +32,7 @@
 
 ### `GET /api/app/version?current=<客户端版本>`
 
-VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)。返回后台「版本号控制」的生效策略(启用的版本中最高者)。
+Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)。返回后台「版本号控制」的生效策略(启用的版本中最高者)。
 
 **参数**
 
@@ -45,7 +45,7 @@ VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 {
   "latest": "1.2.0",
   "min": "1.0.0",
-  "download_url": "https://example.com/VivoKsu-1.2.0.zip",
+  "download_url": "https://example.com/Nwflash-1.2.0.zip",
   "update_required": true,
   "force_update": true
 }
@@ -67,16 +67,16 @@ VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 | 头 | 必填 | 说明 |
 | --- | --- | --- |
-| `X-VivoKsu-Version` | ✅ | 桌面端当前版本号(如 `1.0.0`)。低于后台「版本号控制」最低版本 → **426** |
+| `X-Nwflash-Version` | ✅ | 桌面端当前版本号(如 `1.0.0`)。低于后台「版本号控制」最低版本 → **426** |
 
 **426 响应**(`code: UPDATE_REQUIRED`)
 ```json
 {
-  "error": "请更新 VivoKsu 到最新版本后继续使用。",
+  "error": "请更新 Nwflash 到最新版本后继续使用。",
   "code": "UPDATE_REQUIRED",
   "latest": "1.2.0",
   "min": "1.0.0",
-  "download_url": "https://example.com/VivoKsu-1.2.0.zip"
+  "download_url": "https://example.com/Nwflash-1.2.0.zip"
 }
 ```
 
@@ -227,14 +227,14 @@ VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 ### `GET /api/rom?pd=<PD>&version=<版本>`
 
-按 **PD 码 + 版本号** 解析 OTA 下载链接。**必须携带登录 token**。所有请求也须带 `X-VivoKsu-Version`(见 [版本门禁](#版本门禁强制更新))。
+按 **PD 码 + 版本号** 解析 OTA 下载链接。**必须携带登录 token**。所有请求也须带 `X-Nwflash-Version`(见 [版本门禁](#版本门禁强制更新))。
 
 **请求头**
 
 | 头 | 说明 |
 | --- | --- |
 | `Authorization: Bearer <token>` | **必填**。API 用户 token(登录或后台「用户管理」获取)。无 / 无效 → 401;封禁 → 403 |
-| `X-VivoKsu-Version` | **必填**。客户端版本号,低于后台最低版本 → 426 |
+| `X-Nwflash-Version` | **必填**。客户端版本号,低于后台最低版本 → 426 |
 
 **参数**
 
@@ -274,7 +274,7 @@ VivoKsu **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 | `401` | `请先登录。` | 未携带 `Authorization: Bearer` token |
 | `401` | `API token 无效或已停用。` | token 无效 / 账号被停用 |
 | `403` | `账号已被封禁。` | 账号被封禁(后台操作) |
-| `426` | `请更新 VivoKsu 到最新版本后继续使用。` | **客户端版本低于后台最低版本,强制更新**(详见 [版本门禁](#版本门禁强制更新)) |
+| `426` | `请更新 Nwflash 到最新版本后继续使用。` | **客户端版本低于后台最低版本,强制更新**(详见 [版本门禁](#版本门禁强制更新)) |
 | `401` | `AUTH_FAIL` 文本 | VOTA 认证失败(worker 的 token 无效 / 被吊销) |
 | `402` | `INSUFFICIENT_CREDITS` 文本 | 运营方(VOTA)账户信用点不足 —— 仅影响该版本解析,非用户计费 |
 | `403` | `FORBIDDEN` 文本 | VOTA 拒绝(VOTA_VER 不在白名单等) |
@@ -295,7 +295,7 @@ curl "https://api.nwflash.cc.cd/api/rom?pd=PD2417&version=99.99"
 
 ## 上游计费 / 信用点(运营方成本,不向用户收费)
 
-每次成功调用 `resolve_url` 扣 **1 信用点**;`resolve_flash_url`(线刷包)扣 **3 信用点**。信用点归属 **worker 所持 token 的账户(运营方)** —— 这是 VivoKsu 运营方在上游 VOTA 的成本,由开发者承担,**不对 VivoKsu 用户做任何扣点 / 按次计费**。用户只要登录即可查询,不限制次数。`record not found` / 参数错误不扣点。当前余额可在 VOTA 平台查看。
+每次成功调用 `resolve_url` 扣 **1 信用点**;`resolve_flash_url`(线刷包)扣 **3 信用点**。信用点归属 **worker 所持 token 的账户(运营方)** —— 这是 Nwflash 运营方在上游 VOTA 的成本,由开发者承担,**不对 Nwflash 用户做任何扣点 / 按次计费**。用户只要登录即可查询,不限制次数。`record not found` / 参数错误不扣点。当前余额可在 VOTA 平台查看。
 
 ## 配置
 
@@ -334,17 +334,17 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | --- | --- |
 | 2026-08-13 | 初始部署:worker `nwflash-rom`,自定义域 `api.nwflash.cc.cd`;`/health` + `/api/rom` 代理 VOTA `resolve_url`;token 存 worker 机密;错误映射 400/401/402/403/404/429/500/502 |
 | 2026-08-13 | **接入后台系统**:共用 D1(`nwflash-db`);`/api/rom` 增加 版本号控制(未启用版本→404)、API 用户 token 认证(可选,无效→401)、按用户记访问日志。后台管理见 `web.nwflash.cc.cd`(登录 / 版本 / 用户 / 日志) |
-| 2026-08-13 | **桌面端登录(商业工具)**:api_users 加 username/password(PBKDF2);新增 `POST /api/login`(账号密码→token)与 `GET /api/me`(校验 token);VivoKsu 桌面端启动强制登录 |
+| 2026-08-13 | **桌面端登录(商业工具)**:api_users 加 username/password(PBKDF2);新增 `POST /api/login`(账号密码→token)与 `GET /api/me`(校验 token);Nwflash 桌面端启动强制登录 |
 | 2026-08-13 | **强制登录 + 封禁**:`/api/rom` 必须携带 token(无→401 请先登录);api_users 加 `banned`,封禁用户禁止登录与查询(登录 401 / 查询 403);后台支持封禁/解封 |
 | 2026-08-13 | 明确商业模型:账号授权制 —— 用户登录即可查询、不按次计费;上游 VOTA 信用点由运营方承担 |
-| 2026-08-14 | **VivoKsu 版本门禁(强制更新)**:新增 `GET /api/app/version`(免登录策略查询);所有请求带 `X-VivoKsu-Version` 头,低于后台最低版本 → **426 UPDATE_REQUIRED**;**移除 ROM 白名单** —— `/api/rom` 不再做 PD+版本门禁,登录即可解析任意版本 |
+| 2026-08-14 | **Nwflash 版本门禁(强制更新)**:新增 `GET /api/app/version`(免登录策略查询);所有请求带 `X-Nwflash-Version` 头,低于后台最低版本 → **426 UPDATE_REQUIRED**;**移除 ROM 白名单** —— `/api/rom` 不再做 PD+版本门禁,登录即可解析任意版本 |
 | 2026-08-14 | **在线会话心跳 + 强制下线**:D1 新增 `online_sessions` / `admin_audit_log`;`POST /api/heartbeat`(每 5s,检测强制下线/封禁/426)、`GET /api/online`(客户端视角在线列表,仅显示名/版本/时长,不含 username/IP);管理端「在线状态」可强制下线。服务端:per-token 心跳限速 + 每用户会话数上限 + 60s 写节流 + epoch 秒时间戳 + `last_seen` 索引 + Cron 兜底清理 |
 | 2026-08-14 | **操作许可门禁 + 使用日志**:`POST /api/operation/authorize`(客户端每个用户操作运行前询问,默认放行、封禁/停用拒绝);`POST /api/usage/logs`(使用日志批量上传,按 `operation_kind` 分类存储);D1 新增 `usage_logs` 表;管理端「使用日志」查看/筛选 |
 
 ## 管理后台
 
 - 地址:`https://web.nwflash.cc.cd`(详见 `web/README.md`)。
-- 功能:管理员登录、**VivoKsu 版本控制(强制更新)**、API 用户管理(token 生成/轮换/停用)、访问日志查看、**在线状态(实时会话 + 强制下线)**、**使用日志(客户端操作分类)**。
+- 功能:管理员登录、**Nwflash 版本控制(强制更新)**、API 用户管理(token 生成/轮换/停用)、访问日志查看、**在线状态(实时会话 + 强制下线)**、**使用日志(客户端操作分类)**。
 
 ## 代码结构
 

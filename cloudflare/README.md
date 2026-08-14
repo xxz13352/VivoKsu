@@ -1,9 +1,9 @@
-# VivoKsu Cloudflare Worker(ROM OTA 代理 + 商业门禁)
+# Nwflash Cloudflare Worker(ROM OTA 代理 + 商业门禁)
 
 > **接口契约见 [API.md](API.md)** —— 端点、参数、响应、错误码、计费、功能记录。
 > **后台管理见 [web/README.md](web/README.md)** —— `web.nwflash.cc.cd`。
 
-VivoKsu 的**整个服务端都托管在 Cloudflare,零自有服务器**:
+Nwflash 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 
 - **API**:Worker `nwflash-rom`,部署在 **`api.nwflash.cc.cd`** —— 登录、版本控制、ROM 解析、访问日志、**在线会话(心跳 / 强制下线 / 在线列表)**。
 - **后台**:Worker `nwflash-web`,部署在 **`web.nwflash.cc.cd`** —— 管理员 / 版本 / 用户 / 日志 / **在线状态(强制下线)** 管理。

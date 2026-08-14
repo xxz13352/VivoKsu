@@ -1,4 +1,4 @@
-# VivoKsu 项目架构文档
+# Nwflash 项目架构文档
 
 > Vivo 手机刷机 / Root 工具箱。Windows WPF 桌面应用(.NET 8) + Cloudflare Worker API + Web 后台。
 > 本文描述系统整体架构、模块职责、关键数据流与设计决策。业务细节见 [safeflash-ota.md](safeflash-ota.md)、[../cloudflare/API.md](../cloudflare/API.md)。
@@ -20,7 +20,7 @@
 
 ## 1. 系统总览
 
-**商业定位**:VivoKsu 是**商业付费工具** —— 桌面端启动必须用后台创建的账号登录(付费授权),未登录不可进入主界面;**登录后即可使用,不做按次扣点 / 配额计费**(上游 VOTA 的信用点由运营方承担,见 §4.5);每次 ROM 查询按用户审计。**服务端 100% 托管在 Cloudflare**(Workers + D1),**零自有服务器**:认证、版本授权、计费、审计与后台管理全部在 Cloudflare Edge。
+**商业定位**:Nwflash 是**商业付费工具** —— 桌面端启动必须用后台创建的账号登录(付费授权),未登录不可进入主界面;**登录后即可使用,不做按次扣点 / 配额计费**(上游 VOTA 的信用点由运营方承担,见 §4.5);每次 ROM 查询按用户审计。**服务端 100% 托管在 Cloudflare**(Workers + D1),**零自有服务器**:认证、版本授权、计费、审计与后台管理全部在 Cloudflare Edge。
 
 系统分三层,**上游 VOTA 凭据只在 Worker 上,从不进入桌面端**:
 
@@ -52,7 +52,7 @@ flowchart LR
 ```
 
 - **桌面端**持有账号密码或本地 token,通过 `api.nwflash.cc.cd` 登录、查询 ROM 链接,直接下载并刷写。
-- **Worker** 唯一持有 VOTA API Token(secret),校验登录、做 VivoKsu 版本门禁、转发到 VOTA 并记访问日志。
+- **Worker** 唯一持有 VOTA API Token(secret),校验登录、做 Nwflash 版本门禁、转发到 VOTA 并记访问日志。
 - **Web 后台**管理用户 / 版本 / 日志,与 API 共用同一个 D1 数据库。
 
 ### 关键原则
@@ -61,7 +61,7 @@ flowchart LR
 | --- | --- |
 | **凭据隔离** | VOTA Token 只存 Worker secret;桌面端代码无 `api.otau.cc.cd` 与 token |
 | **商业门禁** | 桌面端启动必须登录(`/api/login`);`/api/rom` 强制带 token,封禁用户 403 |
-| **版本控制** | 后台「版本号控制」登记 VivoKsu 客户端版本;版本低于最低版本 → 服务端 **426 强制更新** |
+| **版本控制** | 后台「版本号控制」登记 Nwflash 客户端版本;版本低于最低版本 → 服务端 **426 强制更新** |
 | **按用户审计** | 每次 ROM 查询写 `access_logs`(用户 / PD / 版本 / URL / 状态) |
 | **任务原子性** | 所有耗时操作经 `OperationCoordinator` 串行、可取消、失败即停、进度 100ms 节流 |
 | **零自有服务器** | 全部后端跑在 Cloudflare Workers + D1;无任何自托管服务端代码 |
@@ -118,8 +118,8 @@ flowchart TD
 要点:
 
 - **每次启动强制登录**:无本地免登录 —— 每次启动必弹登录窗,`/api/login` 通过才进主界面;token 不持久化,仅本次会话注入 `OtaApiClient`([LoginService.cs](src/VivoKsu.App/Services/LoginService.cs) 用 `ConfigureAwait(false)`,不依赖 UI 上下文)。
-- **退出清理**:`OnExit` 用 `DispatcherFrame` 泵消息最多 5s 等 `composition.StopAsync()` 完成 —— 清理下载的 Vivo 临时 gzip 与各盘 `VivoKsu\safe-flash` staging,并停监视/镜像进程。
-- **崩溃日志**:未捕获异常写 `%LOCALAPPDATA%\VivoKsu\crash.log`(商业工具排查用)。
+- **退出清理**:`OnExit` 用 `DispatcherFrame` 泵消息最多 5s 等 `composition.StopAsync()` 完成 —— 清理下载的 Vivo 临时 gzip 与各盘 `Nwflash\safe-flash` staging,并停监视/镜像进程。
+- **崩溃日志**:未捕获异常写 `%LOCALAPPDATA%\Nwflash\crash.log`(商业工具排查用)。
 - **登录后程序消失修复**:`ShowDialog` 关闭触发 `OnLastWindowClose` 退出 —— 改为主窗口显式 `Closed += Shutdown()`。
 
 ### 3.2 组合根与依赖组装(无第三方 DI)
@@ -326,7 +326,7 @@ flowchart TD
 | --- | --- |
 | `VivoRootResourceService` | Root 管理器 APK 校验(**SHA-256 白名单** + AndroidManifest.zip 检查,防被替换) |
 | `VivoVendorBootProcessor` | vendor_boot 补丁处理(官方 / GKI 内核),GKI 缺失跳过;输出已存在先删再重试 |
-| `VivoKsuDevicePatchService` | 设备 patch 应用(经 adb root) |
+| `NwflashDevicePatchService` | 设备 patch 应用(经 adb root) |
 | `QuickFlashService` | 快速刷写:`is-userspace` getvar 失败降级不抛;`expectedSerial` 防串号错刷;**一律 fastbootd**(不再提供 Fastboot/bootloader 选择) |
 | `MirrorService` + `ScrcpyProvisioningService` | scrcpy 投屏;启动用 **`ADB` 环境变量** 指向内置 adb(scrcpy v4.0 移除了 `--adb-path`);自动投屏开关关闭时取消在途协调;`.staging` 目录清理 |
 | `AdbFileService` | ADB root 通道文件浏览 / 上传 / 下载 / 删除 |
@@ -344,7 +344,7 @@ flowchart TD
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
 | `/health` | GET | 健康检查 |
-| `/api/app/version?current=` | GET | VivoKsu 版本策略(免登录,启动强制更新拦截) |
+| `/api/app/version?current=` | GET | Nwflash 版本策略(免登录,启动强制更新拦截) |
 | `/api/login` | POST | 账号密码 → API token(桌面端登录) |
 | `/api/me` | GET | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
 | `/api/rom?pd=&version=` | GET | 解析 OTA 直链(强制登录 + 版本门禁 + 记日志) |
@@ -358,7 +358,7 @@ flowchart TD
     A -->|有| B{api_users 查询<br/>token 匹配}
     B -->|无/停用| 401B["401 token 无效或已停用"]
     B -->|banned=1| 403["403 账号已被封禁"]
-    B -->|有效| V{"X-VivoKsu-Version<br/>低于最低版本?"}
+    B -->|有效| V{"X-Nwflash-Version<br/>低于最低版本?"}
     V -->|是| 426["426 强制更新"]
     V -->|否| D["代理 VOTA resolve_url"]
     D --> E["200 {url,...} + 写 access_logs"]
@@ -366,7 +366,7 @@ flowchart TD
 
 - **桌面端登录**(`/api/login`):`api_users.username` + PBKDF2-SHA256(100k 迭代)校验密码,成功返回该用户 token;封禁 / 停用 / 未设密码分别报错。
 - **`/api/me`**:token → `{loggedIn, name}`(校验 token;桌面端已改为每次强制登录,不再调用它免登录)。
-- **版本门禁**:所有请求带 `X-VivoKsu-Version`;低于后台「版本号控制」最低版本 → **426 强制更新**;启动时走免登录的 `/api/app/version`。
+- **版本门禁**:所有请求带 `X-Nwflash-Version`;低于后台「版本号控制」最低版本 → **426 强制更新**;启动时走免登录的 `/api/app/version`。
 - **`/api/rom`**:强制 token;**封禁用户 403**,版本门禁 426,成功 200 并记日志。
 
 ### 4.3 D1 数据模型(`nwflash-db`)
@@ -376,7 +376,7 @@ flowchart TD
 | `admins` | 后台管理员 | username / salt / password_hash |
 | `admin_sessions` | 后台会话(7 天 cookie) | admin_id / token / expires_at |
 | `api_users` | 客户端账号 = 桌面登录账号 | username(唯一) / name / token / password / salt / enabled / **banned** |
-| `app_versions` | VivoKsu 版本控制(强制更新) | version / min_version / download_url / enabled,`UNIQUE(version)` |
+| `app_versions` | Nwflash 版本控制(强制更新) | version / min_version / download_url / enabled,`UNIQUE(version)` |
 | `access_logs` | 每次 ROM 查询审计 | api_user_id / api_user_name / pd / version / url / status |
 
 ### 4.4 错误映射
@@ -392,7 +392,7 @@ flowchart TD
 
 ### 4.5 上游计费 / 信用点(运营方成本)
 
-每次成功 `resolve_url` 扣 **1 信用点**;`resolve_flash_url`(线刷)扣 **3 信用点**。信用点归属 **Worker 所持 VOTA token 的账户(运营方)**。这是 VivoKsu 运营方在上游 VOTA 的成本,**不对 VivoKsu 用户做任何扣点 / 按次计费** —— 用户只要登录即可查询;`record not found` / 参数错误不扣点。
+每次成功 `resolve_url` 扣 **1 信用点**;`resolve_flash_url`(线刷)扣 **3 信用点**。信用点归属 **Worker 所持 VOTA token 的账户(运营方)**。这是 Nwflash 运营方在上游 VOTA 的成本,**不对 Nwflash 用户做任何扣点 / 按次计费** —— 用户只要登录即可查询;`record not found` / 参数错误不扣点。
 
 ### 4.6 商业运营闭环
 
@@ -409,9 +409,9 @@ flowchart LR
 ```
 
 - **授权载体**:`api_users` 账号 = 登录凭证 + API token + `enabled`/`banned`。桌面端登录拿 token,ROM 查询凭 token。
-- **版本授权**:`app_versions` 表登记 VivoKsu 客户端版本,启用的最高版本为当前策略;客户端低于 `min_version` → 服务端 426 强制更新,后台可随时开关。
+- **版本授权**:`app_versions` 表登记 Nwflash 客户端版本,启用的最高版本为当前策略;客户端低于 `min_version` → 服务端 426 强制更新,后台可随时开关。
 - **审计闭环**:每次查询写 `access_logs`,后台可查谁在何时查了哪个版本、成功与否。
-- **用户不按次计费**:VivoKsu 用户登录即可查询、不限次数;上游扣的是运营方账户的信用点(§4.5),`402` = 运营方上游余额不足,客户端提示「服务端信用点不足」。
+- **用户不按次计费**:Nwflash 用户登录即可查询、不限次数;上游扣的是运营方账户的信用点(§4.5),`402` = 运营方上游余额不足,客户端提示「服务端信用点不足」。
 - **处罚通道**:后台封禁 / 停用 → 登录 `401`、查询 `403`,**即时生效**——token 无本地缓存,天然可吊销。
 
 ---
@@ -421,14 +421,14 @@ flowchart LR
 `web.nwflash.cc.cd`(`cloudflare/web/src/index.ts` + 单文件 SPA `admin.html`,详见 [cloudflare/web/README.md](../cloudflare/web/README.md)):
 
 - **界面(2026-08 重写,「固件登记簿」)**:机加工纸面画布 + 发丝刻线 + 单一账簿蓝的系统控制台。**五个菜单** —— 版本号控制 / 用户管理 / 访问日志 / **在线状态(LIVE)** / **使用日志**;**改密降级为头部维护按钮,不是第六菜单**。
-  - **服务健康带**:VivoKsu 当前版本 / API 用户 / **在线人数** / 近 24h 查询 / 近 24h 失败(客户端 best-effort 统计,基于最近 500 条日志)。
-  - **VivoKsu 版本控制**:登记版本号(版本 / 最低版本 / 下载地址)→ № 页边码登记册 + 双墨状态(● 启用 / ○ 停用)+ 当前策略结算;客户端低于「最低版本」→ 强制更新。
+  - **服务健康带**:Nwflash 当前版本 / API 用户 / **在线人数** / 近 24h 查询 / 近 24h 失败(客户端 best-effort 统计,基于最近 500 条日志)。
+  - **Nwflash 版本控制**:登记版本号(版本 / 最低版本 / 下载地址)→ № 页边码登记册 + 双墨状态(● 启用 / ○ 停用)+ 当前策略结算;客户端低于「最低版本」→ 强制更新。
   - **用户管理**:建号 → **撕口一次性 token 凭证**(可复制);重置密码 / 换 token / 封禁 / 停用 / 删除。
   - **在线状态**:实时会话登记册(显示名 + 登录账号 / 版本 / IP / 上线 / 最后心跳 / 在线时长),每 10s 刷新;**强制下线**给会话打 `force_exit`,客户端下一个心跳(≤5s)退出进程(刷写中先取消、等 Idle 再退,不打断分区写入)。kick 写 `admin_audit_log` 审计。
   - **使用日志**:客户端每次用户操作运行前经 `POST /api/operation/authorize` 许可(默认放行、封禁/停用拒绝),执行后批量上传 `POST /api/usage/logs`;后台按 `operation_kind` 分类查看(分类/状态筛选 + 分页)。
   - **访问日志**:带列标尺的查询读出口,OKAY / FAIL 双墨,URL 断行省略。
   - **操作反馈以 OKAY/FAIL/INFO 协议行回显** —— 登记版本 / 建用户 / 换 token 都写成协议行,操作历史即审计轨迹。
-- **功能**:管理员登录、VivoKsu 版本控制(强制更新)、API 用户管理(建号 / token 生成轮换 / 停用 / 封禁)、访问日志。
+- **功能**:管理员登录、Nwflash 版本控制(强制更新)、API 用户管理(建号 / token 生成轮换 / 停用 / 封禁)、访问日志。
 - **安全**:强制 HTTPS + HSTS + CSP + HttpOnly/Secure 会话 Cookie + PBKDF2-SHA256 密码哈希 + 随机 session token;首启用 `ADMIN_SEED_PASSWORD` 播种初始管理员。
 - 与 `api.nwflash.cc.cd` **共用同一 D1 `nwflash-db`** —— API 侧执行版本校验 / 认证 / 记日志,后台负责管理。
 
@@ -454,7 +454,7 @@ sequenceDiagram
     A->>SF: 存 token(OtaApiClient.Token)
     U->>SF: 下载+刷入
     SF->>API: GET /api/rom?pd=PD2417&version=16.2.12.0.W10.V000L1
-    API->>D: 校验 token + X-VivoKsu-Version(版本门禁)
+    API->>D: 校验 token + X-Nwflash-Version(版本门禁)
     API->>V: POST resolve_url(Bearer VOTA token)
     V-->>API: {url, ...}
     API->>D: INSERT access_logs
@@ -545,7 +545,7 @@ sequenceDiagram
 - **唯一 fastboot.exe 待真机验证**:fastboot 35.0.2-eng 在 vivo fastbootd 逐个刷分区是唯一未真机实测环节。
 - **下载盘需 ~25GB 空闲且最好是 SSD**:bezzad 多分片随机写 HDD 会停滞(staging 自动优先系统盘)。
 - **VOTA 链接有时效**:`url` 带 `sign`/`t`,拿到后尽快下载。
-- **版本门禁**:客户端版本低于后台「VivoKsu 版本控制」最低版本 → 服务端 426 强制更新,桌面端弹更新窗。
+- **版本门禁**:客户端版本低于后台「Nwflash 版本控制」最低版本 → 服务端 426 强制更新,桌面端弹更新窗。
 
 ---
 
