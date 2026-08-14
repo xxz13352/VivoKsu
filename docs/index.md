@@ -21,6 +21,7 @@
 | **架构文档** | 系统总览、桌面端模块职责、Worker / D1、数据流、设计决策与踩坑 | [architecture.md](architecture.md) |
 | **API 契约** | `api.nwflash.cc.cd` 端点、参数、错误码、计费、功能记录 | [../cloudflare/API.md](../cloudflare/API.md) |
 | **后台文档** | `web.nwflash.cc.cd`「固件登记簿」界面、安全、部署、功能记录 | [../cloudflare/web/README.md](../cloudflare/web/README.md) |
+| **用户门户文档** | `user.nwflash.cc.cd`「我的账户」界面、API、安全、部署 | [../cloudflare/user/README.md](../cloudflare/user/README.md) |
 | **线刷文档** | VIVO 安全刷写流程、三种 OTA 格式、下载 / 解包 / 刷写细节 | [safeflash-ota.md](safeflash-ota.md) |
 | **Worker 部署** | `cloudflare/` 部署、机密、变量 | [../cloudflare/README.md](../cloudflare/README.md) |
 

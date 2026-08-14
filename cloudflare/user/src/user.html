@@ -118,7 +118,7 @@
   .tab{appearance:none;border:none;background:transparent;padding:10px 20px;font-size:13.5px;font-weight:600;color:var(--muted);cursor:pointer;border-radius:11px;transition:background .18s,color .18s,box-shadow .18s;white-space:nowrap}
   .tab:hover{color:var(--ink)}
   .tab.active{background:linear-gradient(135deg,var(--teal),#0B6A60);color:#fff;box-shadow:0 8px 20px -8px rgba(14,122,111,.6)}
-  .tab .n{font-family:var(--mono);font-size:10px;opacity:.7;margin-right:7px}
+  .tab .n{font-family:var(--mono);font-size:10px;margin-right:7px}
 
   .panel{padding:22px 24px}
   .panel-head{display:flex;align-items:center;gap:10px;margin-bottom:16px}
@@ -141,7 +141,7 @@
   .log-row .st{flex:0 0 72px;font-weight:600}
   .log-row .st.ok{color:var(--teal)}
   .log-row .st.fail{color:var(--rose)}
-  .log-row .url{flex:1;min-width:0;color:#3A6B8C;overflow:hidden;text-overflow:ellipsis}
+  .log-row .url{flex:1;min-width:0;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
   .log-row .url .arr{color:var(--faint);margin-right:5px}
   .empty{color:var(--faint);font-size:13px;text-align:center;padding:38px 10px;font-family:var(--mono)}
   .foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--line)}
@@ -185,7 +185,9 @@
     .stage{padding:0 12px;margin-top:16px}
     .panel{padding:18px 16px}
     .log-row .url{display:none}
+    .lbl-row span:nth-child(5){display:none}
     .log-row .v{flex:1;min-width:0}
+    .lbl-row span:nth-child(3){flex:1;min-width:0}
     .foot .pg{margin-left:0;width:100%;justify-content:flex-end}
     .sess-row{flex-wrap:wrap}
     .sess-row .dur{text-align:left}
@@ -209,7 +211,7 @@
       <p class="login-sub">查看你的查询日志、在线会话与账户设置。<br>使用授权账号登录,密码与桌面端一致。</p>
       <div class="field"><label for="loginUser">账号</label><input id="loginUser" autocomplete="username" placeholder="登录账号"></div>
       <div class="field"><label for="loginPass">密码</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
-      <label class="remember" for="loginRemember"><input type="checkbox" id="loginRemember" checked> 记住登录</label>
+      <label class="remember" for="loginRemember"><input type="checkbox" id="loginRemember"> 记住登录</label>
       <div class="err" id="loginErr" role="alert"></div>
       <button id="loginBtn" class="btn btn-primary btn-block" style="height:46px">登录</button>
     </div>
@@ -236,21 +238,21 @@
 
   <main class="stage">
     <nav class="tabs" role="tablist" aria-label="账户菜单">
-      <button class="tab active" data-tab="logs" role="tab" aria-selected="true" tabindex="0"><span class="n">01</span>我的日志</button>
-      <button class="tab" data-tab="sessions" role="tab" aria-selected="false" tabindex="-1"><span class="n">02</span>在线会话</button>
-      <button class="tab" data-tab="password" role="tab" aria-selected="false" tabindex="-1"><span class="n">03</span>修改密码</button>
+      <button class="tab active" id="tab-logs" data-tab="logs" role="tab" aria-controls="sec-logs" aria-selected="true" tabindex="0"><span class="n">01</span>我的日志</button>
+      <button class="tab" id="tab-sessions" data-tab="sessions" role="tab" aria-controls="sec-sessions" aria-selected="false" tabindex="-1"><span class="n">02</span>在线会话</button>
+      <button class="tab" id="tab-password" data-tab="password" role="tab" aria-controls="sec-password" aria-selected="false" tabindex="-1"><span class="n">03</span>修改密码</button>
     </nav>
 
     <!-- 我的日志 -->
-    <section class="page" id="sec-logs" role="tabpanel">
+    <section class="page" id="sec-logs" role="tabpanel" aria-labelledby="tab-logs" tabindex="0">
       <div class="shell">
         <div class="glass panel">
           <div class="panel-head">
             <h2 class="panel-title">我的查询日志 <span class="hint">· 你的 ROM 查询流水</span></h2>
             <span class="live" id="logsLive"><span class="dot"></span>LIVE</span>
           </div>
-          <div class="lbl-row"><span style="flex:0 0 74px">时间</span><span style="flex:0 0 78px">PD</span><span style="flex:0 0 178px">版本</span><span style="flex:0 0 72px">状态</span><span>URL</span></div>
-          <div class="ledger" id="logBody"><div class="empty">正在加载日志…</div></div>
+          <div class="lbl-row" role="row"><span role="columnheader" style="flex:0 0 74px">时间</span><span role="columnheader" style="flex:0 0 78px">PD</span><span role="columnheader" style="flex:0 0 178px">版本</span><span role="columnheader" style="flex:0 0 72px">状态</span><span role="columnheader">URL</span></div>
+          <div class="ledger" id="logBody" role="table" aria-label="我的查询日志"><div class="empty">正在加载日志…</div></div>
           <div class="foot">
             <input id="logPd" placeholder="按 PD 过滤" class="mono" aria-label="按 PD 过滤">
             <button id="logRefresh" class="btn btn-sm btn-ghost">刷新</button>
@@ -265,14 +267,14 @@
     </section>
 
     <!-- 在线会话 -->
-    <section class="page" id="sec-sessions" role="tabpanel" hidden>
+    <section class="page" id="sec-sessions" role="tabpanel" aria-labelledby="tab-sessions" tabindex="0" hidden>
       <div class="shell">
         <div class="glass panel">
           <div class="panel-head">
             <h2 class="panel-title">在线会话 <span class="hint">· 桌面端登录实例</span></h2>
             <span class="live" id="sessLive"><span class="dot"></span>LIVE</span>
           </div>
-          <div class="ledger" id="sessionBody"></div>
+          <div class="ledger" id="sessionBody" role="table" aria-label="在线会话"></div>
           <div class="empty" id="sessionEmpty" style="display:none">当前没有在线会话。桌面端登录后每 5s 心跳,会出现在这里。</div>
           <div class="tally" id="sessionTally"></div>
         </div>
@@ -280,7 +282,7 @@
     </section>
 
     <!-- 修改密码 -->
-    <section class="page" id="sec-password" role="tabpanel" hidden>
+    <section class="page" id="sec-password" role="tabpanel" aria-labelledby="tab-password" tabindex="0" hidden>
       <div class="shell" style="max-width:480px">
         <div class="glass panel">
           <div class="panel-head">
@@ -335,16 +337,23 @@ function fmtDur(sec) { sec=Math.max(0,Math.floor(Number(sec)||0)); const h=Math.
 const STORE_KEY = "nwflash_portal_token";
 function saveToken(t, remember) { token = t; if (remember) localStorage.setItem(STORE_KEY, t); else sessionStorage.setItem(STORE_KEY, t); }
 function loadToken() { return localStorage.getItem(STORE_KEY) || sessionStorage.getItem(STORE_KEY); }
-async function logoutLocal() { token = null; me = null; localStorage.removeItem(STORE_KEY); sessionStorage.removeItem(STORE_KEY); showLogin(); }
+async function logoutLocal() {
+  token = null; me = null;
+  stopSessPoll(); // 离开会话页即停轮询(否则登出后每 10s 对登录页发请求)
+  if (meTimer) { clearTimeout(meTimer); meTimer = null; }
+  localStorage.removeItem(STORE_KEY); sessionStorage.removeItem(STORE_KEY);
+  showLogin();
+}
 
 /* ---------- 视图 ---------- */
-function showLogin() { $("loginView").style.display = "grid"; $("appView").style.display = "none"; }
+function showLogin() { $("loginView").style.display = "grid"; $("appView").style.display = "none"; $("loginUser").focus(); }
 function showApp() {
   $("loginView").style.display = "none"; $("appView").style.display = "block";
   $("meLabel").textContent = me.name || me.username;
   $("meAv").textContent = (me.name || me.username || "A").charAt(0).toUpperCase();
   switchTab("logs");
   refreshMe();
+  document.querySelector(".tab").focus(); // 焦点随视图切换到第一个页签
 }
 
 /* ---------- 登录 ---------- */
@@ -380,6 +389,20 @@ function switchTab(tab) {
   if (tab === "password") $("pwCurrent").focus();
 }
 document.querySelectorAll(".tab").forEach(n => n.onclick = () => switchTab(n.dataset.tab));
+document.querySelector(".tabs").addEventListener("keydown", (e) => {
+  if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key)) return;
+  e.preventDefault();
+  const tabs = Array.from(document.querySelectorAll(".tab"));
+  let next;
+  if (e.key === "Home") next = 0;
+  else if (e.key === "End") next = tabs.length - 1;
+  else {
+    const idx = tabs.findIndex(t => t.dataset.tab === currentTab);
+    next = (idx + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  }
+  tabs[next].focus();
+  switchTab(tabs[next].dataset.tab);
+});
 
 /* ---------- 我的信息 / 在线状态 ---------- */
 let meTimer = null;
@@ -415,12 +438,13 @@ async function loadLogs() {
       const status = l.status >= 400 ? "✕ FAILED" : "✓ OKAY";
       const row = document.createElement("div");
       row.className = "log-row";
+      row.setAttribute("role", "row");
       row.innerHTML =
-        `<span class="t">[${esc(t)}]</span>` +
-        `<span class="p">${esc(l.pd)}</span>` +
-        `<span class="v">${esc(l.version)}</span>` +
-        `<span class="st ${cls}">${status}</span>` +
-        `<span class="url">${l.url ? `<span class="arr">→</span>${esc(l.url)}` : ""}</span>`;
+        `<span role="cell" class="t">[${esc(t)}]</span>` +
+        `<span role="cell" class="p">${esc(l.pd)}</span>` +
+        `<span role="cell" class="v">${esc(l.version)}</span>` +
+        `<span role="cell" class="st ${cls}">${status}</span>` +
+        `<span role="cell" class="url">${l.url ? `<span class="arr">→</span>${esc(l.url)}` : ""}</span>`;
       body.appendChild(row);
     });
     const totalPages = Math.max(1, Math.ceil(logTotal / LOG_PAGE_SIZE));
@@ -448,13 +472,13 @@ async function loadSessions() {
     sessionCache = rows;
     $("sessionEmpty").style.display = rows.length ? "none" : "block";
     $("sessionBody").innerHTML = rows.map((s, i) => `
-      <div class="sess-row">
-        <div class="dev">
+      <div class="sess-row" role="row">
+        <div role="cell" class="dev">
           <div class="d"><span>${esc(me ? me.name || me.username : "我的会话")}</span><span class="tag">${esc(s.client_version || "v?")}</span>${s.force_exit ? '<span class="tag" style="color:var(--rose)">已强制下线</span>' : ""}</div>
           <div class="m">${esc(s.ip || "-")} · 上线 ${fmtClock(s.connected_at)} · 最后心跳 ${fmtClock(s.last_seen_at)}</div>
         </div>
-        <div class="dur"><span class="k">ONLINE</span>${fmtDur(s.duration_seconds)}</div>
-        <div class="ops">${s.force_exit ? "" : `<button class="btn btn-sm kick" onclick="kickSessionIndex(${i})">⟠ 强制下线</button>`}</div>
+        <div role="cell" class="dur"><span class="k">ONLINE</span>${fmtDur(s.duration_seconds)}</div>
+        <div role="cell" class="ops">${s.force_exit ? "" : `<button class="btn btn-sm kick" onclick="kickSessionIndex(${i})">⟠ 强制下线</button>`}</div>
       </div>`).join("");
     $("sessionTally").innerHTML = `<span>当前在线 <b>${data.count || 0}</b> 会话</span><span class="right">每 ${SESS_POLL_MS / 1000}s 刷新 · 强制下线后桌面端 ≤5s 退出</span>`;
     refreshMe();

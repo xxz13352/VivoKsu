@@ -22,6 +22,29 @@ export interface Env {
 
 const PBKDF2_ITERATIONS = 100_000;
 
+/* 登录限流:内存 token bucket(按 CF-Connecting-IP + username,尽力而为;worker 级,配合边缘限流更佳) */
+const LOGIN_WINDOW_MS = 60_000;
+const LOGIN_MAX_ATTEMPTS = 8;
+const loginBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function loginAllowed(request: Request, username: string): boolean {
+  const ip = request.headers.get("CF-Connecting-IP")
+    || request.headers.get("x-forwarded-for")
+    || "unknown";
+  const key = ip + ":" + username.toLowerCase();
+  const now = Date.now();
+  if (loginBuckets.size > 10_000) {
+    for (const [k, b] of loginBuckets) { if (b.resetAt <= now) loginBuckets.delete(k); }
+  }
+  let bucket = loginBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    bucket = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+    loginBuckets.set(key, bucket);
+  }
+  bucket.count++;
+  return bucket.count <= LOGIN_MAX_ATTEMPTS;
+}
+
 const SECURE_HEADERS: Record<string, string> = {
   "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
   "X-Content-Type-Options": "nosniff",
@@ -125,6 +148,11 @@ async function login(request: Request, env: Env): Promise<Response> {
   const password = body?.password as string || "";
   if (!username || !password) return json({ error: "缺少用户名或密码。" }, 400);
 
+  // 登录限流:先限流再查库(同一 IP+账号 8 次/分钟,防枚举轰炸)。
+  if (!loginAllowed(request, username)) {
+    return json({ error: "尝试过于频繁,请稍后再试。" }, 429);
+  }
+
   const user = await env.DB
     .prepare("SELECT id, username, name, token, password, salt, enabled, banned FROM api_users WHERE username = ?")
     .bind(username)
@@ -217,10 +245,10 @@ async function kickMySession(request: Request, env: Env, user: AuthUser): Promis
 
 /** GET /api/me/logs?limit&offset&pd —— 我自己的 ROM 查询日志。 */
 async function myLogs(url: URL, env: Env, user: AuthUser): Promise<Response> {
-  const limitRaw = Number(url.searchParams.get("limit"));
-  const offsetRaw = Number(url.searchParams.get("offset"));
-  const limit = Math.max(1, Math.min(Number.isFinite(limitRaw) ? limitRaw : 100, 500));
-  const offset = Math.max(0, Number.isFinite(offsetRaw) ? Math.floor(offsetRaw) : 0);
+  const limitRaw = url.searchParams.get("limit");
+  const offsetRaw = url.searchParams.get("offset");
+  const limit = Math.max(1, Math.min(limitRaw === null ? 100 : (Number(limitRaw) || 100), 500));
+  const offset = Math.max(0, offsetRaw === null ? 0 : Math.floor(Number(offsetRaw) || 0));
   const pd = url.searchParams.get("pd")?.trim() || "";
 
   let where = "WHERE api_user_id = ?";
