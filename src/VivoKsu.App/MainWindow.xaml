@@ -57,30 +57,78 @@
       <Grid>
         <Grid.RowDefinitions>
           <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <StackPanel Margin="12,25,12,0">
+        <StackPanel Margin="12,25,12,16">
           <TextBlock Text="WORKSPACE" FontFamily="Cascadia Mono" FontWeight="SemiBold" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="13,0,0,12"/>
+
+          <!-- 设备概览(AppPage.Overview) -->
           <Button Content="设备概览" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.Overview}">
             <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.Overview}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
           </Button>
-          <Button Content="快速刷写" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.FastbootFlash}">
-            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FastbootFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
-          </Button>
-          <Button Content="ADB 投屏" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.AdbActions}">
-            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.AdbActions}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
-          </Button>
-          <Border Height="1" Background="{StaticResource EdgeBrush}" Margin="13,16,13,14"/>
-          <Button Content="Vivo ROOT" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.RootTools}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.RootTools}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+
+          <!-- 文件管理(AppPage.FileTransfer) -->
           <Button Content="文件管理" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.FileTransfer}">
             <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FileTransfer}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
           </Button>
-          <Button Content="可视刷写" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.LineFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.LineFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
-          <Button Content="固件提取" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.FirmwareExtract}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FirmwareExtract}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
-          <Button Content="VIVO 线刷" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.SafeFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+
+          <!-- ADB 投屏(AppPage.AdbActions) -->
+          <Button Content="ADB 投屏" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.AdbActions}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.AdbActions}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
+
           <Border Height="1" Background="{StaticResource EdgeBrush}" Margin="13,16,13,14"/>
-          <Button Content="在线状态" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.OnlineStatus}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.OnlineStatus}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
-          <Button Content="软件" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.Software}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.Software}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+
+          <!-- 快速刷写(AppPage.FastbootFlash) -->
+          <Button Content="快速刷写" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.FastbootFlash}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FastbootFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
+
+          <!-- 可视刷写(AppPage.LineFlash) -->
+          <Button Content="可视刷写" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.LineFlash}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.LineFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
+
+          <!-- VIVO 线刷(AppPage.SafeFlash) -->
+          <Button Content="VIVO 线刷" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.SafeFlash}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
+
+          <!-- 固件提取(AppPage.FirmwareExtract) -->
+          <Button Content="固件提取" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.FirmwareExtract}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.FirmwareExtract}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
+
+          <!-- Vivo ROOT(AppPage.RootTools) -->
+          <Button Content="Vivo ROOT" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.RootTools}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.RootTools}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
+
+          <Border Height="1" Background="{StaticResource EdgeBrush}" Margin="13,16,13,14"/>
+
+          <!-- 在线状态(AppPage.OnlineStatus) -->
+          <Button Content="在线状态" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.OnlineStatus}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.OnlineStatus}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
+
+          <!-- 软件(AppPage.Software) -->
+          <Button Content="软件" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.Software}">
+            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.Software}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style>
+          </Button>
         </StackPanel>
+
+        <!-- 底部账号栏:账号 id + 当前时间 + 登出 -->
+        <Border Grid.Row="1" Background="#F2F8F7" BorderBrush="{StaticResource EdgeBrush}" BorderThickness="0,1,0,0" Padding="12,10">
+          <StackPanel>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <TextBlock Text="账号 " FontSize="9" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+              <TextBlock Grid.Column="1" Text="{Binding AccountName}" FontSize="10" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+            </Grid>
+            <TextBlock Text="{Binding CurrentTimeText}" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
+            <Button Content="登出" Style="{StaticResource ToolButtonStyle}" Command="{Binding LogoutCommand}" Margin="0,8,0,0" Padding="0,5" HorizontalContentAlignment="Center"/>
+          </StackPanel>
+        </Border>
       </Grid>
     </Border>
 
