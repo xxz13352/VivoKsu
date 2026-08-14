@@ -103,7 +103,8 @@ public sealed class AppComposition
             safeFlash,
             Monitor,
             Coordinator,
-            Online);
+            Online,
+            new SoftwareViewModel(AppContext.BaseDirectory, preferences: toolPreferences));
         Monitor.DeviceRefreshed += MainViewModel.OnDeviceRefreshedAsync;
 
         firmwareExtract.SetFlashContinuation((image, partition) =>

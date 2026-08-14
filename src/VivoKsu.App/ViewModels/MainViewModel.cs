@@ -41,6 +41,8 @@ public partial class MainViewModel : ObservableObject
 
     public OperationLogViewModel Logs { get; }
 
+    public SoftwareViewModel Software { get; }
+
     public IOperationCoordinator? Coordinator => coordinator;
 
     public IRelayCommand<AppPage> SelectPageCommand { get; }
@@ -62,7 +64,8 @@ public partial class MainViewModel : ObservableObject
         SafeFlashViewModel? safeFlash = null,
         IDeviceMonitor? deviceMonitor = null,
         IOperationCoordinator? coordinator = null,
-        OnlineViewModel? online = null)
+        OnlineViewModel? online = null,
+        SoftwareViewModel? software = null)
     {
         var fallbackLogs = new OperationLogService();
         var fallbackCliRunner = new FastbootCliRunner(Path.Combine(Path.GetTempPath(), "unavailable-fastboot.exe"));
@@ -100,6 +103,7 @@ public partial class MainViewModel : ObservableObject
             coordinator,
             fallbackCliRunner);
         Online = online ?? new OnlineViewModel(fallbackOtaClient, new HeartbeatService(fallbackOtaClient));
+        Software = software ?? new SoftwareViewModel();
         SelectPageCommand = new RelayCommand<AppPage>(page => SelectedPage = page);
         RefreshDeviceCommand = new AsyncRelayCommand(() => RefreshDeviceAsync(logActivity: true));
     }

@@ -79,6 +79,7 @@
           <Button Content="VIVO 线刷" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.SafeFlash}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.SafeFlash}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
           <Border Height="1" Background="{StaticResource EdgeBrush}" Margin="13,16,13,14"/>
           <Button Content="在线状态" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.OnlineStatus}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.OnlineStatus}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
+          <Button Content="软件" Command="{Binding SelectPageCommand}" CommandParameter="{x:Static models:AppPage.Software}"><Button.Style><Style TargetType="Button" BasedOn="{StaticResource NavButtonStyle}"><Style.Triggers><DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.Software}"><Setter Property="Background" Value="#EAF7F5"/><Setter Property="BorderBrush" Value="{StaticResource ConnectionBrush}"/><Setter Property="BorderThickness" Value="3,0,0,0"/><Setter Property="Foreground" Value="#08766E"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger></Style.Triggers></Style></Button.Style></Button>
         </StackPanel>
       </Grid>
     </Border>
@@ -1099,7 +1100,7 @@
     </Grid>
 
     <!-- 在线状态(心跳 / 在线用户 / 时长) -->
-    <Grid>
+    <Grid Grid.Row="1" Grid.Column="1">
       <Grid.Style>
         <Style TargetType="Grid">
           <Setter Property="Visibility" Value="Collapsed"/>
@@ -1215,6 +1216,152 @@
         </Border>
       </Grid>
     </Grid>
+
+    <ScrollViewer Grid.Row="1" Grid.Column="1" Background="{StaticResource CanvasBrush}" VerticalScrollBarVisibility="Auto">
+      <ScrollViewer.Style>
+        <Style TargetType="ScrollViewer">
+          <Setter Property="Visibility" Value="Collapsed"/>
+          <Style.Triggers>
+            <DataTrigger Binding="{Binding SelectedPage}" Value="{x:Static models:AppPage.Software}">
+              <Setter Property="Visibility" Value="Visible"/>
+            </DataTrigger>
+          </Style.Triggers>
+        </Style>
+      </ScrollViewer.Style>
+      <StackPanel Margin="12,30,12,32">
+        <Grid Margin="0,0,0,22">
+          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel>
+            <TextBlock Text="SOFTWARE / STATUS" Style="{StaticResource PageEyebrowStyle}"/>
+            <TextBlock Text="软件" Style="{StaticResource PageTitleStyle}"/>
+            <TextBlock Text="VivoKsu 版本与依赖组件的就绪状态" Style="{StaticResource PageSubtitleStyle}"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+            <Button Content="重新检测" Style="{StaticResource ToolButtonStyle}" Command="{Binding Software.RefreshCommand}" Padding="12,7" Margin="0"/>
+          </StackPanel>
+        </Grid>
+
+        <Border Style="{StaticResource PanelBorderStyle}" Padding="0">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="1"/><RowDefinition Height="Auto"/><RowDefinition Height="1"/><RowDefinition Height="Auto"/><RowDefinition Height="1"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Border Background="#F6FAFA" BorderBrush="#D8E8E5" BorderThickness="0,0,0,1" CornerRadius="8,8,0,0" Padding="18,14">
+              <Grid>
+                <TextBlock Text="组件状态" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <TextBlock Text="SOFTWARE COMPONENTS" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource ConnectionBrush}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+              </Grid>
+            </Border>
+
+            <Grid Grid.Row="1" Margin="20,16,20,14">
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="VivoKsu 客户端" FontSize="14" FontWeight="SemiBold"/>
+                <TextBlock Text="{Binding Software.AppVersion, StringFormat=版本 v{0}}" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
+              </StackPanel>
+              <Border Grid.Column="1" CornerRadius="4" Padding="8,3" Background="#EAF7F5" VerticalAlignment="Center" Margin="12,0,0,0">
+                <TextBlock Text="就绪" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource ConnectionBrush}"/>
+              </Border>
+            </Grid>
+
+            <Border Grid.Row="2" Background="{StaticResource EdgeBrush}"/>
+
+            <Grid Grid.Row="3" Margin="20,16,20,14">
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="手机 USB 驱动" FontSize="14" FontWeight="SemiBold"/>
+                <TextBlock Text="DriverStore 关键 INF / BBK 安装目录 / 卸载注册表键" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
+              </StackPanel>
+              <Border Grid.Column="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center" Margin="12,0,0,0">
+                <Border.Style>
+                  <Style TargetType="Border">
+                    <Setter Property="Background" Value="#FBEAE7"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding Software.IsDriverInstalled}" Value="True"><Setter Property="Background" Value="#EAF7F5"/></DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding Software.DriverStatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold">
+                  <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Foreground" Value="#C85B46"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Software.IsDriverInstalled}" Value="True"><Setter Property="Foreground" Value="{StaticResource ConnectionBrush}"/></DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </TextBlock.Style>
+                </TextBlock>
+              </Border>
+            </Grid>
+
+            <Border Grid.Row="4" Background="{StaticResource EdgeBrush}"/>
+
+            <Grid Grid.Row="5" Margin="20,16,20,14">
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="scrcpy 投屏工具" FontSize="14" FontWeight="SemiBold"/>
+                <TextBlock Text="投屏所需 scrcpy.exe(内置 / PATH)" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
+              </StackPanel>
+              <Border Grid.Column="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center" Margin="12,0,0,0">
+                <Border.Style>
+                  <Style TargetType="Border">
+                    <Setter Property="Background" Value="#FBEAE7"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding Software.IsScrcpyReady}" Value="True"><Setter Property="Background" Value="#EAF7F5"/></DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding Software.ScrcpyStatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold">
+                  <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Foreground" Value="#C85B46"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Software.IsScrcpyReady}" Value="True"><Setter Property="Foreground" Value="{StaticResource ConnectionBrush}"/></DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </TextBlock.Style>
+                </TextBlock>
+              </Border>
+            </Grid>
+
+            <Border Grid.Row="6" Background="{StaticResource EdgeBrush}"/>
+
+            <Grid Grid.Row="7" Margin="20,16,20,14">
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="payload_dumper 解包工具" FontSize="14" FontWeight="SemiBold"/>
+                <TextBlock Text="固件提取所需 payload_dumper.exe" FontFamily="Cascadia Mono" FontSize="9" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
+              </StackPanel>
+              <Border Grid.Column="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center" Margin="12,0,0,0">
+                <Border.Style>
+                  <Style TargetType="Border">
+                    <Setter Property="Background" Value="#FBEAE7"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding Software.IsPayloadReady}" Value="True"><Setter Property="Background" Value="#EAF7F5"/></DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Border.Style>
+                <TextBlock Text="{Binding Software.PayloadStatusText}" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold">
+                  <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Foreground" Value="#C85B46"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding Software.IsPayloadReady}" Value="True"><Setter Property="Foreground" Value="{StaticResource ConnectionBrush}"/></DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </TextBlock.Style>
+                </TextBlock>
+              </Border>
+            </Grid>
+          </Grid>
+        </Border>
+
+        <Border Style="{StaticResource PanelBorderStyle}" Padding="18" Margin="0,14,0,0">
+          <StackPanel>
+            <TextBlock Text="需要帮助?" FontSize="13" FontWeight="SemiBold"/>
+            <TextBlock Text="驱动未安装时,启动会自动弹出驱动提醒;也可点右上角「重新检测」刷新各组件状态。" FontSize="11" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+          </StackPanel>
+        </Border>
+      </StackPanel>
+    </ScrollViewer>
 
     <Border Grid.Row="1" Grid.Column="2" Background="{StaticResource RailBrush}" BorderBrush="{StaticResource EdgeBrush}" BorderThickness="1,0,0,0">
       <Grid>

@@ -83,6 +83,9 @@ public partial class App : Application
             mainWindow.Closed += (_, _) => Shutdown();
             MainWindow = mainWindow;
             mainWindow.Show();
+
+            // 驱动提醒:后台检测手机 USB 驱动,未安装则弹「安装/取消」窗(不阻塞主界面)。
+            CheckAndRemindDriverAsync();
         }
         catch (UpdateRequiredException update)
         {
@@ -118,6 +121,28 @@ public partial class App : Application
     {
         var window = new UpdateRequiredWindow(latest, minVersion, downloadUrl);
         window.ShowDialog();
+    }
+
+    /// <summary>
+    /// 驱动检测提醒:后台扫描驱动安装信号,未安装则弹「安装/取消」窗。
+    /// 检测或弹窗失败都不阻塞主界面使用。
+    /// </summary>
+    private async void CheckAndRemindDriverAsync()
+    {
+        try
+        {
+            var installed = await Task.Run(() => VivoDriverDetector.CreateDefault().IsInstalled());
+            if (installed)
+            {
+                return;
+            }
+
+            new DriverReminderWindow().ShowDialog();
+        }
+        catch
+        {
+            // 驱动检测失败(权限/路径异常等)不打扰客户。
+        }
     }
 
     protected override void OnExit(ExitEventArgs eventArgs)

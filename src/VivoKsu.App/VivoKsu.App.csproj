@@ -53,6 +53,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
+    <!-- vivo USB 驱动安装包(未安装驱动时由启动提醒弹窗引导静默安装) -->
+    <None Update="drivers\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

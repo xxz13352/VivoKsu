@@ -183,6 +183,8 @@ flowchart LR
 | `FirmwareExtract` | 固件提取 | `FirmwareExtractViewModel` |
 | `SafeFlash` | VIVO 线刷 | `SafeFlashViewModel` |
 | `OperationLog` | 操作日志 | `OperationLogViewModel` |
+| `OnlineStatus` | 在线状态 | `OnlineViewModel` |
+| `Software` | 软件 | `SoftwareViewModel` |
 
 技术底座:**CommunityToolkit.Mvvm 8.4**(`[ObservableProperty]` / `[RelayCommand]`)+ HandyControl 3.5.1 + teal 主题(参考 taste-skill 审美迭代)。
 
@@ -510,7 +512,7 @@ sequenceDiagram
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**328 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**336 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 

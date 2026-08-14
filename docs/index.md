@@ -40,7 +40,7 @@ VivoKsu 工具/
 │  ├─ web/src/index.ts       # web.nwflash.cc.cd · Worker nwflash-web(API + 托管 SPA)
 │  ├─ web/src/admin.html     # 「固件登记簿」后台单页(版本/用户/日志/在线/使用日志五菜单)
 │  └─ wrangler.toml          # D1 绑定 + 自定义域 + vars + Cron
-├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(328 用例)
+├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(336 用例)
 ├─ scripts/                  # Publish-Release.ps1 / Ensure-Scrcpy.ps1 / verify-*.ps1
 └─ docs/                     # 本文档 + architecture.md + safeflash-ota.md
 ```
@@ -81,6 +81,7 @@ VivoKsu 工具/
 
 - **后端**:全部 Cloudflare;旧自建 .NET 服务端已删除;api / web 均已部署。
 - **后台**:「固件登记簿」控制台(五菜单 + 服务健康带 + № 登记册 + 撕口 token 凭证 + OKAY/FAIL 协议回显)已上线。
-- **桌面端**:328 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
+- **桌面端**:336 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
 - **在线会话**:客户端每 5s 心跳保持在线;后台「在线状态」实时查看会话(用户/版本/IP/时长)并**强制下线**(≤5s 内客户端退出);客户端「在线状态」页查看在线用户与时长;心跳 force_exit / 封禁 / 426 均走防变砖退出(刷写中先取消、等 Idle 再退)。
 - **操作门禁 + 使用日志**:客户端每个用户操作运行前经服务端 `POST /api/operation/authorize` 许可(默认放行、封禁/停用拒绝);执行后批量上传使用日志,后台「使用日志」按操作分类查看。
+- **软件菜单 + 驱动安装**:「软件」页展示 VivoKsu 版本 / USB 驱动 / scrcpy / payload_dumper 就绪状态;启动检测到未装 vivo USB 驱动时弹窗提醒,一键以管理员权限静默安装(pnputil 通配符递归装 ADB / fastboot / 联发科驱动 + 写 adb_usb.ini)。
