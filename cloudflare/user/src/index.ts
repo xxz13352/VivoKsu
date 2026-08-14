@@ -22,27 +22,43 @@ export interface Env {
 
 const PBKDF2_ITERATIONS = 100_000;
 
-/* 登录限流:内存 token bucket(按 CF-Connecting-IP + username,尽力而为;worker 级,配合边缘限流更佳) */
-const LOGIN_WINDOW_MS = 60_000;
+/* 登录限流:D1 滑动窗口计数(跨 isolate 可靠;键 = ip|username,窗口 60s,上限 8 次)。
+   限流表 login_attempts(k, window_start, count),共享库 nwflash-db。 */
+const LOGIN_WINDOW_SEC = 60;
 const LOGIN_MAX_ATTEMPTS = 8;
-const loginBuckets = new Map<string, { count: number; resetAt: number }>();
 
-function loginAllowed(request: Request, username: string): boolean {
+async function loginAllowed(env: Env, request: Request, username: string): Promise<boolean> {
   const ip = request.headers.get("CF-Connecting-IP")
     || request.headers.get("x-forwarded-for")
     || "unknown";
-  const key = ip + ":" + username.toLowerCase();
-  const now = Date.now();
-  if (loginBuckets.size > 10_000) {
-    for (const [k, b] of loginBuckets) { if (b.resetAt <= now) loginBuckets.delete(k); }
+  const key = ip + "|" + username.toLowerCase();
+  const windowStart = Math.floor(Date.now() / 1000 / LOGIN_WINDOW_SEC) * LOGIN_WINDOW_SEC;
+
+  const row = await env.DB
+    .prepare("SELECT count FROM login_attempts WHERE k = ? AND window_start = ?")
+    .bind(key, windowStart)
+    .first<{ count: number }>();
+  if (!row) {
+    await env.DB
+      .prepare("INSERT INTO login_attempts (k, window_start, count) VALUES (?, ?, 1)")
+      .bind(key, windowStart)
+      .run();
+    return true;
   }
-  let bucket = loginBuckets.get(key);
-  if (!bucket || bucket.resetAt <= now) {
-    bucket = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
-    loginBuckets.set(key, bucket);
+  if (row.count >= LOGIN_MAX_ATTEMPTS) return false;
+  await env.DB
+    .prepare("UPDATE login_attempts SET count = count + 1 WHERE k = ? AND window_start = ?")
+    .bind(key, windowStart)
+    .run();
+
+  // 尽力清理:偶发删除 1 小时前的窗口,避免无限累积。
+  if (Math.random() < 0.02) {
+    await env.DB
+      .prepare("DELETE FROM login_attempts WHERE window_start < ?")
+      .bind(Math.floor(Date.now() / 1000) - 3600)
+      .run().catch(() => { /* 清理失败无碍 */ });
   }
-  bucket.count++;
-  return bucket.count <= LOGIN_MAX_ATTEMPTS;
+  return true;
 }
 
 const SECURE_HEADERS: Record<string, string> = {
@@ -149,7 +165,7 @@ async function login(request: Request, env: Env): Promise<Response> {
   if (!username || !password) return json({ error: "缺少用户名或密码。" }, 400);
 
   // 登录限流:先限流再查库(同一 IP+账号 8 次/分钟,防枚举轰炸)。
-  if (!loginAllowed(request, username)) {
+  if (!await loginAllowed(env, request, username)) {
     return json({ error: "尝试过于频繁,请稍后再试。" }, 429);
   }
 

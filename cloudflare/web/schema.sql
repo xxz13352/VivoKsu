@@ -105,3 +105,12 @@ CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(api_user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_kind ON usage_logs(operation_kind);
 CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_logs(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_event ON usage_logs(event_key);
+
+-- 登录限流(用户门户 /api/login;窗口滑动计数,防止枚举轰炸)
+CREATE TABLE IF NOT EXISTS login_attempts (
+  k TEXT NOT NULL,                    -- ip|username(小写)
+  window_start INTEGER NOT NULL,      -- 限流窗口起点(epoch 秒)
+  count INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (k, window_start)
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_window ON login_attempts(window_start);
