@@ -51,7 +51,7 @@ public partial class App : Application
 
             WriteCrashLog(e.Exception);
             e.Handled = true;
-            MessageBox.Show("发生错误: " + e.Exception.Message, "奶娃Flash", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show("发生错误: " + e.Exception.Message, "奶蛙Flash", MessageBoxButton.OK, MessageBoxImage.Error);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             WriteCrashLog(e.ExceptionObject as Exception);

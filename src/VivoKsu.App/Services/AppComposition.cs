@@ -199,7 +199,7 @@ public sealed class AppComposition
     public static AppComposition CreateDefault() => new(
         FastbootRsApiFactory.CreateDefault(),
         new SystemProcessRunner(),
-        notifyBlocked: message => MessageBox.Show(message, "奶娃Flash", MessageBoxButton.OK, MessageBoxImage.Information));
+        notifyBlocked: message => MessageBox.Show(message, "奶蛙Flash", MessageBoxButton.OK, MessageBoxImage.Information));
 
     public static AppComposition CreateForTesting(IFastbootRsNativeApi nativeApi, IProcessRunner processRunner) =>
         new(
@@ -327,7 +327,7 @@ public sealed class AppComposition
         Coordinator.CancelCurrent();
         MessageBox.Show(
             $"服务端要求退出: {reason}\n\n正在结束当前操作,完成后自动退出。",
-            "奶娃Flash",
+            "奶蛙Flash",
             MessageBoxButton.OK,
             MessageBoxImage.Information);
         // 用户关闭弹窗后再查一次(弥补消息丢失窗口);仍未结束则由 StateChanged 接管。

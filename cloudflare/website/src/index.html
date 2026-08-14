@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
-<meta name="description" content="奶娃Flash(Nwflash, NWF):Vivo 手机刷机与 Root 商业工具箱。Windows 桌面端一站式完成 OTA 下载、解包、线刷与 Root,商用授权,账号登录即用。">
-<title>奶娃Flash · Nwflash</title>
+<meta name="description" content="奶蛙Flash(Nwflash, NWF):Vivo 手机刷机与 Root 商业工具箱。Windows 桌面端一站式完成 OTA 下载、解包、线刷与 Root,商用授权,账号登录即用。">
+<title>奶蛙Flash · Nwflash</title>
 <style>
   /* ============================================================
-     Nwflash(奶娃Flash,NWF) 官网
+     Nwflash(奶蛙Flash,NWF) 官网
      高级白 + 液态玻璃:磨砂半透明白玻璃面板 + 高斯模糊 + 内高光
      + 发丝描边 + 顶部渐变光。Apple Liquid Glass 网页近似。
      浅色主题锁定,单一青色强调,数据一律等宽 mono。
@@ -90,9 +90,12 @@
   .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan-bright);box-shadow:0 0 10px rgba(47,214,200,.8);animation:beat 2.6s ease-in-out infinite}
   @keyframes beat{0%,100%{opacity:1}50%{opacity:.3}}
   .hero h1{font-size:clamp(44px,6vw,76px);font-weight:780;letter-spacing:-.022em;line-height:1.04;margin:26px 0 0;max-width:13ch}
-  .hero h1 .w{display:inline-block;opacity:0;transform:translateY(30px);filter:blur(8px);animation:wordin .9s cubic-bezier(.16,1,.3,1) forwards}
-  @keyframes wordin{to{opacity:1;transform:none;filter:none}}
+  .hero h1 .w{display:inline-block}
   .hero h1 .w.cyan{color:var(--cyan)}
+  @media (prefers-reduced-motion: no-preference){
+    .hero h1 .w{opacity:0;transform:translateY(30px);filter:blur(8px);animation:wordin .9s cubic-bezier(.16,1,.3,1) forwards}
+    @keyframes wordin{to{opacity:1;transform:none;filter:none}}
+  }
   .hero .sub{font-size:17px;color:var(--muted);line-height:1.8;max-width:48ch;margin-top:24px}
   .hero .sub code{font-family:var(--mono);font-size:14px;color:var(--cyan)}
   .cta-row{display:flex;gap:14px;margin-top:36px;flex-wrap:wrap}
@@ -252,7 +255,7 @@
     <div class="nav-in">
       <div class="brand">
         <div class="brand-mark">NWF</div>
-        <div class="t">奶娃Flash</div>
+        <div class="t">奶蛙Flash</div>
       </div>
       <div class="links">
         <a href="#features">功能</a>
@@ -266,7 +269,7 @@
   <!-- HERO -->
   <header class="hero">
     <div class="hero-copy">
-      <span class="pill"><span class="dot"></span>NWF · 奶娃Flash · Vivo 刷机与 Root 工具箱</span>
+      <span class="pill"><span class="dot"></span>NWF · 奶蛙Flash · Vivo 刷机与 Root 工具箱</span>
       <h1>
         <span class="w" style="animation-delay:.05s">Vivo</span>
         <span class="w" style="animation-delay:.15s">线刷</span>
@@ -474,7 +477,7 @@
     <div class="foot-in">
       <div class="foot-brand">
         <div class="brand-mark">NWF</div>
-        <div><div class="t">奶娃Flash</div><div class="s">VIVO FLASH · ROM TOOL</div></div>
+        <div><div class="t">奶蛙Flash</div><div class="s">VIVO FLASH · ROM TOOL</div></div>
       </div>
       <div class="foot-links">
         <a href="#features">功能</a>
@@ -483,7 +486,7 @@
         <a href="#download">下载</a>
       </div>
     </div>
-    <div class="copyright">© 2026 奶娃Flash(Nwflash)。Vivo 是维沃移动通信有限公司的注册商标,本工具与其无关联。</div>
+    <div class="copyright">© 2026 奶蛙Flash(Nwflash)。Vivo 是维沃移动通信有限公司的注册商标,本工具与其无关联。</div>
   </footer>
 
 <script>

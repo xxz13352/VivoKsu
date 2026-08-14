@@ -1,6 +1,6 @@
-# 奶娃Flash(NWflash)
+# 奶蛙Flash(NWflash)
 
-Vivo 手机刷机 / Root 工具箱 —— **商业付费工具**,Windows WPF 桌面应用(.NET 8)。**客户端统一显示「奶娃Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**。
+Vivo 手机刷机 / Root 工具箱 —— **商业付费工具**,Windows WPF 桌面应用(.NET 8)。**客户端统一显示「奶蛙Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**。
 
 提供 ADB / Fastboot 设备检测、分区可视刷写、快速刷写(KernelSU)、payload 解包与云端提取、ADB 投屏、文件管理等能力,全程中文界面、teal 主题。
 

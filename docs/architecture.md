@@ -1,4 +1,4 @@
-# 奶娃Flash(NWflash)项目架构文档
+# 奶蛙Flash(NWflash)项目架构文档
 
 > Vivo 手机刷机 / Root 工具箱。Windows WPF 桌面应用(.NET 8) + Cloudflare Worker API + Web 后台。
 > 本文描述系统整体架构、模块职责、关键数据流与设计决策。业务细节见 [safeflash-ota.md](safeflash-ota.md)、[../cloudflare/API.md](../cloudflare/API.md)。
@@ -7,14 +7,14 @@
 
 | 场景 | 名称 |
 | --- | --- |
-| **客户端显示名**(用户可见) | **奶娃Flash**(所有窗口标题 / 品牌文案 / MessageBox 统一显示这个) |
+| **客户端显示名**(用户可见) | **奶蛙Flash**(所有窗口标题 / 品牌文案 / MessageBox 统一显示这个) |
 | **代码 / 工程 / 服务名** | **NWflash**(程序集、命名空间、文档、目录路径) |
 | **缩写 / 品牌标记** | **NWF**(窗口角落方块标记) |
 | **域名 / Worker** | `nwflash.cc.cd`、`api.nwflash.cc.cd`、`web.nwflash.cc.cd`、`nwflash-rom`、`nwflash-web` |
 | **API 版本头** | `X-Nwflash-Version` |
 | **桌面端工程路径** | `src/VivoKsu.App`(历史遗留,暂不改名) |
 
-> ⚠️ **不要**把客户端 UI 文案写成 Nwflash——用户看到的应是「奶娃Flash」。技术标识(NWflash / X-Nwflash-Version / nwflash.cc.cd)与显示名是两套,各归其位。
+> ⚠️ **不要**把客户端 UI 文案写成 Nwflash——用户看到的应是「奶蛙Flash」。技术标识(NWflash / X-Nwflash-Version / nwflash.cc.cd)与显示名是两套,各归其位。
 
 ## 目录
 

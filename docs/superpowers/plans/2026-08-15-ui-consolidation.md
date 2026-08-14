@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 完成奶娃Flash 桌面端 5 项界面改动:文件管理传出弹保存对话框、右上角统一操作进度区(含固件提取/文件传输)、左下角账号+时间+登出、左侧菜单按刷机链路重排。
+**Goal:** 完成奶蛙Flash 桌面端 5 项界面改动:文件管理传出弹保存对话框、右上角统一操作进度区(含固件提取/文件传输)、左下角账号+时间+登出、左侧菜单按刷机链路重排。
 
 **Architecture:** 纯 WPF 界面 + ViewModel 增强。核心逻辑改动集中在 `AdbFileService`(新增按完整路径下载)、`FileManagerViewModel`(可注入保存位置选择器)、`MainViewModel`(账号/时钟/登出命令)、`AppComposition`(登出优雅下线事件)、`App.xaml.cs`(同进程回登录循环)。右上角进度区是纯 XAML 重构,现有 VM 进度属性全部复用。
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 客户端 UI 显示名统一用 **「奶娃Flash」**,任何 UI 文案禁止出现 "Nwflash"。
+- 客户端 UI 显示名统一用 **「奶蛙Flash」**,任何 UI 文案禁止出现 "Nwflash"。
 - 现有 **339 个测试必须全绿**(完成后只增不减)。进度区改动不得触碰任何现有 VM 可观测属性。
 - **不引入任何新第三方包**。
 - 所有可注入/可测试的接缝都用可选参数(默认走真实行为),不得破坏现有测试构造方式。
@@ -594,7 +594,7 @@ protected override void OnStartup(StartupEventArgs eventArgs)
 
         WriteCrashLog(e.Exception);
         e.Handled = true;
-        MessageBox.Show("发生错误: " + e.Exception.Message, "奶娃Flash", MessageBoxButton.OK, MessageBoxImage.Error);
+        MessageBox.Show("发生错误: " + e.Exception.Message, "奶蛙Flash", MessageBoxButton.OK, MessageBoxImage.Error);
     };
     AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         WriteCrashLog(e.ExceptionObject as Exception);
@@ -1044,7 +1044,7 @@ Expected: 全部 PASS(原 339 + 新增 6 = **345**)。若出现失败,先修复�
 
 - [ ] **Step 3: 复核命名约定与残留**
 
-- 新增 UI 文案只出现「奶娃Flash」,无 "Nwflash"。
+- 新增 UI 文案只出现「奶蛙Flash」,无 "Nwflash"。
 - `git status` 检查无遗漏/无多余文件(尤其不要把 `bin/`、`obj/` 提交)。
 
 - [ ] **Step 4: 提交**

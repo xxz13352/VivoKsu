@@ -123,7 +123,7 @@
               <TextBlock Text="NWF" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-              <TextBlock Text="奶娃Flash" Foreground="{StaticResource Ink}" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock Text="奶蛙Flash" Foreground="{StaticResource Ink}" FontSize="15" FontWeight="SemiBold"/>
               <TextBlock Text="UPDATE REQUIRED" FontFamily="Cascadia Mono" FontSize="8" FontWeight="SemiBold" Foreground="{StaticResource Muted}" Margin="0,2,0,0"/>
             </StackPanel>
           </StackPanel>
@@ -133,7 +133,7 @@
         <!-- 标题 + 说明 -->
         <StackPanel Grid.Row="1" Margin="0,24,0,0">
           <TextBlock Text="SECURE GATE · 版本门禁" FontFamily="Cascadia Mono" FontSize="9" FontWeight="SemiBold" Foreground="{StaticResource Teal}"/>
-          <TextBlock Text="需要更新 奶娃Flash" Margin="0,6,0,0" Foreground="{StaticResource Ink}" FontSize="22" FontWeight="Bold"/>
+          <TextBlock Text="需要更新 奶蛙Flash" Margin="0,6,0,0" Foreground="{StaticResource Ink}" FontSize="22" FontWeight="Bold"/>
           <TextBlock x:Name="ReasonText" Text="当前版本已被服务端停用,必须更新后才能继续使用。" Margin="0,8,0,0" Foreground="{StaticResource Muted}" FontSize="12.5" TextWrapping="Wrap" LineHeight="20"/>
         </StackPanel>
 

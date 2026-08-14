@@ -2,7 +2,7 @@
   "name": "nwflash-site",
   "version": "1.0.0",
   "private": true,
-  "description": "Nwflash(奶娃Flash)官网 —— nwflash.cc.cd",
+  "description": "Nwflash(奶蛙Flash)官网 —— nwflash.cc.cd",
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",

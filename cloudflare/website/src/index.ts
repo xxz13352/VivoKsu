@@ -1,5 +1,5 @@
 /**
- * nwflash.cc.cd —— Nwflash(奶娃Flash)官网托管 Worker。
+ * nwflash.cc.cd —— Nwflash(奶蛙Flash)官网托管 Worker。
  * 仅托管静态官网 index.html;与 api.nwflash.cc.cd / web.nwflash.cc.cd 无关。
  */
 

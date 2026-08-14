@@ -1,7 +1,7 @@
 <Window x:Class="VivoKsu.App.DriverReminderWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="奶娃Flash · 驱动提醒" Width="420" SizeToContent="Height"
+        Title="奶蛙Flash · 驱动提醒" Width="420" SizeToContent="Height"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI" TextOptions.TextFormattingMode="Display"
@@ -124,7 +124,7 @@
                 <TextBlock Text="NWF" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
               </Border>
               <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-                <TextBlock Text="奶娃Flash" Foreground="{StaticResource Ink}" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Text="奶蛙Flash" Foreground="{StaticResource Ink}" FontSize="15" FontWeight="SemiBold"/>
                 <TextBlock Text="DRIVER REMINDER" FontFamily="Cascadia Mono" FontSize="8" FontWeight="SemiBold" Foreground="{StaticResource Muted}" Margin="0,2,0,0"/>
               </StackPanel>
             </StackPanel>
