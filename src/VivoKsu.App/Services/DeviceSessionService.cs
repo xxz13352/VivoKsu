@@ -9,6 +9,7 @@ public sealed class DeviceSessionService : IDeviceRefreshService
     private readonly DeviceInfoService deviceInfo;
     private readonly OperationLogService logs;
     private int consecutiveAutomaticDisconnects;
+    private int consecutiveAutomaticFailures;
 
     public DeviceSessionService(
         FastbootRsBackend backend,
@@ -44,6 +45,7 @@ public sealed class DeviceSessionService : IDeviceRefreshService
         try
         {
             var snapshot = await backend.DiscoverAsync(cancellationToken);
+            consecutiveAutomaticFailures = 0;
             if (isAutomatic && session.IsBusy)
             {
                 return;
@@ -107,6 +109,25 @@ public sealed class DeviceSessionService : IDeviceRefreshService
                 {
                     logs.Write(OperationLogLevel.Error, exception.Message);
                 }
+
+                return;
+            }
+
+            // 自动刷新(3 秒心跳)不能再静默吞掉异常:持久后端故障(adb 服务
+            // 异常 / USB 枚举错误)会留下一个“已连接”的幻影设备,用户据此
+            // 操作全都会静默失败。首次失败记警告,连续多次仍失败则把会话降级
+            // 为未连接——瞬时的单次抖动不会触发,避免误拉设备。
+            consecutiveAutomaticFailures++;
+            if (consecutiveAutomaticFailures == 1)
+            {
+                logs.Write(OperationLogLevel.Warning, $"设备自动检测失败: {exception.Message}");
+            }
+
+            if (consecutiveAutomaticFailures >= 3 &&
+                session.ConnectionState != DeviceConnectionState.Disconnected)
+            {
+                logs.Write(OperationLogLevel.Error, "设备自动检测持续失败，已标记设备为未连接。");
+                session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.Disconnected, "--", "未连接"));
             }
         }
     }

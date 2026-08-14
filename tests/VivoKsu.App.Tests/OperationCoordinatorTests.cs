@@ -7,12 +7,16 @@ namespace VivoKsu.App.Tests;
 public class OperationCoordinatorTests
 {
     [Fact]
-    public async Task RunAsync_serializes_concurrent_operations_and_restores_idle_state()
+    public async Task RunAsync_rejects_a_concurrent_operation_while_another_is_running_and_restores_idle_state()
     {
-        var (coordinator, session, _) = CreateCoordinator();
+        // 全局只允许一个操作:另一个操作仍在跑时,新操作必须立即拒绝(抛
+        // OperationInProgressException)并通知,而不是静默排队让用户"点了没反应"。
+        var session = new DeviceSessionViewModel();
+        var logs = new OperationLogService();
+        var notified = string.Empty;
+        var coordinator = new OperationCoordinator(session, logs, message => notified = message);
         var firstEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseFirst = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var secondEntered = false;
 
         var first = coordinator.RunAsync(OperationKind.Flashing, "正在刷写 boot", async (_, token) =>
         {
@@ -21,19 +25,16 @@ public class OperationCoordinatorTests
         });
         await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        var second = coordinator.RunAsync(OperationKind.Rebooting, "正在重启设备", (_, _) =>
-        {
-            secondEntered = true;
-            return Task.CompletedTask;
-        });
+        var second = coordinator.RunAsync(OperationKind.Rebooting, "正在重启设备", (_, _) => Task.CompletedTask);
 
+        var exception = await Assert.ThrowsAsync<OperationInProgressException>(() => second);
+        Assert.Equal(OperationCoordinator.OperationInProgressMessage, exception.Message);
+        Assert.Equal(OperationCoordinator.OperationInProgressMessage, notified);
         Assert.True(coordinator.IsBusy);
-        Assert.False(secondEntered);
 
         releaseFirst.SetResult(true);
-        await Task.WhenAll(first, second);
+        await first;
 
-        Assert.True(secondEntered);
         Assert.False(coordinator.IsBusy);
         Assert.Equal(OperationKind.Idle, coordinator.State.Kind);
         Assert.Equal(OperationKind.Completed, session.OperationKind);

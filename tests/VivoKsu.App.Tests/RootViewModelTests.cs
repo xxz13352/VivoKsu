@@ -243,7 +243,7 @@ public sealed class RootViewModelTests
             }
         }
 
-        public void FastbootReboot(string? serial) { }
+        public void FastbootReboot(string? serial, string? target) { }
 
         public void Push(string? serial, string localPath, string remotePath) { }
 

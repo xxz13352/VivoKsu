@@ -11,6 +11,7 @@ public partial class MirrorViewModel : ObservableObject
     private readonly MirrorService mirror;
     private readonly ToolPathPreferences? preferences;
     private readonly SynchronizationContext? synchronizationContext;
+    private CancellationTokenSource? reconcileCancellation;
 
     [ObservableProperty]
     private bool autoMirrorEnabled;
@@ -75,15 +76,26 @@ public partial class MirrorViewModel : ObservableObject
             // A manual stop latches deliberateStop in the service; re-enabling the
             // toggle must re-arm auto-mirror so it works again after a re-connect.
             mirror.ClearDeliberateStop();
-            _ = ReconcileAsync();
+            reconcileCancellation?.Dispose();
+            reconcileCancellation = new CancellationTokenSource();
+            _ = ReconcileAsync(reconcileCancellation.Token);
+            return;
         }
+
+        // 关闭开关:取消 in-flight 的自动投屏流程(可能正在下载 scrcpy),
+        // 并停掉已运行的投屏,否则开关关闭后 scrcpy 仍可能被拉起/继续运行。
+        reconcileCancellation?.Cancel();
+        reconcileCancellation?.Dispose();
+        reconcileCancellation = null;
+        _ = mirror.StopAsync();
+        IsMirroring = mirror.IsMirroring;
     }
 
     partial void OnIsMirroringChanged(bool value) => OnPropertyChanged(nameof(MirrorStatusText));
 
-    public async Task ReconcileAsync()
+    public async Task ReconcileAsync(CancellationToken cancellationToken = default)
     {
-        await mirror.ReconcileAsync(session, CancellationToken.None);
+        await mirror.ReconcileAsync(session, cancellationToken);
         IsMirroring = mirror.IsMirroring;
         OnPropertyChanged(nameof(IsScreenCastToolAvailable));
         OnPropertyChanged(nameof(ScreenCastToolStatus));

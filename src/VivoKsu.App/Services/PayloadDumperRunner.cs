@@ -159,18 +159,21 @@ public sealed class PayloadDumperRunner
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
 
-        // payload_dumper does not stream progress and pre-allocates output files, so the only
-        // real signal is how many bytes it has actually written to the partition images. Its
-        // network reads (Rust reqwest over IOCP/AFD) do not show up as read I/O, but the file
-        // writes do — sample the write counter on a background thread so the UI stays live.
-        var samplerTask = writeBytesProgress is null
-            ? null
-            : Task.Run(() => SampleWriteBytesLoop(process, writeBytesProgress, cancellationToken));
-
         try
         {
-            await process.WaitForExitAsync(cancellationToken)
-                .WaitAsync(TimeSpan.FromMilliseconds(ProcessTimeoutMilliseconds));
+            if (writeBytesProgress is not null)
+            {
+                // 大分区(数 GB 的 super/system)在慢盘上解压可合法超过 120 秒,
+                // 固定墙钟超时会误杀正常解压。改用“无进展超时”:只要进程持续
+                // 写入分区镜像就不中断,空闲超过阈值才判死。刷新超时是 600s,
+                // 解包侧也用同样的“有进展就不杀”语义,不再有不对称硬超时。
+                await WaitForExitWithIdleTimeoutAsync(process, writeBytesProgress, cancellationToken);
+            }
+            else
+            {
+                await process.WaitForExitAsync(cancellationToken)
+                    .WaitAsync(TimeSpan.FromMilliseconds(ProcessTimeoutMilliseconds));
+            }
         }
         catch (TimeoutException)
         {
@@ -183,21 +186,7 @@ public sealed class PayloadDumperRunner
                 // Best effort.
             }
 
-            throw new TimeoutException("payload 处理超时（120 秒），进程已终止。");
-        }
-        finally
-        {
-            if (samplerTask is not null)
-            {
-                try
-                {
-                    await samplerTask;
-                }
-                catch
-                {
-                    // Best effort; sampling is optional.
-                }
-            }
+            throw new TimeoutException($"payload 处理超时（{ProcessTimeoutMilliseconds / 1000} 秒无进展），进程已终止。");
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -206,35 +195,39 @@ public sealed class PayloadDumperRunner
         return (process.ExitCode, output, error);
     }
 
-    private static async Task SampleWriteBytesLoop(
+    /// <summary>
+    /// 等待进程结束,同时采样写入字节上报进度。只要写入字节在推进(正常解压),
+    /// 就不断重置空闲计时,永不误杀;仅在连续无进展超过阈值时才判为挂死。
+    /// </summary>
+    private static async Task WaitForExitWithIdleTimeoutAsync(
         Process process,
         IProgress<long> progress,
         CancellationToken cancellationToken)
     {
-        try
+        var idleWatch = Stopwatch.StartNew();
+        long lastWriteBytes = -1;
+        var hasActivity = false;
+        while (!process.HasExited)
         {
-            while (true)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (GetProcessIoCounters(process.Handle, out var counters))
             {
-                if (GetProcessIoCounters(process.Handle, out var counters))
+                var current = (long)counters.WriteTransferCount;
+                progress.Report(current);
+                if (!hasActivity || current != lastWriteBytes)
                 {
-                    progress.Report((long)counters.WriteTransferCount);
+                    lastWriteBytes = current;
+                    hasActivity = true;
+                    idleWatch.Restart();
                 }
-
-                if (process.HasExited)
-                {
-                    break;
-                }
-
-                await Task.Delay(200, cancellationToken);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Cancelled.
-        }
-        catch
-        {
-            // Process disposed or handle unavailable — sampling is best effort.
+
+            if (idleWatch.Elapsed >= TimeSpan.FromMilliseconds(ProcessTimeoutMilliseconds))
+            {
+                throw new TimeoutException();
+            }
+
+            await Task.Delay(200, cancellationToken);
         }
     }
 

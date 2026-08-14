@@ -40,13 +40,65 @@ public class VivoFirmwareExtractorTests
             gzipPath,
             entries.Where(entry => entry.Name == "boot.img").ToArray(),
             outputDirectory,
-            new Progress<VivoFirmwareExtractor.VivoProgress>(progress.Add),
+            new SyncProgress<VivoFirmwareExtractor.VivoProgress>(progress.Add),
             CancellationToken.None);
 
         results.Should().HaveCount(1);
         File.ReadAllBytes(Path.Combine(outputDirectory, "boot.img")).Should().Equal(new byte[] { 9, 8, 7, 6 });
         progress.Should().NotBeEmpty();
         progress.Last().Fraction.Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task ExtractAsync_rejects_a_truncated_selected_entry_without_replacing_an_existing_output()
+    {
+        var gzipPath = CreateTruncatedGzipTar("boot.img", new byte[] { 1, 2, 3, 4 });
+        var outputDirectory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDirectory);
+        var outputPath = Path.Combine(outputDirectory, "boot.img");
+        await File.WriteAllBytesAsync(outputPath, new byte[] { 9, 9, 9 });
+        var extractor = new VivoFirmwareExtractor();
+
+        var action = () => extractor.ExtractAsync(
+            gzipPath,
+            [new VivoFirmwareExtractor.VivoFirmwareEntry("boot.img", "boot.img", 4)],
+            outputDirectory,
+            null,
+            CancellationToken.None);
+
+        await action.Should().ThrowAsync<InvalidDataException>();
+        (await File.ReadAllBytesAsync(outputPath)).Should().Equal(new byte[] { 9, 9, 9 });
+        Directory.EnumerateFiles(outputDirectory, "*.partial").Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ExtractAsync_does_not_publish_any_selected_entry_when_a_later_entry_is_truncated()
+    {
+        var first = (Name: "boot.img", Data: new byte[] { 1, 2, 3, 4 });
+        var second = (Name: "vendor.img", Data: new byte[] { 5, 6, 7, 8 });
+        var gzipPath = CreateGzipTarWithTruncatedSecondEntry(first, second);
+        var outputDirectory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDirectory);
+        var bootPath = Path.Combine(outputDirectory, first.Name);
+        var vendorPath = Path.Combine(outputDirectory, second.Name);
+        await File.WriteAllBytesAsync(bootPath, new byte[] { 9, 9, 9 });
+        await File.WriteAllBytesAsync(vendorPath, new byte[] { 8, 8, 8 });
+        var extractor = new VivoFirmwareExtractor();
+
+        var action = () => extractor.ExtractAsync(
+            gzipPath,
+            [
+                new VivoFirmwareExtractor.VivoFirmwareEntry(first.Name, first.Name, first.Data.Length),
+                new VivoFirmwareExtractor.VivoFirmwareEntry(second.Name, second.Name, second.Data.Length)
+            ],
+            outputDirectory,
+            null,
+            CancellationToken.None);
+
+        await action.Should().ThrowAsync<InvalidDataException>();
+        (await File.ReadAllBytesAsync(bootPath)).Should().Equal(new byte[] { 9, 9, 9 });
+        (await File.ReadAllBytesAsync(vendorPath)).Should().Equal(new byte[] { 8, 8, 8 });
+        Directory.EnumerateFiles(outputDirectory, "*.partial").Should().BeEmpty();
     }
 
     private static string CreateGzipTar((string Name, byte[] Data)[] files)
@@ -58,6 +110,37 @@ public class VivoFirmwareExtractorTests
         using (var gzip = new GZipStream(file, CompressionMode.Compress))
         {
             gzip.Write(tar);
+        }
+
+        return gzipPath;
+    }
+
+    private static string CreateTruncatedGzipTar(string name, byte[] data)
+    {
+        var tar = BuildTar([(name, data)]);
+        var gzipPath = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", $"{Guid.NewGuid():N}.gz");
+        Directory.CreateDirectory(Path.GetDirectoryName(gzipPath)!);
+        using (var file = File.Create(gzipPath))
+        using (var gzip = new GZipStream(file, CompressionMode.Compress))
+        {
+            gzip.Write(tar, 0, 512 + data.Length - 1);
+        }
+
+        return gzipPath;
+    }
+
+    private static string CreateGzipTarWithTruncatedSecondEntry(
+        (string Name, byte[] Data) first,
+        (string Name, byte[] Data) second)
+    {
+        var tar = BuildTar([first, second]);
+        var secondPayloadOffset = 512 + ((first.Data.Length + 511) / 512 * 512) + 512;
+        var gzipPath = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", $"{Guid.NewGuid():N}.gz");
+        Directory.CreateDirectory(Path.GetDirectoryName(gzipPath)!);
+        using (var file = File.Create(gzipPath))
+        using (var gzip = new GZipStream(file, CompressionMode.Compress))
+        {
+            gzip.Write(tar, 0, secondPayloadOffset + second.Data.Length - 1);
         }
 
         return gzipPath;
@@ -113,5 +196,10 @@ public class VivoFirmwareExtractorTests
         var sum = header.Sum(value => value);
         var octal = Convert.ToString(sum, 8).PadLeft(6, '0') + "\0 ";
         Encoding.ASCII.GetBytes(octal, 0, 8, header, 148);
+    }
+
+    private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
     }
 }

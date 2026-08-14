@@ -148,6 +148,24 @@ public sealed class PartitionExecutionService
         try
         {
             await transport.BackupAsync(serial, partialTask, progress, cancellationToken);
+
+            // 备份完整性校验:fastboot fetch 可能在协议“成功”但设备声明了错误大小或
+            // 中途截断时返回 0 字节/残缺文件。大小已知时必须比对,不符即报失败,
+            // 绝不拿残缺文件覆盖用户上一份完好的备份。
+            if (task.SizeBytes is > 0)
+            {
+                var backupSize = new FileInfo(partialPath).Length;
+                if (backupSize != task.SizeBytes.Value)
+                {
+                    throw new InvalidOperationException(
+                        $"备份文件大小不符（期望 {task.SizeBytes.Value} 字节，实际 {backupSize} 字节），已放弃本次备份。");
+                }
+            }
+            else if (new FileInfo(partialPath).Length == 0)
+            {
+                throw new InvalidOperationException("备份文件为空，已放弃本次备份。");
+            }
+
             File.Move(partialPath, task.OutputPath, overwrite: true);
         }
         catch

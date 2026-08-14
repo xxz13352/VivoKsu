@@ -75,6 +75,36 @@ public class FirmwareExtractViewModelTests
         mappedImages.Should().HaveCount(1);
     }
 
+    [Fact]
+    public async Task ReadInfoAsync_twice_does_not_delete_a_local_vivo_gzip_source()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var gzipPath = Path.Combine(directory, "vivo_ota.gz");
+        File.WriteAllBytes(gzipPath, [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff]);
+        try
+        {
+            var viewModel = new FirmwareExtractViewModel(
+                new OperationLogService(),
+                payloadDumper: new PayloadDumperRunner(
+                    Path.Combine(AppContext.BaseDirectory, "payload-tools", "payload_dumper.exe")),
+                vivoExtractor: new VivoFirmwareExtractor());
+            viewModel.PayloadSourceUrl = gzipPath;
+
+            // 第一次读取:本地源 PrepareGzipAsync 原样返回路径,CachedPreparedGzip 指向用户自己的文件。
+            await viewModel.ReadInfoCommand.ExecuteAsync(null);
+            File.Exists(gzipPath).Should().BeTrue();
+
+            // 第二次读取:CleanupPreparedGzip 只应删除应用下载的临时 gzip,绝不能删本地固件。
+            await viewModel.ReadInfoCommand.ExecuteAsync(null);
+            File.Exists(gzipPath).Should().BeTrue("CleanupPreparedGzip 不得删除用户的本地固件文件");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static FirmwareExtractViewModel CreateViewModel(out string outputDirectory)
     {
         var logs = new OperationLogService();

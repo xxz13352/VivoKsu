@@ -15,7 +15,8 @@ public sealed class AppComposition
     private AppComposition(
         IFastbootRsNativeApi nativeApi,
         IProcessRunner processRunner,
-        ToolPathPreferences? preferences = null)
+        ToolPathPreferences? preferences = null,
+        Action<string>? notifyBlocked = null)
     {
         var backend = new FastbootRsBackend(nativeApi);
         // 唯一 fastboot 执行器:全部刷写 / 读变量 / 擦除 / 重启 / 槽位操作走它(fastboot-rs DLL 已移除)。
@@ -23,7 +24,7 @@ public sealed class AppComposition
             Path.Combine(AppContext.BaseDirectory, "platform-tools", "fastboot.exe"));
         LogService = new OperationLogService();
         Session = new DeviceSessionViewModel();
-        Coordinator = new OperationCoordinator(Session, LogService);
+        Coordinator = new OperationCoordinator(Session, LogService, notifyBlocked);
 
         var deviceInfo = new DeviceInfoService(backend, cliRunner);
         var deviceSessionService = new DeviceSessionService(backend, deviceInfo, LogService);
@@ -136,13 +137,15 @@ public sealed class AppComposition
 
     public static AppComposition CreateDefault() => new(
         FastbootRsApiFactory.CreateDefault(),
-        new SystemProcessRunner());
+        new SystemProcessRunner(),
+        notifyBlocked: message => MessageBox.Show(message, "VivoKsu", MessageBoxButton.OK, MessageBoxImage.Information));
 
     public static AppComposition CreateForTesting(IFastbootRsNativeApi nativeApi, IProcessRunner processRunner) =>
         new(
             nativeApi,
             processRunner,
-            new ToolPathPreferences(Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", $"{Guid.NewGuid():N}.json")));
+            new ToolPathPreferences(Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", $"{Guid.NewGuid():N}.json")),
+            notifyBlocked: _ => { });
 
     public Task StartAsync(CancellationToken cancellationToken = default) => Monitor.StartAsync(cancellationToken);
 

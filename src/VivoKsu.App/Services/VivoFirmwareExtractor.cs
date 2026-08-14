@@ -20,6 +20,12 @@ public sealed class VivoFirmwareExtractor
     }
 
     /// <summary>
+    /// 下载的临时 gzip 所在目录。应用只删除自己写入此目录的临时文件,
+    /// 绝不删除用户的本地固件(PrepareGzipAsync 对本地路径原样返回)。
+    /// </summary>
+    public static string DownloadedGzipDirectory => Path.Combine(Path.GetTempPath(), "VivoKsu", "vivo-firmware");
+
+    /// <summary>
     /// If <paramref name="source"/> is an http(s) URL, streams it to a temporary gzip
     /// file (reporting download progress) and returns that path. Local paths pass through.
     /// </summary>
@@ -33,7 +39,7 @@ public sealed class VivoFirmwareExtractor
             return source;
         }
 
-        var tempPath = Path.Combine(Path.GetTempPath(), "VivoKsu", "vivo-firmware", Guid.NewGuid().ToString("N") + ".gz");
+        var tempPath = Path.Combine(DownloadedGzipDirectory, Guid.NewGuid().ToString("N") + ".gz");
         Directory.CreateDirectory(Path.GetDirectoryName(tempPath)!);
         try
         {
@@ -103,6 +109,7 @@ public sealed class VivoFirmwareExtractor
         Directory.CreateDirectory(outputDirectory);
         var selectedPaths = new HashSet<string>(selected.Select(entry => entry.FullPath), StringComparer.OrdinalIgnoreCase);
         var results = new List<(string EntryName, string OutputPath, long SizeBytes)>();
+        var pendingOutputs = new List<(string EntryName, string OutputPath, string PartialPath, long SizeBytes)>();
         var gzipTotal = new FileInfo(gzipPath).Length;
 
         await using var file = OpenGzip(gzipPath);
@@ -112,76 +119,115 @@ public sealed class VivoFirmwareExtractor
         var buffer = new byte[1 << 20];
         string? currentEntry = null;
 
-        while (true)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report(new VivoProgress(file.Position, gzipTotal, currentEntry));
-            if (!await ReadExactlyAsync(gzip, header, cancellationToken))
+            while (true)
             {
-                break;
-            }
-
-            if (header.All(value => value == 0))
-            {
-                break;
-            }
-
-            var size = ParseOctal(header, 124, 12);
-            var typeFlag = (char)header[156];
-            if (typeFlag == 'L')
-            {
-                var nameBytes = new byte[size];
-                await ReadExactlyAsync(gzip, nameBytes, cancellationToken);
-                pendingLongName = System.Text.Encoding.UTF8.GetString(nameBytes).TrimEnd('\0');
-                await SkipAsync(gzip, PaddedSize(size) - size);
-                continue;
-            }
-
-            if (typeFlag is 'x' or 'X' or 'g')
-            {
-                await SkipAsync(gzip, PaddedSize(size));
-                continue;
-            }
-
-            var fullPath = pendingLongName ?? GetString(header, 0, 100);
-            pendingLongName = null;
-            var isFile = typeFlag is '0' or '\0' or ' ' or '7';
-            if (!isFile)
-            {
-                await SkipAsync(gzip, PaddedSize(size));
-                continue;
-            }
-
-            if (selectedPaths.Contains(fullPath))
-            {
-                currentEntry = Path.GetFileName(fullPath);
-                var outputPath = Path.Combine(outputDirectory, Path.GetFileName(fullPath));
-                var remaining = size;
-                long written = 0;
-                await using (var output = File.Create(outputPath))
+                cancellationToken.ThrowIfCancellationRequested();
+                progress?.Report(new VivoProgress(file.Position, gzipTotal, currentEntry));
+                if (!await ReadExactlyAsync(gzip, header, cancellationToken))
                 {
-                    while (remaining > 0)
-                    {
-                        var toRead = (int)Math.Min(buffer.Length, remaining);
-                        var read = await gzip.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken);
-                        if (read == 0)
-                        {
-                            break;
-                        }
-
-                        await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                        remaining -= read;
-                        written += read;
-                        progress?.Report(new VivoProgress(file.Position, gzipTotal, currentEntry));
-                    }
+                    break;
                 }
 
-                results.Add((Path.GetFileName(fullPath), outputPath, written));
-                await SkipAsync(gzip, PaddedSize(size) - size);
+                if (header.All(value => value == 0))
+                {
+                    break;
+                }
+
+                var size = ParseOctal(header, 124, 12);
+                var typeFlag = (char)header[156];
+                if (typeFlag == 'L')
+                {
+                    var nameBytes = new byte[size];
+                    await ReadExactlyAsync(gzip, nameBytes, cancellationToken);
+                    pendingLongName = System.Text.Encoding.UTF8.GetString(nameBytes).TrimEnd('\0');
+                    await SkipAsync(gzip, PaddedSize(size) - size, cancellationToken);
+                    continue;
+                }
+
+                if (typeFlag is 'x' or 'X' or 'g')
+                {
+                    await SkipAsync(gzip, PaddedSize(size), cancellationToken);
+                    continue;
+                }
+
+                var fullPath = pendingLongName ?? GetString(header, 0, 100);
+                pendingLongName = null;
+                var isFile = typeFlag is '0' or '\0' or ' ' or '7';
+                if (!isFile)
+                {
+                    await SkipAsync(gzip, PaddedSize(size), cancellationToken);
+                    continue;
+                }
+
+                if (selectedPaths.Contains(fullPath))
+                {
+                    currentEntry = Path.GetFileName(fullPath);
+                    var outputPath = Path.Combine(outputDirectory, Path.GetFileName(fullPath));
+                    var partialPath = Path.Combine(outputDirectory, $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.partial");
+                    var remaining = size;
+                    try
+                    {
+                        await using (var output = File.Create(partialPath))
+                        {
+                            while (remaining > 0)
+                            {
+                                var toRead = (int)Math.Min(buffer.Length, remaining);
+                                var read = await gzip.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken);
+                                if (read == 0)
+                                {
+                                    throw new InvalidDataException($"Tar entry '{fullPath}' ended before its declared size of {size} bytes.");
+                                }
+
+                                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                                remaining -= read;
+                                progress?.Report(new VivoProgress(file.Position, gzipTotal, currentEntry));
+                            }
+                        }
+
+                        await SkipAsync(gzip, PaddedSize(size) - size, cancellationToken);
+                        pendingOutputs.Add((Path.GetFileName(fullPath), outputPath, partialPath, size));
+                    }
+                    catch
+                    {
+                        try
+                        {
+                            File.Delete(partialPath);
+                        }
+                        catch
+                        {
+                            // Best effort.
+                        }
+
+                        throw;
+                    }
+                }
+                else
+                {
+                    await SkipAsync(gzip, PaddedSize(size), cancellationToken);
+                }
             }
-            else
+
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var pending in pendingOutputs)
             {
-                await SkipAsync(gzip, PaddedSize(size));
+                File.Move(pending.PartialPath, pending.OutputPath, true);
+                results.Add((pending.EntryName, pending.OutputPath, pending.SizeBytes));
+            }
+        }
+        finally
+        {
+            foreach (var pending in pendingOutputs)
+            {
+                try
+                {
+                    File.Delete(pending.PartialPath);
+                }
+                catch
+                {
+                    // Best effort.
+                }
             }
         }
 
@@ -225,13 +271,13 @@ public sealed class VivoFirmwareExtractor
                 var nameBytes = new byte[size];
                 await ReadExactlyAsync(gzip, nameBytes, cancellationToken);
                 pendingLongName = System.Text.Encoding.UTF8.GetString(nameBytes).TrimEnd('\0');
-                await SkipAsync(gzip, PaddedSize(size) - size);
+                await SkipAsync(gzip, PaddedSize(size) - size, cancellationToken);
                 continue;
             }
 
             if (typeFlag is 'x' or 'X' or 'g') // pax extended headers
             {
-                await SkipAsync(gzip, PaddedSize(size));
+                await SkipAsync(gzip, PaddedSize(size), cancellationToken);
                 continue;
             }
 
@@ -240,22 +286,24 @@ public sealed class VivoFirmwareExtractor
             var isFile = typeFlag is '0' or '\0' or ' ' or '7';
             if (!isFile)
             {
-                await SkipAsync(gzip, PaddedSize(size));
+                await SkipAsync(gzip, PaddedSize(size), cancellationToken);
                 continue;
             }
 
             yield return (fullPath, size, true);
-            await SkipAsync(gzip, PaddedSize(size));
+            await SkipAsync(gzip, PaddedSize(size), cancellationToken);
         }
     }
 
-    private static async Task SkipAsync(Stream stream, long count)
+    private static async Task SkipAsync(Stream stream, long count, CancellationToken cancellationToken)
     {
         var buffer = new byte[8192];
         while (count > 0)
         {
+            // 跳过未选中的超大条目(如数 GB 的 super.img)可能持续很久,必须可取消。
+            cancellationToken.ThrowIfCancellationRequested();
             var toRead = (int)Math.Min(buffer.Length, count);
-            var read = await stream.ReadAsync(buffer.AsMemory(0, toRead));
+            var read = await stream.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken);
             if (read == 0)
             {
                 break;
@@ -286,6 +334,19 @@ public sealed class VivoFirmwareExtractor
 
     private static long ParseOctal(byte[] header, int offset, int length)
     {
+        // base-256 长度字段:GNU tar 对 >=8GiB 的条目使用,首字节 0x80 为标记位,
+        // 其余按大端无符号解释(首字节掩掉标记位)。直接过滤 '0'-'7' 会把它解析成 0。
+        if ((header[offset] & 0x80) != 0)
+        {
+            ulong value = 0;
+            for (var i = 0; i < length; i++)
+            {
+                value = (value << 8) | (byte)(i == 0 ? header[offset] & 0x7f : header[offset + i]);
+            }
+
+            return value > long.MaxValue ? long.MaxValue : (long)value;
+        }
+
         var text = System.Text.Encoding.ASCII.GetString(header, offset, length).Trim('\0', ' ');
         if (text.Length == 0)
         {
@@ -341,6 +402,17 @@ public static class FirmwareFormatDetector
             request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, count - 1);
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             response.EnsureSuccessStatusCode();
+
+            // 只有 206 才代表服务器遵守 Range。若忽略 Range 返回 200 全文,
+            // ReadAsByteArrayAsync 会把整个固件体一次性读进内存,必须改为限量读取。
+            if (response.StatusCode != System.Net.HttpStatusCode.PartialContent)
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                var limited = new byte[count];
+                var rangeRead = await stream.ReadAsync(limited, cancellationToken);
+                return limited[..rangeRead];
+            }
+
             return await response.Content.ReadAsByteArrayAsync(cancellationToken);
         }
 

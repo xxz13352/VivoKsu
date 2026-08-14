@@ -116,12 +116,18 @@ public partial class SafeFlashViewModel : ObservableObject
 
         // 下载+刷入 的 CanExecute 依赖设备连接状态,必须订阅变化才能刷新按钮可用性。
         session.PropertyChanged += OnSessionPropertyChanged;
+        if (coordinator is not null)
+        {
+            // 本页操作与全局协调器共享同一把锁:别的页面有任务在跑时,本页的开始按钮
+            // 必须禁用而不是静默排队(否则点了像卡住);取消按钮则要按全局忙碌状态启用。
+            coordinator.StateChanged += OnCoordinatorStateChanged;
+        }
 
         DownloadAndFlashCommand = new AsyncRelayCommand(DownloadAndFlashAsync, CanDownloadAndFlash);
         SelectAndFlashCommand = new AsyncRelayCommand(SelectAndFlashAsync, CanSelectAndFlash);
         ConfirmFlashCommand = new AsyncRelayCommand(ConfirmFlashAsync, CanConfirmFlash);
         CancelFlashCommand = new RelayCommand(CancelFlash, CanConfirmFlash);
-        StopCommand = new RelayCommand(Stop, () => IsBusy);
+        StopCommand = new RelayCommand(Stop, CanStop);
     }
 
     public IAsyncRelayCommand DownloadAndFlashCommand { get; }
@@ -188,6 +194,22 @@ public partial class SafeFlashViewModel : ObservableObject
     private bool CanSelectAndFlash() => !IsBusy && !IsConfirmVisible;
 
     private bool CanConfirmFlash() => IsConfirmVisible && FlashCount > 0 && !IsBusy;
+
+    /// <summary>
+    /// 停止按钮:本页有任务(含排队中)或任意页面有任务在跑时都可用——用户在任何菜单
+    /// 都能停掉正在跑的操作,而不是因为「本页不忙」而点了没反应。
+    /// </summary>
+    private bool CanStop() => IsBusy || coordinator?.IsBusy == true;
+
+    /// <summary>全局协调器忙碌状态变化(含其它页面的任务)时刷新本页命令可用性。</summary>
+    private void OnCoordinatorStateChanged(object? sender, EventArgs eventArgs)
+    {
+        DownloadAndFlashCommand.NotifyCanExecuteChanged();
+        SelectAndFlashCommand.NotifyCanExecuteChanged();
+        ConfirmFlashCommand.NotifyCanExecuteChanged();
+        CancelFlashCommand.NotifyCanExecuteChanged();
+        StopCommand.NotifyCanExecuteChanged();
+    }
 
     /// <summary>① 下载+刷入:读设备版本 → 查 OTA → 下载 → 准备刷写。</summary>
     private async Task DownloadAndFlashAsync()
@@ -626,14 +648,15 @@ public partial class SafeFlashViewModel : ObservableObject
 
     private void Stop()
     {
-        if (coordinator is not null)
+        // 优先取消本页自己的操作(含排队等锁中的);本页无任务时,取消全局正在运行的
+        // 操作,让用户在其他菜单也能停掉别的页面发起的任务。
+        if (operationCancellation is not null)
         {
-            coordinator.CancelCurrent();
+            operationCancellation.Cancel();
+            return;
         }
-        else
-        {
-            operationCancellation?.Cancel();
-        }
+
+        coordinator?.CancelCurrent();
     }
 
     /// <summary>运行一个阶段化操作;失败/取消时把错误写到状态与日志并返回 false。</summary>
@@ -643,6 +666,8 @@ public partial class SafeFlashViewModel : ObservableObject
         Func<OperationContext, CancellationToken, Task> operation,
         Action? cleanup = null)
     {
+        var cancellation = new CancellationTokenSource();
+        operationCancellation = cancellation;
         IsBusy = true;
         try
         {
@@ -650,7 +675,7 @@ public partial class SafeFlashViewModel : ObservableObject
             {
                 try
                 {
-                    await coordinator.RunAsync(kind, title, operation);
+                    await coordinator.RunAsync(kind, title, operation, cancellation.Token);
                     return true;
                 }
                 catch (OperationCanceledException)
@@ -668,7 +693,6 @@ public partial class SafeFlashViewModel : ObservableObject
             }
 
             // 无协调器时回退:自行管理取消与日志。
-            operationCancellation = new CancellationTokenSource();
             try
             {
                 await operation(new OperationContext(Guid.NewGuid().ToString("N"), (stage, _, _) =>
@@ -678,7 +702,7 @@ public partial class SafeFlashViewModel : ObservableObject
                         StatusText = stage;
                         logs.Write(OperationLogLevel.Info, stage);
                     }
-                }), operationCancellation.Token);
+                }), cancellation.Token);
                 return true;
             }
             catch (OperationCanceledException)
@@ -690,16 +714,13 @@ public partial class SafeFlashViewModel : ObservableObject
                 StatusText = exception.Message;
                 logs.Write(OperationLogLevel.Error, exception.Message);
             }
-            finally
-            {
-                operationCancellation.Dispose();
-                operationCancellation = null;
-            }
 
             return false;
         }
         finally
         {
+            cancellation.Dispose();
+            operationCancellation = null;
             cleanup?.Invoke();
             CurrentPartition = "--";
             IsBusy = false;

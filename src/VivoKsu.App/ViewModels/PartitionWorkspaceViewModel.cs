@@ -23,6 +23,7 @@ public partial class PartitionWorkspaceViewModel : ObservableObject
     private readonly Func<string, bool> confirm;
     private readonly PartitionExecutionPlanBuilder planBuilder = new();
     private readonly Stopwatch operationStopwatch = new();
+    private readonly HashSet<string> executedPartitionNames = new(StringComparer.OrdinalIgnoreCase);
     private PartitionSnapshot? snapshot;
     private string currentOperationLabel = "执行";
 
@@ -93,7 +94,7 @@ public partial class PartitionWorkspaceViewModel : ObservableObject
         BackupSelectedCommand = new AsyncRelayCommand(BackupSelectedAsync, CanOperateOnSelection);
         WriteSelectedCommand = new AsyncRelayCommand(WriteSelectedAsync, CanWriteSelection);
         EraseSelectedCommand = new AsyncRelayCommand(EraseSelectedAsync, CanOperateOnSelection);
-        StopCommand = new RelayCommand(Stop, () => IsExecuting);
+        StopCommand = new RelayCommand(Stop, () => IsExecuting || coordinator.IsBusy);
 
         // Commands gate on coordinator.IsBusy; re-evaluate them whenever the
         // coordinator's busy state changes (including operations from other pages).
@@ -130,7 +131,7 @@ public partial class PartitionWorkspaceViewModel : ObservableObject
 
     public string SummaryText => $"{Rows.Count} 个分区  ·  已选 {SelectedCount}  ·  已映射 {MappedImageCount}";
 
-    public string OperationProgressPercent => $"{OverallProgress:P0}";
+    public string OperationProgressPercent => IsExecuting ? $"{OverallProgress:P0}" : "--";
 
     /// <summary>
     /// True while an operation runs but the current partition has no byte progress yet
@@ -182,6 +183,7 @@ public partial class PartitionWorkspaceViewModel : ObservableObject
     partial void OnIsExecutingChanged(bool value)
     {
         OnPropertyChanged(nameof(IsCurrentOperationIndeterminate));
+        OnPropertyChanged(nameof(OperationProgressPercent));
         RefreshCommand.NotifyCanExecuteChanged();
         BrowseImagesCommand.NotifyCanExecuteChanged();
         BrowseRowImageCommand.NotifyCanExecuteChanged();
@@ -392,6 +394,14 @@ public partial class PartitionWorkspaceViewModel : ObservableObject
             row.ResetTransferState();
         }
 
+        // 记录实际进入计划的执行任务(Write 会剔除无镜像的行);进度条只对这些
+        // 分区求平均,否则被剔除行 Progress 恒为 0,成功完成时进度条到不了 100%。
+        executedPartitionNames.Clear();
+        foreach (var task in plan.Tasks)
+        {
+            executedPartitionNames.Add(task.PartitionName);
+        }
+
         IsExecuting = true;
         OverallProgress = 0;
         ProgressText = "正在准备任务";
@@ -448,7 +458,11 @@ public partial class PartitionWorkspaceViewModel : ObservableObject
         {
             var row = Rows.FirstOrDefault(candidate => string.Equals(candidate.Name, progress.PartitionName, StringComparison.OrdinalIgnoreCase));
             row?.ApplyProgress(progress);
-            OverallProgress = Rows.Where(candidate => candidate.IsSelected).DefaultIfEmpty().Average(candidate => candidate?.Progress ?? 0);
+            var executedRows = Rows
+                .Where(candidate => candidate.IsSelected && executedPartitionNames.Contains(candidate.Name))
+                .Select(candidate => candidate.Progress)
+                .ToArray();
+            OverallProgress = executedRows.Length == 0 ? 0 : executedRows.Average();
             if (row is not null)
             {
                 CurrentOperationPartitionName = progress.PartitionName;

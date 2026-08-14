@@ -6,7 +6,7 @@ namespace VivoKsu.App.Services;
 
 public interface IPlatformToolsCommandRunner
 {
-    PlatformToolsCommandResult Run(string executable, IReadOnlyList<string> arguments);
+    PlatformToolsCommandResult Run(string executable, IReadOnlyList<string> arguments, int timeoutMilliseconds = 15000);
 }
 
 public sealed record PlatformToolsCommandResult(int ExitCode, string StandardOutput, string StandardError)
@@ -18,9 +18,7 @@ public sealed record PlatformToolsCommandResult(int ExitCode, string StandardOut
 
 public sealed class SystemPlatformToolsCommandRunner : IPlatformToolsCommandRunner
 {
-    private const int TimeoutMilliseconds = 15000;
-
-    public PlatformToolsCommandResult Run(string executable, IReadOnlyList<string> arguments)
+    public PlatformToolsCommandResult Run(string executable, IReadOnlyList<string> arguments, int timeoutMilliseconds = 15000)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -42,10 +40,10 @@ public sealed class SystemPlatformToolsCommandRunner : IPlatformToolsCommandRunn
             ?? throw new InvalidOperationException($"无法启动 {Path.GetFileName(executable)}。");
         var standardOutput = process.StandardOutput.ReadToEndAsync();
         var standardError = process.StandardError.ReadToEndAsync();
-        if (!process.WaitForExit(TimeoutMilliseconds))
+        if (!process.WaitForExit(timeoutMilliseconds))
         {
             KillProcessTree(process);
-            throw new TimeoutException($"{Path.GetFileName(executable)} 执行超时（{TimeoutMilliseconds / 1000} 秒），进程已终止。");
+            throw new TimeoutException($"{Path.GetFileName(executable)} 执行超时（{timeoutMilliseconds / 1000} 秒），进程已终止。");
         }
 
         Task.WaitAll(standardOutput, standardError);
@@ -68,6 +66,9 @@ public sealed class SystemPlatformToolsCommandRunner : IPlatformToolsCommandRunn
 
 public sealed class PlatformToolsNativeApi : IFastbootRsNativeApi
 {
+    /// <summary>大分区刷写/读取可能远超默认 15s;平台工具回退路径必须给足超时,否则会在传输中途被强杀。</summary>
+    private const int LongTransferTimeoutMilliseconds = 1_800_000; // 30 分钟
+
     private readonly IPlatformToolsCommandRunner commandRunner;
     private readonly string adbExecutable;
     private readonly string fastbootExecutable;
@@ -109,7 +110,17 @@ public sealed class PlatformToolsNativeApi : IFastbootRsNativeApi
         Run(adbExecutable, arguments);
     }
 
-    public void FastbootReboot(string? serial) => Run(fastbootExecutable, WithSerial(serial, "reboot"));
+    /// <summary><c>fastboot reboot [&lt;target&gt;]</c> —— fastboot/fastbootd 模式下按目标重启(target 为空=回系统)。</summary>
+    public void FastbootReboot(string? serial, string? target)
+    {
+        var arguments = new List<string>(WithSerial(serial, "reboot"));
+        if (!string.IsNullOrWhiteSpace(target))
+        {
+            arguments.Add(target);
+        }
+
+        Run(fastbootExecutable, arguments);
+    }
 
     public void SetActive(string? serial, string slot) =>
         Run(fastbootExecutable, WithSerial(serial, "set_active", slot));
@@ -136,20 +147,20 @@ public sealed class PlatformToolsNativeApi : IFastbootRsNativeApi
     }
 
     public void Flash(string? serial, string partition, string imagePath) =>
-        Run(fastbootExecutable, WithSerial(serial, "flash", partition, imagePath));
+        Run(fastbootExecutable, WithSerial(serial, "flash", partition, imagePath), LongTransferTimeoutMilliseconds);
 
     public void Erase(string? serial, string partition) =>
         Run(fastbootExecutable, WithSerial(serial, "erase", partition));
 
     public long Fetch(string? serial, string partition, string outputPath)
     {
-        Run(fastbootExecutable, WithSerial(serial, "fetch", partition, outputPath));
+        Run(fastbootExecutable, WithSerial(serial, "fetch", partition, outputPath), LongTransferTimeoutMilliseconds);
         return File.Exists(outputPath) ? new FileInfo(outputPath).Length : 0;
     }
 
-    private PlatformToolsCommandResult Run(string executable, IReadOnlyList<string> arguments)
+    private PlatformToolsCommandResult Run(string executable, IReadOnlyList<string> arguments, int timeoutMilliseconds = 15000)
     {
-        var result = commandRunner.Run(executable, arguments);
+        var result = commandRunner.Run(executable, arguments, timeoutMilliseconds);
         if (result.ExitCode != 0)
         {
             var detail = string.IsNullOrWhiteSpace(result.CombinedOutput) ? "未返回诊断信息。" : result.CombinedOutput.Trim();

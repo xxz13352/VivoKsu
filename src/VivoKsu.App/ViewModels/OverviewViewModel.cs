@@ -32,9 +32,10 @@ public sealed class OverviewViewModel
 
     private async Task RebootAsync(string target, string status)
     {
-        if (session.ConnectionState != DeviceConnectionState.AdbConnected)
+        var state = session.ConnectionState;
+        if (state is not (DeviceConnectionState.AdbConnected or DeviceConnectionState.FastbootConnected))
         {
-            logs.Write(OperationLogLevel.Warning, "ADB 设备未就绪，无法执行重启。");
+            logs.Write(OperationLogLevel.Warning, "设备未就绪(需要 ADB 或 Fastboot 连接)，无法执行重启。");
             return;
         }
 
@@ -48,14 +49,14 @@ public sealed class OverviewViewModel
                     async (context, cancellationToken) =>
                     {
                         context.ReportStage(status);
-                        await backend.RebootAsync(session.Serial, target, cancellationToken);
+                        await RebootWithDispatchAsync(target, state, cancellationToken);
                     });
                 return;
             }
 
             session.BeginOperation(OperationKind.Rebooting, status);
             logs.Write(OperationLogLevel.Info, status);
-            await backend.RebootAsync(session.Serial, target, CancellationToken.None);
+            await RebootWithDispatchAsync(target, state, CancellationToken.None);
             session.CompleteOperation("重启指令已发送");
             logs.Write(OperationLogLevel.Success, "重启指令已发送。");
         }
@@ -70,5 +71,21 @@ public sealed class OverviewViewModel
                 logs.Write(OperationLogLevel.Error, exception.Message);
             }
         }
+    }
+
+    /// <summary>
+    /// 按当前会话模式选择重启通道:ADB 用 <c>adb reboot</c>,fastboot / fastbootd
+    /// 用 <c>fastboot reboot</c>(fastboot 串号对 adb 不可见)。三种目标在两种模式下都可用:
+    /// 空=回系统、bootloader=引导加载器、fastboot=fastbootd。
+    /// </summary>
+    private async Task RebootWithDispatchAsync(string target, DeviceConnectionState state, CancellationToken cancellationToken)
+    {
+        if (state == DeviceConnectionState.FastbootConnected)
+        {
+            await backend.FastbootRebootAsync(session.Serial, target, cancellationToken);
+            return;
+        }
+
+        await backend.RebootAsync(session.Serial, target, cancellationToken);
     }
 }

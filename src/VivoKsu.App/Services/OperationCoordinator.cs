@@ -5,19 +5,27 @@ namespace VivoKsu.App.Services;
 
 public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
 {
+    /// <summary>另一个页面有任务在跑时,拒绝新操作并提示的文案。</summary>
+    public const string OperationInProgressMessage = "已有任务正在进行中，请等待其完成或先取消。";
+
     private readonly DeviceSessionViewModel session;
     private readonly OperationLogService logs;
     private readonly SemaphoreSlim operationGate = new(1, 1);
     private readonly object stateGate = new();
+    private readonly Action<string>? notifyBlocked;
     private OperationStateSnapshot state = OperationStateSnapshot.Idle;
     private CancellationTokenSource? currentCancellation;
     private long lastProgressReport;
     private bool disposed;
 
-    public OperationCoordinator(DeviceSessionViewModel session, OperationLogService logs)
+    public OperationCoordinator(
+        DeviceSessionViewModel session,
+        OperationLogService logs,
+        Action<string>? notifyBlocked = null)
     {
         this.session = session;
         this.logs = logs;
+        this.notifyBlocked = notifyBlocked;
     }
 
     public bool IsBusy
@@ -53,7 +61,14 @@ public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
         ArgumentNullException.ThrowIfNull(operation);
         ObjectDisposedException.ThrowIf(disposed, this);
 
-        await operationGate.WaitAsync(cancellationToken);
+        // 全局只允许一个操作(刷写/下载/解包/重启等)。另一个页面有任务在跑时不再静默
+        // 排队——那会让用户"点了没反应"——而是立即弹窗提示并抛错,由页面给出明确反馈。
+        if (!operationGate.Wait(0))
+        {
+            notifyBlocked?.Invoke(OperationInProgressMessage);
+            throw new OperationInProgressException(OperationInProgressMessage);
+        }
+
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var operationId = Guid.NewGuid().ToString("N");
         SetCurrent(kind, operationId, title, title, null, linkedCancellation);
@@ -195,5 +210,14 @@ public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
         }
 
         StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+}
+
+/// <summary>全局已有一个操作在跑、新操作被拒绝时抛出,页面据此提示"工作正在进行"。</summary>
+public sealed class OperationInProgressException : InvalidOperationException
+{
+    public OperationInProgressException(string message)
+        : base(message)
+    {
     }
 }

@@ -19,6 +19,7 @@ public partial class FirmwareExtractViewModel : ObservableObject
     private readonly OperationLogService logs;
     private Action<FlashImageInfo, QuickFlashPartition>? flashContinuation;
     private CancellationTokenSource? extractionCancellation;
+    private CancellationTokenSource? readCancellation;
     private readonly Stopwatch extractionStopwatch = new();
     private DispatcherTimer? elapsedTimer;
     private string? payloadSource;
@@ -113,6 +114,25 @@ public partial class FirmwareExtractViewModel : ObservableObject
         MapToQuickFlashCommand.NotifyCanExecuteChanged();
     }
 
+    partial void OnPayloadSourceUrlChanged(string value)
+    {
+        // 固件路径一旦与已读取的源不一致,当前加载的分区/缓存全部失效。
+        // 立即清空它们,防止用户在未重新读取信息时点「提取」,从旧固件的
+        // 缓存 gzip 解包出旧镜像(经「映射到快速刷写」刷入后会被当成新固件)。
+        if (payloadSource is not null &&
+            !string.Equals(value.Trim(), payloadSource, StringComparison.OrdinalIgnoreCase))
+        {
+            payloadSource = null;
+            // 只置空会泄漏已下载的数 GB 临时 gzip(每次换源累积);必须走带
+            // 目录前缀守卫的清理器——本地源路径不会位于下载目录,不会被删。
+            CleanupPreparedGzip();
+            PayloadPartitions.Clear();
+            extractedImages = [];
+            HasExtractedImages = false;
+            PayloadStatusText = "固件路径已更改，请重新读取信息。";
+        }
+    }
+
     partial void OnIsPayloadBusyChanged(bool value)
     {
         OnPropertyChanged(nameof(IsCurrentPartitionIndeterminate));
@@ -182,6 +202,7 @@ public partial class FirmwareExtractViewModel : ObservableObject
         payloadSource = source;
         CleanupPreparedGzip();
         IsPayloadBusy = true;
+        readCancellation = new CancellationTokenSource();
         extractionStopwatch.Restart();
         lastSpeedBytes = 0;
         lastSpeedTime = 0;
@@ -191,7 +212,7 @@ public partial class FirmwareExtractViewModel : ObservableObject
         PayloadStatusText = "正在识别固件格式…";
         try
         {
-            var kind = await FirmwareFormatDetector.DetectAsync(source, CancellationToken.None);
+            var kind = await FirmwareFormatDetector.DetectAsync(source, readCancellation.Token);
             if (kind == FirmwareFormatDetector.FirmwareKind.VivoGzip)
             {
                 if (vivoExtractor is null)
@@ -200,7 +221,7 @@ public partial class FirmwareExtractViewModel : ObservableObject
                     return;
                 }
 
-                await ReadVivoInfoAsync(source);
+                await ReadVivoInfoAsync(source, readCancellation.Token);
             }
             else if (kind == FirmwareFormatDetector.FirmwareKind.PayloadZip)
             {
@@ -211,7 +232,7 @@ public partial class FirmwareExtractViewModel : ObservableObject
                 }
 
                 PayloadStatusText = "正在读取 payload 分区列表…";
-                var partitions = await payloadDumper.ListPartitionsAsync(source, CancellationToken.None);
+                var partitions = await payloadDumper.ListPartitionsAsync(source, readCancellation.Token);
                 PopulatePartitions(partitions.Select(partition => new PayloadPartitionItemViewModel(partition)));
             }
             else
@@ -232,18 +253,20 @@ public partial class FirmwareExtractViewModel : ObservableObject
         {
             StopElapsedTicker();
             IsPayloadBusy = false;
+            readCancellation?.Dispose();
+            readCancellation = null;
         }
     }
 
-    private async Task ReadVivoInfoAsync(string source)
+    private async Task ReadVivoInfoAsync(string source, CancellationToken cancellationToken)
     {
         PayloadStatusText = "正在下载 Vivo 固件…";
         CurrentPartitionName = "下载固件";
-        var gzipPath = await vivoExtractor!.PrepareGzipAsync(source, new Progress<VivoFirmwareExtractor.VivoProgress>(OnVivoProgress), CancellationToken.None);
+        var gzipPath = await vivoExtractor!.PrepareGzipAsync(source, new Progress<VivoFirmwareExtractor.VivoProgress>(OnVivoProgress), cancellationToken);
         preparedGzipPath = gzipPath;
         PayloadStatusText = "正在读取分区列表…";
         CurrentPartitionName = "解析固件";
-        var entries = await vivoExtractor.ListAsync(gzipPath, new Progress<VivoFirmwareExtractor.VivoProgress>(OnVivoProgress), CancellationToken.None);
+        var entries = await vivoExtractor.ListAsync(gzipPath, new Progress<VivoFirmwareExtractor.VivoProgress>(OnVivoProgress), cancellationToken);
         PopulatePartitions(entries.Select(entry => new PayloadPartitionItemViewModel(entry.Name, entry.SizeBytes, entry.FullPath)));
         CurrentPartitionName = "--";
     }
@@ -264,19 +287,31 @@ public partial class FirmwareExtractViewModel : ObservableObject
 
     private void CleanupPreparedGzip()
     {
-        if (preparedGzipPath is not null)
+        if (preparedGzipPath is null)
         {
-            try
-            {
-                File.Delete(preparedGzipPath);
-            }
-            catch
-            {
-                // Best effort.
-            }
-
-            preparedGzipPath = null;
+            return;
         }
+
+        // 只删除应用自己下载到临时目录的 gzip。本地源 PrepareGzipAsync 原样返回
+        // 用户自己的固件路径,绝不能 File.Delete——否则第二次读取信息会静默销毁
+        // 用户的本地固件文件。
+        if (!preparedGzipPath.StartsWith(
+                VivoFirmwareExtractor.DownloadedGzipDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            preparedGzipPath = null;
+            return;
+        }
+
+        try
+        {
+            File.Delete(preparedGzipPath);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
+        preparedGzipPath = null;
     }
 
     private void OnVivoProgress(VivoFirmwareExtractor.VivoProgress progress)
@@ -350,6 +385,14 @@ public partial class FirmwareExtractViewModel : ObservableObject
             return;
         }
 
+        // 固件路径与已读取的源不一致(改了路径文本框但没重新读取信息):
+        // 拒绝从旧固件的缓存 gzip 解包,防止解出旧镜像被当成新固件刷入。
+        if (!string.Equals(PayloadSourceUrl.Trim(), payloadSource, StringComparison.OrdinalIgnoreCase))
+        {
+            PayloadStatusText = "固件路径已更改，请先重新读取信息再提取。";
+            return;
+        }
+
         var selected = PayloadPartitions.Where(partition => partition.IsSelected).ToArray();
         if (selected.Length == 0)
         {
@@ -369,10 +412,14 @@ public partial class FirmwareExtractViewModel : ObservableObject
         PayloadProgress = 0;
         CurrentPartitionName = "--";
         SpeedText = "--";
+        // 新一轮提取开始即作废上一轮的提取结果:若本次失败/取消,绝不能把上一轮
+        // 镜像当作本次结果经「映射到快速刷写」送进刷写页。
+        extractedImages = [];
+        HasExtractedImages = false;
         var extracted = new List<PayloadExtractionResult>();
         try
         {
-            var kind = await FirmwareFormatDetector.DetectAsync(payloadSource, CancellationToken.None);
+            var kind = await FirmwareFormatDetector.DetectAsync(payloadSource, extractionCancellation.Token);
             if (kind == FirmwareFormatDetector.FirmwareKind.VivoGzip)
             {
                 if (vivoExtractor is null || preparedGzipPath is null)
@@ -473,7 +520,13 @@ public partial class FirmwareExtractViewModel : ObservableObject
         }
     }
 
-    private void Stop() => extractionCancellation?.Cancel();
+    private void Stop()
+    {
+        // 读取信息/下载 Vivo 固件期间用 readCancellation,提取期间用 extractionCancellation;
+        // 两者互斥(IsPayloadBusy 门),取消当前激活的那个。
+        readCancellation?.Cancel();
+        extractionCancellation?.Cancel();
+    }
 
     private void MapToQuickFlash()
     {

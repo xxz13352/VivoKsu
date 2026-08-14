@@ -104,10 +104,22 @@ public sealed class SystemAdbBinaryRunner : IAdbBinaryRunner
 
     public async Task<string> RunTextAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         using var process = Start(executable, arguments, redirectStandardInput: false, redirectStandardOutput: true);
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (Exception)
+        {
+            // 取消时必须终止 adb 进程树:否则设备侧的破坏性命令(dd 清零 / blkdiscard)
+            // 会在 UI 报告「已取消」后继续执行,adb.exe 也泄漏。兄弟方法均走 KillProcessTree。
+            KillProcessTree(process);
+            throw;
+        }
+
         var output = await outputTask;
         var error = await errorTask;
         ThrowForFailure(process.ExitCode, error, output);
@@ -143,7 +155,17 @@ public sealed class SystemAdbBinaryRunner : IAdbBinaryRunner
                 exception);
         }
 
-        await process.WaitForExitAsync();
+        try
+        {
+            // 读取结尾的等待同样必须可取消并终止 adb(传输完成后 adb 收尾)。
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            KillProcessTree(process);
+            throw;
+        }
+
         ThrowForFailure(process.ExitCode, await errorTask, string.Empty);
     }
 
@@ -181,7 +203,19 @@ public sealed class SystemAdbBinaryRunner : IAdbBinaryRunner
             process.StandardInput.Close();
         }
 
-        await process.WaitForExitAsync();
+        try
+        {
+            // 本地字节已全部写完后,设备侧 dd 仍在把缓冲数据写盘并 conv=fsync
+            // (可达几十秒);这段时间取消必须可观察并杀掉 adb 进程,否则停止
+            // 按钮失效、adb.exe 泄漏、设备侧命令继续执行。
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            KillProcessTree(process);
+            throw;
+        }
+
         ThrowForFailure(process.ExitCode, await errorTask, string.Empty);
     }
 

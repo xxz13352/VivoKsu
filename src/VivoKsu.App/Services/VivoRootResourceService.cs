@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.IO;
+using System.Security.Cryptography;
 
 namespace VivoKsu.App.Services;
 
@@ -41,6 +42,18 @@ public sealed class VivoRootResourceService
         };
 
     private readonly string projectRoot;
+
+    /// <summary>
+    /// 随包分发的管理器 APK 的 SHA-256。更新 apk/ 下的 APK 后必须同步更新,
+    /// 否则 ROOT 流程会拒绝安装(完整性校验失败即失败关闭)。
+    /// 重新生成:certutil -hashfile &lt;apk&gt; SHA256
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, string> ManagerApkSha256 =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["KSU"] = "43ebb3e3cbc885285bd824f351e5cca2169a4435c8bd0268584ad3c9d7248d4a",
+            ["OfficialKsu"] = "dca1cf72a6f6cff4a116242fbe940a161099bafbd9d74ca4518756eaad5c8c03"
+        };
 
     public VivoRootResourceService(string projectRoot)
     {
@@ -121,7 +134,37 @@ public sealed class VivoRootResourceService
 
         if (file.Length == 0)
         {
-            throw new InvalidDataException($"{manager.Key} 管理器 APK 为空。" );
+            throw new InvalidDataException($"{manager.Key} 管理器 APK 为空。");
+        }
+
+        // 完整性校验:比对 SHA-256 与随包分发的期望值,防止资源目录里的 APK
+        // 被替换/篡改后仍被 root 权限安装并自动启动。哈希校验是最强且最简的信号。
+        if (ManagerApkSha256.TryGetValue(manager.Key, out var expectedHash))
+        {
+            using var stream = File.OpenRead(manager.ApkPath);
+            var actualHash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"{manager.Key} 管理器 APK 完整性校验失败（SHA-256 不匹配）。");
+            }
+        }
+
+        // 至少要是可读的 APK:含 AndroidManifest.xml 的 ZIP 结构。
+        try
+        {
+            using var archive = ZipFile.OpenRead(manager.ApkPath);
+            if (!archive.Entries.Any(entry => entry.FullName == "AndroidManifest.xml"))
+            {
+                throw new InvalidDataException($"{manager.Key} 管理器 APK 不是有效的 APK（缺少 AndroidManifest.xml）。");
+            }
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidDataException($"{manager.Key} 管理器 APK 不是有效的 APK。", exception);
         }
     }
 

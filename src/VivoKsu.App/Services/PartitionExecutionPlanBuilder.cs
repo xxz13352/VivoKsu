@@ -21,6 +21,11 @@ public sealed class PartitionExecutionPlanBuilder
                 partition.SizeBytes))
             .ToArray();
 
+        if (transport == PartitionTransportKind.AdbRoot)
+        {
+            ValidateAdbRootWriteTasks(tasks);
+        }
+
         return CreatePlan(serial, transport, PartitionOperationKind.Write, tasks);
     }
 
@@ -78,5 +83,39 @@ public sealed class PartitionExecutionPlanBuilder
         }
 
         return new PartitionExecutionPlan(serial, transport, operation, tasks);
+    }
+
+    private static void ValidateAdbRootWriteTasks(IEnumerable<PartitionTask> tasks)
+    {
+        Span<byte> header = stackalloc byte[4];
+        foreach (var task in tasks)
+        {
+            var imagePath = task.ImagePath!;
+            if (!File.Exists(imagePath))
+            {
+                throw new InvalidOperationException($"分区 {task.PartitionName} 的镜像文件不存在：{imagePath}");
+            }
+
+            var imageLength = new FileInfo(imagePath).Length;
+            if (imageLength == 0)
+            {
+                throw new InvalidOperationException($"分区 {task.PartitionName} 的镜像文件为空：{imagePath}");
+            }
+
+            if (task.SizeBytes > 0 && imageLength > task.SizeBytes)
+            {
+                throw new InvalidOperationException($"分区 {task.PartitionName} 的镜像文件大于分区容量。");
+            }
+
+            if (imageLength >= 4)
+            {
+                using var stream = File.OpenRead(imagePath);
+                stream.ReadExactly(header);
+                if (header[0] == 0x3A && header[1] == 0xFF && header[2] == 0x26 && header[3] == 0xED)
+                {
+                    throw new InvalidOperationException($"分区 {task.PartitionName} 的镜像是 Android sparse 镜像，不能通过 ADB Root 直接写入。");
+                }
+            }
+        }
     }
 }

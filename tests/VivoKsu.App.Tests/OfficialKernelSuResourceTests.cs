@@ -17,7 +17,7 @@ public sealed class OfficialKernelSuResourceTests
     }
 
     [Fact]
-    public void Allows_a_replaced_manager_apk_without_integrity_validation()
+    public void Rejects_a_tampered_manager_apk()
     {
         var root = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
         var apkDirectory = Path.Combine(root, "apk");
@@ -31,7 +31,9 @@ public sealed class OfficialKernelSuResourceTests
         {
             var resources = new VivoRootResourceService(root);
 
-            resources.VerifyManagerApk(resources.ResolveManager("OfficialKsu"));
+            // 篡改过的 APK(SHA-256 不匹配)必须被拒绝,绝不能带 root 安装。
+            Assert.Throws<InvalidDataException>(
+                () => resources.VerifyManagerApk(resources.ResolveManager("OfficialKsu")));
         }
         finally
         {

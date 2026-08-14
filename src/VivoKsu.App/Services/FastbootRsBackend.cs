@@ -35,9 +35,9 @@ public sealed class FastbootRsBackend
         return Task.Run(() => nativeApi.Reboot(serial, target), cancellationToken);
     }
 
-    public Task FastbootRebootAsync(string? serial, CancellationToken cancellationToken)
+    public Task FastbootRebootAsync(string? serial, string? target, CancellationToken cancellationToken)
     {
-        return Task.Run(() => nativeApi.FastbootReboot(serial), cancellationToken);
+        return Task.Run(() => nativeApi.FastbootReboot(serial, target), cancellationToken);
     }
 
     public Task SetActiveAsync(string? serial, string slot, CancellationToken cancellationToken)

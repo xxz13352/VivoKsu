@@ -35,6 +35,9 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
 
     public async Task<string> EnsureInstalledAsync(CancellationToken cancellationToken)
     {
+        // 清理上次崩溃/硬杀遗留的 .staging-* 目录(正常 finally 会删,硬杀会残留)。
+        CleanupStaleStagingDirectories();
+
         var existing = FindInstalledExecutable();
         if (existing is not null)
         {
@@ -99,18 +102,49 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
         }
     }
 
-    private string? FindInstalledExecutable() => FindExecutable(InstallationRoot);
+    private string? FindInstalledExecutable() => FindExecutable(InstallationRoot, skipStagingDirectories: true);
 
-    private static string? FindExecutable(string root)
+    private void CleanupStaleStagingDirectories()
+    {
+        if (!Directory.Exists(InstallationRoot))
+        {
+            return;
+        }
+
+        foreach (var directory in Directory.GetDirectories(InstallationRoot, ".staging-*", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                Directory.Delete(directory, true);
+            }
+            catch
+            {
+                // Best effort; 下次调用继续尝试。
+            }
+        }
+    }
+
+    private static string? FindExecutable(string root, bool skipStagingDirectories = false)
     {
         if (!Directory.Exists(root))
         {
             return null;
         }
 
-        return Directory.GetFiles(root, "scrcpy.exe", SearchOption.AllDirectories)
-            .FirstOrDefault(path => new FileInfo(path).Length > 0);
+        var candidates = Directory.EnumerateFiles(root, "scrcpy.exe", SearchOption.AllDirectories);
+        if (skipStagingDirectories)
+        {
+            // 只认正式安装目录里的 scrcpy.exe;跳过 .staging-* 临时目录(崩溃残留),
+            // 否则残留会被当成“已安装”而永远不被清理,安装指向不稳定路径。
+            candidates = candidates.Where(path => !IsInsideStaging(path));
+        }
+
+        return candidates.FirstOrDefault(path => new FileInfo(path).Length > 0);
     }
+
+    private static bool IsInsideStaging(string path) =>
+        path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Any(segment => segment.StartsWith(".staging-", StringComparison.Ordinal));
 
     private static void ExtractArchiveSafely(string archivePath, string destinationRoot)
     {

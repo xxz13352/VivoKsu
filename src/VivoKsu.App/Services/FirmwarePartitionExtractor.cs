@@ -131,6 +131,25 @@ public sealed class FirmwarePartitionExtractor
         return new SafeFlashImageInfo(partitionName, outputPath, done);
     }
 
+    /// <summary>
+    /// 直接镜像 zip 里是否存在块式分区内容(.new.dat / .patch.dat / .transfer.list)。
+    /// 块式(如 PD2057 的 system/vendor/product)暂不支持刷写,会被 ListImageEntries
+    /// 静默剔除;上层必须向用户显式警告,否则用户误以为全量刷写 → 新旧固件混搭。
+    /// </summary>
+    public bool HasBlockBasedContent(string source)
+    {
+        if (IsPayloadSource(source))
+        {
+            return false;
+        }
+
+        using var archive = ZipFile.OpenRead(source);
+        return archive.Entries.Any(entry =>
+            entry.Name.EndsWith(".new.dat", StringComparison.OrdinalIgnoreCase) ||
+            entry.Name.EndsWith(".patch.dat", StringComparison.OrdinalIgnoreCase) ||
+            entry.Name.EndsWith(".transfer.list", StringComparison.OrdinalIgnoreCase));
+    }
+
     /// <summary>zip 里的可刷镜像条目:顶层 *.img / *.bin(排除 payload.bin 与 META-INF)。</summary>
     private static IEnumerable<ZipArchiveEntry> ListImageEntries(string source)
     {

@@ -49,7 +49,9 @@ public sealed class VivoVendorBootProcessor
 
         if (File.Exists(localOutput))
         {
-            throw new InvalidOperationException($"vendor_boot 修补输出已存在: {localOutput}");
+            // 允许对同一源镜像重试:上次成功或失败都会遗留输出文件。先删除,
+            // 避免“输出已存在”永久阻塞重试(与 VivoKsuDevicePatchService 的覆盖语义一致)。
+            File.Delete(localOutput);
         }
 
         try
@@ -84,11 +86,26 @@ public sealed class VivoVendorBootProcessor
                 foreach (var fileName in new[] { "modules.load", "modules.load.recovery", "modules.softdep" })
                 {
                     var path = $"{targetDirectory}/{fileName}";
-                    var extract = await backend.ShellAsync(
-                        serial,
-                        $"cd {remoteRoot}/vendor_boot/vendor_ramdisk && ../../magiskboot cpio ramdisk.cpio \"extract {path} {fileName}\" " +
-                        $"&& test -f {fileName} && echo READY",
-                        cancellationToken);
+                    string extract;
+                    try
+                    {
+                        extract = await backend.ShellAsync(
+                            serial,
+                            $"cd {remoteRoot}/vendor_boot/vendor_ramdisk && ../../magiskboot cpio ramdisk.cpio \"extract {path} {fileName}\" " +
+                            $"&& test -f {fileName} && echo READY",
+                            cancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // 条目缺失时 shell 链退出非零,ShellAsync 抛异常;与“未 echo READY”
+                        // 等价,按未提取到处理,让下面的 GKI 缺失跳过逻辑真正生效。
+                        extract = string.Empty;
+                    }
+
                     if (!extract.Contains("READY", StringComparison.OrdinalIgnoreCase))
                     {
                         if (!requireFile)

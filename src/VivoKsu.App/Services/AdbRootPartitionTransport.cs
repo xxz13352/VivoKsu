@@ -8,6 +8,15 @@ public sealed class AdbRootPartitionTransport : IPartitionTransport
 {
     private const string DiscoverCommand = "for d in /dev/block/by-name /dev/block/bootdevice/by-name /dev/block/platform/*/by-name; do [ -d \"$d\" ] || continue; for p in \"$d\"/*; do [ -e \"$p\" ] || continue; n=${p##*/}; r=$(readlink -f \"$p\") || continue; s=$(blockdev --getsize64 \"$r\" 2>/dev/null); m=0; grep -Fq \" $r \" /proc/mounts && m=1; printf '%s|%s|%s|%s\\n' \"$n\" \"$r\" \"$s\" \"$m\"; done; done";
 
+    /// <summary>
+    /// 与发现阶段一致的三种 by-name 布局。发现接受这些目录下的分区,
+    /// 执行前重解析也必须同样遍历,否则只有 bootdevice/platform 布局的
+    /// 设备会在重解析处 readlink 失败,导致备份/写入/擦除全部无法执行。
+    /// </summary>
+    private const string ResolveByNameTemplate =
+        "for d in /dev/block/by-name /dev/block/bootdevice/by-name /dev/block/platform/*/by-name; do " +
+        "[ -e \"$d/{0}\" ] || continue; readlink -f \"$d/{0}\"; break; done";
+
     private static readonly Regex ValidPartitionNameRegex = new(
         "^[A-Za-z0-9_.-]+$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -92,9 +101,11 @@ public sealed class AdbRootPartitionTransport : IPartitionTransport
             throw new InvalidOperationException("无效的分区名，已阻止执行。");
         }
 
-        // Re-resolve the by-name symlink right before executing so a partition layout
-        // change between discovery and execution cannot target a different device.
-        var resolved = (await runner.RunRootAsync(serial, $"readlink -f /dev/block/by-name/{task.PartitionName}", cancellationToken)).Trim();
+        // 与发现阶段一致遍历三种 by-name 布局再解析,绝不能只查默认 /dev/block/by-name:
+        // 只有 bootdevice/platform 布局的设备会在这里 readlink 失败,导致备份/写入/擦除
+        // 全部无法执行(发现成功但执行必败)。
+        var command = string.Format(ResolveByNameTemplate, task.PartitionName);
+        var resolved = (await runner.RunRootAsync(serial, command, cancellationToken)).Trim();
         if (!string.Equals(resolved, task.DevicePath, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("分区设备路径已变化，请重新读取分区表后再执行。");

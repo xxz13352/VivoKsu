@@ -6,7 +6,7 @@ public interface IFastbootRsNativeApi
     string Shell(string? serial, string command);
     string GetVar(string? serial, string variable);
     void Reboot(string? serial, string target);
-    void FastbootReboot(string? serial) => throw new NotSupportedException("当前 native 实现不支持 Fastboot 重启。");
+    void FastbootReboot(string? serial, string? target) => throw new NotSupportedException("当前 native 实现不支持 Fastboot 重启。");
     void SetActive(string? serial, string slot) => throw new NotSupportedException("当前 native 实现不支持切换活动槽位。");
     void Push(string? serial, string localPath, string remotePath);
     long Pull(string? serial, string remotePath, string localPath);

@@ -23,7 +23,7 @@ public class AppCompositionTests
         public string Shell(string? serial, string command) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
-        public void FastbootReboot(string? serial) { }
+        public void FastbootReboot(string? serial, string? target) { }
         public void Push(string? serial, string localPath, string remotePath) { }
         public long Pull(string? serial, string remotePath, string localPath) => 0;
         public string Install(string? serial, string apkPath, bool replace) => string.Empty;

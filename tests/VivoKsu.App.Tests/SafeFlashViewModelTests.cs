@@ -129,6 +129,182 @@ public class SafeFlashViewModelTests
     }
 
     [Fact]
+    public async Task Start_while_another_operation_runs_is_rejected_without_cancelling_the_active_operation()
+    {
+        // 回归:另一页面有任务在跑时,本页点刷写不排队、不开始,而是明确提示"已有任务
+        // 正在进行中",并且不干扰正在跑的操作(互不干扰)。
+        var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? activeOperation = null;
+        try
+        {
+            var zip = Path.Combine(directory, "ota.zip");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            {
+                CreateEntry(archive, "boot.img", [0x01]);
+            }
+
+            var session = new DeviceSessionViewModel();
+            session.ApplyDevice(new DeviceSnapshot(
+                DeviceConnectionState.FastbootConnected, "FB123", "fastboot 已连接", "vivo"));
+            var logs = new OperationLogService();
+            using var coordinator = new OperationCoordinator(session, logs);
+            activeOperation = coordinator.RunAsync(OperationKind.Transferring, "其他操作", async (_, ct) =>
+            {
+                activeStarted.TrySetResult();
+                await release.Task.WaitAsync(ct);
+            });
+            await activeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var fake = new FakeFastbootCliRunner();
+            var viewModel = CreateViewModel(session, new FlashApi(), logs, fake, coordinator);
+            viewModel.SetPendingSourceForTesting(
+                zip,
+                Path.Combine(directory, "staging"),
+                [new PayloadPartitionEntry("boot", 1, "none")]);
+
+            await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
+
+            viewModel.StatusText.Should().Be(OperationCoordinator.OperationInProgressMessage);
+            fake.FlashRequests.Should().BeEmpty();
+            fake.Rebooted.Should().BeEmpty();
+            activeOperation.IsCompleted.Should().BeFalse();
+            viewModel.IsBusy.Should().BeFalse();
+
+            release.TrySetResult();
+            await activeOperation.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            release.TrySetResult();
+            if (activeOperation is not null)
+            {
+                try
+                {
+                    await activeOperation;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task StopCommand_when_idle_cancels_the_globally_running_operation_from_another_page()
+    {
+        // 回归:别的页面有任务在跑时,本页即使没有自己的任务,「停止操作」也应可用并
+        // 能取消全局正在运行的操作——否则用户在其他菜单点取消会"没反应"。
+        var session = new DeviceSessionViewModel();
+        session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.FastbootConnected, "FB123", "fastboot", "vivo"));
+        var logs = new OperationLogService();
+        using var coordinator = new OperationCoordinator(session, logs);
+        var activeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeOperation = coordinator.RunAsync(OperationKind.Transferring, "其它页面任务", async (_, ct) =>
+        {
+            activeStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                activeCancelled.TrySetResult();
+                throw;
+            }
+        });
+        await activeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var viewModel = CreateViewModel(session, new FlashApi(), logs, coordinator: coordinator);
+
+        viewModel.StopCommand.CanExecute(null).Should().BeTrue();
+        viewModel.StopCommand.Execute(null);
+        await activeCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            await activeOperation.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    [Fact]
+    public async Task Direct_coordinator_cancel_cancels_the_active_delegate()
+    {
+        var session = new DeviceSessionViewModel();
+        session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.FastbootConnected, "FB123", "fastboot", "vivo"));
+        var logs = new OperationLogService();
+        using var coordinator = new OperationCoordinator(session, logs);
+        var activeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeOperation = coordinator.RunAsync(OperationKind.Transferring, "其它页面任务", async (_, ct) =>
+        {
+            activeStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                activeCancelled.TrySetResult();
+                throw;
+            }
+        });
+        await activeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        coordinator.CancelCurrent();
+        await activeCancelled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            await activeOperation.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    [Fact]
+    public async Task Start_command_while_another_operation_runs_is_rejected_instead_of_queueing()
+    {
+        // 回归:全局协调器忙时,开始按钮保持可点,点击给出"已有任务正在进行中"的明确
+        // 提示(而不是静默排队),且不启动新的刷写。
+        var session = new DeviceSessionViewModel();
+        session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.FastbootConnected, "FB123", "fastboot", "vivo"));
+        var logs = new OperationLogService();
+        using var coordinator = new OperationCoordinator(session, logs);
+        var activeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeOperation = coordinator.RunAsync(OperationKind.Transferring, "其它页面任务", async (_, ct) =>
+        {
+            activeStarted.TrySetResult();
+            await release.Task.WaitAsync(ct);
+        });
+        await activeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var fake = new FakeFastbootCliRunner();
+        var viewModel = CreateViewModel(session, new FlashApi(), logs, fake, coordinator);
+        viewModel.SetPendingSourceForTesting(@"C:\x\ota.zip", @"C:\x\staging",
+            [new PayloadPartitionEntry("boot", 1, "none")]);
+
+        viewModel.ConfirmFlashCommand.CanExecute(null).Should().BeTrue();
+        await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
+
+        viewModel.StatusText.Should().Be(OperationCoordinator.OperationInProgressMessage);
+        fake.FlashRequests.Should().BeEmpty();
+
+        release.TrySetResult();
+        await activeOperation.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public void CancelFlash_hides_the_confirmation_panel()
     {
         var session = new DeviceSessionViewModel();
@@ -178,7 +354,8 @@ public class SafeFlashViewModelTests
         DeviceSessionViewModel session,
         FlashApi api,
         OperationLogService? logs = null,
-        FakeFastbootCliRunner? fake = null)
+        FakeFastbootCliRunner? fake = null,
+        IOperationCoordinator? coordinator = null)
     {
         logs ??= new OperationLogService();
         var backend = new FastbootRsBackend(api);
@@ -190,7 +367,7 @@ public class SafeFlashViewModelTests
             new OtaApiClient(),
             new OtaDownloadService(),
             new FirmwarePartitionExtractor(payloadDumper: null),
-            coordinator: null,
+            coordinator,
             fake);
     }
 
@@ -232,7 +409,7 @@ public class SafeFlashViewModelTests
             rebootIssued = true;
         }
 
-        public void FastbootReboot(string? serial) => FastbootRebootCalled = true;
+        public void FastbootReboot(string? serial, string? target) => FastbootRebootCalled = true;
 
         public void Push(string? serial, string localPath, string remotePath)
         {

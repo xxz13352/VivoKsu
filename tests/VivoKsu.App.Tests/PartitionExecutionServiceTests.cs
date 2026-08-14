@@ -75,6 +75,42 @@ public class PartitionExecutionServiceTests
         }
     }
 
+    [Fact]
+    public async Task ExecuteAsync_rejects_a_truncated_backup_without_overwriting()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var session = CreateFastbootSession("FAST123");
+            var logs = new OperationLogService();
+            var transport = new RecordingPartitionTransport { TruncateBackup = true };
+            var service = new PartitionExecutionService(
+                session,
+                new OperationCoordinator(session, logs),
+                logs,
+                [transport]);
+            var outputPath = Path.Combine(root, "boot_a.img");
+            File.WriteAllText(outputPath, "previous-good-backup");
+            var plan = new PartitionExecutionPlan(
+                "FAST123",
+                PartitionTransportKind.Fastboot,
+                PartitionOperationKind.Backup,
+                [new PartitionTask("boot_a", "boot_a", null, outputPath, 64)]);
+
+            // 设备返回残缺(1 字节)备份:完整性校验必须失败,绝不覆盖既有完好备份。
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                service.ExecuteAsync(plan, (_, _) => { }, _ => { }, CancellationToken.None));
+
+            File.ReadAllText(outputPath).Should().Be("previous-good-backup");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static DeviceSessionViewModel CreateFastbootSession(string serial)
     {
         var session = new DeviceSessionViewModel();
@@ -86,6 +122,8 @@ public class PartitionExecutionServiceTests
     {
         public List<string> Writes { get; } = [];
 
+        public bool TruncateBackup { get; set; }
+
         public PartitionTransportKind Kind => PartitionTransportKind.Fastboot;
 
         public Task<PartitionSnapshot> DiscoverAsync(string serial, CancellationToken cancellationToken) =>
@@ -93,7 +131,16 @@ public class PartitionExecutionServiceTests
 
         public Task BackupAsync(string serial, PartitionTask task, IProgress<PartitionTransferProgress>? progress, CancellationToken cancellationToken)
         {
-            File.WriteAllText(task.OutputPath!, task.PartitionName);
+            if (TruncateBackup)
+            {
+                // 模拟设备返回残缺备份(远小于期望大小)。
+                File.WriteAllBytes(task.OutputPath!, [0x01]);
+                return Task.CompletedTask;
+            }
+
+            // 写入与 task.SizeBytes 一致的内容,让执行服务的备份完整性校验通过。
+            var size = (int)(task.SizeBytes ?? (long)task.PartitionName.Length);
+            File.WriteAllBytes(task.OutputPath!, new byte[size]);
             return Task.CompletedTask;
         }
 

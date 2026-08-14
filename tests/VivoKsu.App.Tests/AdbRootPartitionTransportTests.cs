@@ -71,6 +71,21 @@ public class AdbRootPartitionTransportTests
         runner.EraseRequest.Value.DevicePath.Should().Be("/dev/block/sda70");
     }
 
+    [Fact]
+    public async Task WriteAsync_resolves_partitions_on_devices_without_the_default_by_name_layout()
+    {
+        // 设备只有 /dev/block/bootdevice/by-name(无默认 /dev/block/by-name)。
+        // 重解析必须遍历发现阶段接受的三种布局,否则此处 readlink 失败 → 操作无法执行。
+        var runner = new FakeAdbRootTransferRunner { ResolvedPaths = { ["boot_a"] = "/dev/block/sda12" } };
+        var transport = new AdbRootPartitionTransport(runner);
+        var task = new PartitionTask("boot_a", "/dev/block/sda12", @"D:\images\custom.bin", null, 64L * 1024 * 1024);
+
+        await transport.WriteAsync("ADB123", task, progress: null, CancellationToken.None);
+
+        runner.WriteRequest.Should().NotBeNull();
+        runner.WriteRequest!.Value.DevicePath.Should().Be("/dev/block/sda12");
+    }
+
     private sealed class FakeAdbRootTransferRunner : IAdbRootTransferRunner
     {
         private int rootResponseIndex;
@@ -82,15 +97,31 @@ public class AdbRootPartitionTransportTests
 
         public Task<string> RunRootAsync(string serial, string command, CancellationToken cancellationToken)
         {
-            if (command.StartsWith("readlink -f /dev/block/by-name/", StringComparison.Ordinal))
+            // 多布局重解析命令:for d in ...; do [ -e "$d/{name}" ] ... done。
+            // 用 [ -e "$d/ 特征区分(发现命令是 [ -d "$d" ])。
+            if (command.Contains("[ -e \"$d/", StringComparison.Ordinal))
             {
-                var name = command["readlink -f /dev/block/by-name/".Length..].Trim();
+                var name = ExtractResolvedName(command);
                 return Task.FromResult(ResolvedPaths.TryGetValue(name, out var path) ? path : string.Empty);
             }
 
             var response = rootResponseIndex < RootResponses.Count ? RootResponses[rootResponseIndex] : string.Empty;
             rootResponseIndex++;
             return Task.FromResult(response);
+        }
+
+        private static string ExtractResolvedName(string command)
+        {
+            const string marker = "[ -e \"$d/";
+            var start = command.IndexOf(marker, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                return string.Empty;
+            }
+
+            start += marker.Length;
+            var end = command.IndexOf("\" ]", start, StringComparison.Ordinal);
+            return end < 0 ? string.Empty : command[start..end].Trim();
         }
 
         public Task CopyFromDeviceAsync(string serial, string devicePath, string localPath, IProgress<PartitionTransferProgress>? progress, CancellationToken cancellationToken) =>
