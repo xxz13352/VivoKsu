@@ -122,6 +122,15 @@ public partial class MainViewModel : ObservableObject
         {
             coordinator.StateChanged += (_, _) => LogoutCommand.NotifyCanExecuteChanged();
         }
+        // DeviceSession.IsBusy 兜底:个别页面(如 LineFlash 历史遗留)走 session.BeginOperation
+        // 而非协调器,只有 coordinator.StateChanged 会漏判;会话忙即禁用登出。
+        deviceSession.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName is nameof(DeviceSessionViewModel.IsBusy))
+            {
+                LogoutCommand.NotifyCanExecuteChanged();
+            }
+        };
         // 纯单测环境(无 WPF Application)不启动时钟,避免 DispatcherTimer 泄漏。
         if (Application.Current is not null)
         {
@@ -144,7 +153,8 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>运行中的操作(刷写/传输等)未结束前禁用登出,避免打断设备操作后仍拆线。</summary>
-    private bool CanLogout() => coordinator is null || !coordinator.IsBusy;
+    private bool CanLogout() =>
+        (coordinator is null || !coordinator.IsBusy) && !DeviceSession.IsBusy;
 
     public void StopClock() => clockTimer?.Stop();
 

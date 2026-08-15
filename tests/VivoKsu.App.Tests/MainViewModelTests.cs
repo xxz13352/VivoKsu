@@ -116,6 +116,22 @@ public class MainViewModelTests
     }
 
     [Fact]
+    public void LogoutCommand_is_disabled_while_the_session_is_busy_even_without_a_coordinator()
+    {
+        var session = new DeviceSessionViewModel();
+        var viewModel = new MainViewModel(session);
+
+        Assert.True(viewModel.LogoutCommand.CanExecute(null));
+
+        // 不走协调器的页面(LineFlash 历史遗留)直接置会话忙 → 登出也应禁用(DeviceSession.IsBusy 兜底)。
+        session.BeginOperation(OperationKind.Flashing, "正在执行");
+        Assert.False(viewModel.LogoutCommand.CanExecute(null));
+
+        session.CompleteOperation("完成");
+        Assert.True(viewModel.LogoutCommand.CanExecute(null));
+    }
+
+    [Fact]
     public void AccountName_is_settable()
     {
         var viewModel = new MainViewModel(new DeviceSessionViewModel());
