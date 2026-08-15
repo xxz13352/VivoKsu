@@ -575,7 +575,7 @@ sequenceDiagram
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**386 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**353 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长;2026-08-15 新增保存对话框注入下载到指定路径、`DownloadToFileAsync` 路径安全校验、登出命令触发回调、**登出忙时禁用**(协调器忙 + 会话忙兜底)、协调器下载失败可见提示、本地目录跟随。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 
@@ -607,7 +607,7 @@ sequenceDiagram
 
 **本地落盘位置(`ExternalResourceLocations`)**:固定释放到 `C:\nwflash`(机器级、跨用户;`apk/`、`payload-dumper/`、`scrcpy/` 三子目录)。写 C:\ 根需管理员权限,应用默认非提权 → 无权限时自动回退 `%LOCALAPPDATA%\VivoKsu`(会话启动时探测一次)。「下次检测文件存在则复用」由各 provisioner 的 `File.Exists` 检查完成。
 
-**组件安装窗(2026-08-15)**:登录后 `ShowResourceDownloaderIfNeeded` 扫描 4 项外置资源就绪状态,有缺失即弹 `ResourceDownloadWindow` 液态玻璃模态窗(可勾选/全部安装/跳过,四项并行下载、每项独立进度)。`ResourceDownloadViewModel` 复用 `RemoteAssetDownloader` + 三个 provisioner(新增 `IsInstalled`/`IsManagerApkInstalled` 就绪判定与 `IProgress<DownloadProgress>` 进度参数,复用 `Models.DownloadProgress`);软件页「安装组件」按钮经 `SoftwareViewModel.OpenResourceDownloaderCommand` 重开。
+**组件安装窗(2026-08-15)**:登录后 `ShowResourceDownloaderIfNeeded` 扫描 4 项外置资源就绪状态,有缺失即弹 `ResourceDownloadWindow` 液态玻璃模态窗(可勾选/全部安装/跳过,四项并行下载、每项独立进度)。`ResourceDownloadViewModel` 复用 `RemoteAssetDownloader` + 三个 provisioner(新增 `IsInstalled`/`IsManagerApkInstalled` 就绪判定与 `IProgress<DownloadProgress>` 进度参数,复用 `Models.DownloadProgress`);软件页「安装组件」按钮经 `SoftwareViewModel.OpenResourceDownloaderCommand` 重开。主按钮文案随勾选动态切换:`InstallButtonText` —— 全部缺失项勾选时「全部安装」,部分勾选时「下载所选 (N)」(均走 `InstallSelectedCommand` = 只装勾选且缺失项,默认全勾与全装等价);关窗后 `App.xaml.cs` 补一次 `Software.RefreshCommand` 刷新软件页组件状态(下载器可能刚把 scrcpy/APK/payload 装进 `C:\nwflash`)。
 
 | 内置组件 | 随包/外置 | 来源 | 用途 |
 | --- | --- | --- | --- |

@@ -55,7 +55,7 @@ ResourceDownloadWindow (XAML, 液态玻璃)
  ├─ 顶栏:标题「组件安装」+ 副题「奶蛙Flash 依赖组件就绪 · 缺失 N 项」+ ✕
  ├─ 中部:4 行(ModernCheckBox + 名称 + 大小 + 状态芯片 + 细进度条)
  │    └─ 已就绪项:勾选禁用(显示 ✓ 已就绪),只对缺失项可勾
- └─ 底部:计数「N / M 下载中」+ 跳过(ghost)+ 全部安装(teal primary;下载中变 取消)
+ └─ 底部:计数「N / M 下载中」+ 跳过(ghost)+ 主按钮(teal primary;全勾时「全部安装」,部分勾选时「下载所选 (N)」;下载中变 取消)
 ```
 
 单文件职责:`ResourceDownloadItemViewModel`(单项状态)+ `ResourceDownloadViewModel`(编排)+
