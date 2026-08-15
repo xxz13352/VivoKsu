@@ -354,6 +354,7 @@ flowchart TD
 - **staging 清理**:取消 / 失败 / 退出都清理 staging;盘选择优先系统 SSD(≥15GB),bezzad 多分片随机写 HDD 会停滞。
 - **下载内存有界 + 进度节流**:bezzad 多分片缓冲设 **256MB 上限**(库对 ≤0 视为无上限,网速快于磁盘时会无界堆积到包大小量级 OOM);进度上报 **~100ms 节流**(下载完成事件必达,不丢 100%)。
 - **进度分段**:解包 0–0.5、刷写 0.5–1,不重叠;右侧栏当前分区行显示 `百分比 · 速度 MB/s`。
+- **设备断开保留解包镜像(2026-08-15)**:`ConfirmFlashAsync` 成功才 `CleanupStaging`;失败/断开保留解包镜像,日志醒目记录完整路径;新增「选择解包文件夹」(`SelectFolderCommand`,OpenFolderDialog)直接列出分区刷写,免下载解包。`FirmwarePartitionExtractor` 支持文件夹源(`IsDirectorySource`:列 `*.img/*.bin` 过滤 preloader/lk、提取直接引用不复制、`HasBlockBasedContent` 返回 false)。App 退出不再清空 `{盘}\VivoKsu\safe-flash`(成功路径已由页面清理)。
 
 ### 3.10 其它关键服务
 
