@@ -8,7 +8,7 @@ namespace VivoKsu.App.Services;
 /// </summary>
 public static class AppInfo
 {
-    /// <summary>客户端版本号,如 "1.0.0"。用于 <c>X-Nwflash-Version</c> 头与版本校验。</summary>
+    /// <summary>客户端版本号,如 "1.0.1"。用于 <c>X-Nwflash-Version</c> 头与版本校验。</summary>
     public static string Version { get; } =
         Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 }
