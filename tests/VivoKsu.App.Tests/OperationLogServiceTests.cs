@@ -57,6 +57,8 @@ public class OperationLogServiceTests
         viewModel.ClearCommand.Execute(null);
 
         Assert.False(viewModel.HasEntries);
+    }
+
     [Fact]
     public void Write_persists_formatted_lines_to_the_log_file()
     {
@@ -69,7 +71,7 @@ public class OperationLogServiceTests
 
             var lines = File.ReadAllLines(logPath);
             Assert.Equal(2, lines.Length);
-            Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[Info\] 开始刷写$", lines[0]);
+            Assert.Matches(@"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[Info\] 开始刷写$", lines[0]);
             Assert.Contains("[Error] vendor_boot 修补失败", lines[1]);
         }
         finally
