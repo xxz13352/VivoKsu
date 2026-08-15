@@ -575,7 +575,7 @@ sequenceDiagram
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**386 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**387 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长;2026-08-15 新增保存对话框注入下载到指定路径、`DownloadToFileAsync` 路径安全校验、登出命令触发回调、**登出忙时禁用**(协调器忙 + 会话忙兜底)、协调器下载失败可见提示、本地目录跟随。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 

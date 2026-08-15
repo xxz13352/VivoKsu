@@ -145,6 +145,31 @@ public class RemoteAssetDownloaderTests
         }
     }
 
+    [Fact]
+    public async Task No_progress_watchdog_aborts_a_stalled_candidate()
+    {
+        // 镜像「发了头但 body 永不送达」:看门狗(短超时 2s)应在数十秒内放弃,而非无限挂起。
+        using var handler = new StalledResponseHandler();
+        using var client = new HttpClient(handler);
+        var downloader = new RemoteAssetDownloader(client, mirrorList: ["https://mirror.example/"], noProgressTimeout: TimeSpan.FromSeconds(2));
+        var destination = TempFile();
+
+        try
+        {
+            var started = DateTime.UtcNow;
+            var exception = await Assert.ThrowsAsync<RemoteAssetDownloadException>(() =>
+                downloader.DownloadAsync(new RemoteAssetSpec("卡死源", GitHubUrl), destination, null, CancellationToken.None));
+            var elapsed = DateTime.UtcNow - started;
+
+            Assert.NotNull(exception);
+            Assert.True(elapsed < TimeSpan.FromSeconds(60), $"看门狗未生效,耗时 {elapsed.TotalSeconds:0.0}s");
+        }
+        finally
+        {
+            TryDelete(destination);
+        }
+    }
+
     private static string HashOf(byte[] content) =>
         Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
 
@@ -163,6 +188,42 @@ public class RemoteAssetDownloaderTests
         catch
         {
             // Best effort.
+        }
+    }
+}
+
+/// <summary>返回响应头 + Content-Length,但 body 永不送达(读阻塞到取消)——模拟镜像「连上但不出数据」。</summary>
+public sealed class StalledResponseHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new StalledStream())
+        };
+        response.Content.Headers.ContentLength = 1_000_000;
+        return Task.FromResult(response);
+    }
+
+    private sealed class StalledStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            // 阻塞到取消(看门狗取消时抛 OCE),模拟服务器发了头后 body 永不送达。
+            var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            cancellationToken.Register(() => tcs.SetCanceled(cancellationToken));
+            return new ValueTask<int>(tcs.Task);
         }
     }
 }

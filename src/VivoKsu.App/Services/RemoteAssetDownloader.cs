@@ -55,11 +55,13 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
 
     private readonly HttpClient httpClient;
     private readonly IReadOnlyList<string> mirrorList;
+    private readonly TimeSpan noProgressTimeout;
 
-    public RemoteAssetDownloader(HttpClient? httpClient = null, IEnumerable<string>? mirrorList = null)
+    public RemoteAssetDownloader(HttpClient? httpClient = null, IEnumerable<string>? mirrorList = null, TimeSpan? noProgressTimeout = null)
     {
         this.httpClient = httpClient ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         this.mirrorList = mirrorList?.ToArray() ?? RemoteAssetCatalog.Mirrors;
+        this.noProgressTimeout = noProgressTimeout ?? NoProgressTimeout;
         if (!this.httpClient.DefaultRequestHeaders.UserAgent.Any())
         {
             this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("VivoKsu-App/1.0");
@@ -126,11 +128,11 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
         var lastProgressTick = Environment.TickCount64;
         using var watchdog = new Timer(_ =>
         {
-            if (Environment.TickCount64 - lastProgressTick > NoProgressTimeout.TotalMilliseconds)
+            if (Environment.TickCount64 - lastProgressTick > noProgressTimeout.TotalMilliseconds)
             {
                 watchdogCts.Cancel();
             }
-        }, null, TimeSpan.FromSeconds(8), TimeSpan.FromSeconds(4));
+        }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4));
 
         using var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, watchdogCts.Token);
         response.EnsureSuccessStatusCode();
