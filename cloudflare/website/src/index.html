@@ -82,6 +82,9 @@
   .nav .cta:hover{background:var(--cyan-deep);box-shadow:0 10px 26px rgba(12,124,116,.34)}
   .nav .cta:active{transform:scale(.97)}
   .nav .cta .ar{width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.22);display:grid;place-items:center;font-size:11px}
+  .nav .cta-ghost{display:inline-flex;align-items:center;border-radius:var(--r-pill);color:var(--ink);font-size:14px;font-weight:650;padding:10px 20px;border:1px solid rgba(23,35,46,.14);background:rgba(255,255,255,.5);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);box-shadow:inset 0 1px 0 rgba(255,255,255,.8);transition:background .2s,border-color .2s,color .2s,transform .15s cubic-bezier(.32,.72,0,1)}
+  .nav .cta-ghost:hover{background:rgba(255,255,255,.9);border-color:rgba(12,124,116,.45);color:var(--cyan-deep)}
+  .nav .cta-ghost:active{transform:scale(.97)}
 
   /* ---------- HERO ---------- */
   .hero{max-width:1180px;margin:0 auto;padding:88px 26px 0;display:grid;grid-template-columns:1.04fr .96fr;gap:60px;align-items:center}
@@ -250,6 +253,7 @@
         <a href="#features">功能</a>
         <a href="#changelog">更新日志</a>
       </div>
+      <a class="cta-ghost" href="https://user.nwflash.cc.cd" target="_blank" rel="noopener">登录平台</a>
       <a class="cta" href="#download">下载<span class="ar">↓</span></a>
     </div>
   </nav>
@@ -391,7 +395,7 @@
         <div>
           <div class="tag">ota · fastbootd</div>
           <h3>VIVO 线刷</h3>
-          <p>一键完成:读取设备 PD 与版本,获取线刷包,多分片下载,解包 payload,跳过 preloader 与 lk,重启 fastbootd 逐个刷入其余分区,最后重启回系统。</p>
+          <p>一键完成:读取设备 PD 与版本,获取线刷包,多分片下载,解包 payload,重启 fastbootd 逐个刷入分区,最后重启回系统。</p>
         </div>
         <div class="viz flow-mini" style="margin-top:18px">
           <div class="fm"><b>读取设备</b><span class="bar"><i></i></span></div>
@@ -418,7 +422,7 @@
           <span class="rel-pill">当前</span>
         </div>
         <ul class="rel-list">
-          <li>VIVO 线刷:一键获取线刷包、解包、刷入,跳过 preloader 与 lk,缺失分区自动跳过</li>
+          <li>VIVO 线刷:一键获取线刷包、解包、刷入,缺失分区自动跳过</li>
           <li>快速刷写:KernelSU 预设分区表,一键刷入,自动重启与双槽处理</li>
           <li>Vivo ROOT:vendor_boot 补丁,官方与 GKI 内核自动处理</li>
           <li>固件提取:payload 解包,云端直链按需下载,不落地整包,实时进度</li>
@@ -455,6 +459,7 @@
         <a href="#features">功能</a>
         <a href="#changelog">更新日志</a>
         <a href="#download">下载</a>
+        <a href="https://user.nwflash.cc.cd" target="_blank" rel="noopener">登录平台</a>
       </div>
     </div>
     <div class="copyright">© 2026 奶蛙Flash(Nwflash)。Vivo 是维沃移动通信有限公司的注册商标,本工具与其无关联。</div>
@@ -470,7 +475,6 @@
     "[OKAY] 读取系统版本 · 16.2.12.0.W10.V000L1",
     "[OKAY] 已获取线刷包",
     "[INFO] 正在解包 payload.bin",
-    "[OKAY] 跳过 preloader / lk",
     "[OKAY] 刷入 boot 分区",
     "[OKAY] 刷入 vendor_boot 分区",
     "[OKAY] 全部完成 · 准备重启"
