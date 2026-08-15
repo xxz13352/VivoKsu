@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
-    [string]$Owner = "vivoksu",
-    [string]$Repository = "nwflash-resources",
+    [string]$Owner = "xxz13352",
+    [string]$Repository = "NWFlash",
     [string]$ReleaseTag = "v1.0.0"
 )
 
 # Uploads the externalized release assets to a GitHub PUBLIC repository:
 #   KSU.APK, KernelSU.apk, payload_dumper-win-x64.zip
+# Target: xxz13352/NWFlash (see RemoteAssetCatalog for the constants the client reads).
 # Prereq: gh CLI (https://cli.github.com) installed and authenticated (gh auth login).
 # Creates the release if it does not exist, then uploads each asset. Idempotent re-runs
 # overwrite existing assets (--clobber). Prints SHA256 for each asset at the end.
@@ -15,10 +16,9 @@ param(
 # and non-ASCII comments corrupt the parser. English comments only.
 #
 # Manual browser alternative (no gh):
-#   1. Create a PUBLIC repository (e.g. vivoksu/nwflash-resources).
-#   2. Create a release tagged v1.0.0.
-#   3. Upload the three files listed below.
-#   4. Compute SHA256 (certutil -hashfile <file> SHA256) and paste into code.
+#   1. On github.com/xxz13352/NWFlash create a release tagged v1.0.0.
+#   2. Drag-drop the three files below into the release's Assets box.
+#   3. Compute SHA256 (certutil -hashfile <file> SHA256) and paste into code.
 #
 # After upload, sync code constants:
 #   - apk/KSU.APK        -> VivoRootResourceService.ManagerApkSha256 ["KSU"]

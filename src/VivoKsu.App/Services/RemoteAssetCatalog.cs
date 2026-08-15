@@ -5,16 +5,14 @@ namespace VivoKsu.App.Services;
 /// 资产托管在 GitHub 公开仓库 Release;国内直连不稳,客户端按 <see cref="Mirrors"/> 顺序逐个 failover。
 /// </summary>
 /// <remarks>
-/// 替换占位仓库:
-///  1. 建公开仓库(如 <c>gh repo create vivoksu/nwflash-resources --public</c>);
-///  2. 用 <c>scripts/Upload-Resources.ps1</c> 上传资产并创建 Release <see cref="ReleaseTag"/>;
-///  3. 若 owner/repo/tag 与下面三个常量不符,改它们。
+/// 资源上传到 <c>xxz13352/NWFlash</c> 的 Release <see cref="ReleaseTag"/>:
+///  用 <c>scripts/Upload-Resources.ps1</c>(需 <c>gh</c> CLI)上传三个资产并创建 Release。
 /// 镜像失效/换域名时更新 <see cref="Mirrors"/>(2026-08-15 逐个 HEAD 实测可用)。
 /// </remarks>
 public static class RemoteAssetCatalog
 {
-    public const string Owner = "vivoksu";
-    public const string RepositoryName = "nwflash-resources";
+    public const string Owner = "xxz13352";
+    public const string RepositoryName = "NWFlash";
     public const string ReleaseTag = "v1.0.0";
 
     /// <summary>构造 GitHub Release 资产的浏览器直链(下载时依次尝试直连与各镜像)。</summary>

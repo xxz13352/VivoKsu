@@ -6,7 +6,7 @@ namespace VivoKsu.App.Tests;
 
 public class RemoteAssetDownloaderTests
 {
-    private const string GitHubUrl = "https://github.com/vivoksu/nwflash-resources/releases/download/v1.0.0/KSU.APK";
+    private const string GitHubUrl = "https://github.com/xxz13352/NWFlash/releases/download/v1.0.0/KSU.APK";
 
     [Fact]
     public async Task Downloads_from_direct_url_when_it_succeeds()
