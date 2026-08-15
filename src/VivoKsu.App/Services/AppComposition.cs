@@ -241,7 +241,10 @@ public sealed class AppComposition
         }
 
         usageReporter.Dispose();
-        CleanupTemporaryFiles();
+        // 清理可达数 GB 的临时文件(URL 下载 gzip + 各盘 safe-flash staging)在后台线程跑:
+        // 登出路径 StopAsync 在 UI 线程 await,同步删盘会冻结界面几秒。force-exit 路径
+        // (FinishForceExit)保留同步——进程随即退出,无可见冻结。
+        await Task.Run(CleanupTemporaryFiles);
     }
 
     private async Task OnLogoutAsync()
