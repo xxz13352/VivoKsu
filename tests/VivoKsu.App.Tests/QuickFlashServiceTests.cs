@@ -277,7 +277,7 @@ public class QuickFlashServiceTests : IDisposable
             DiscoveryCount++;
             return DeviceListing;
         }
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }

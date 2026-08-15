@@ -128,7 +128,7 @@ public class DeviceSessionServiceTests
     private sealed class SessionNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => "RF8\tdevice\n";
-        public string Shell(string? serial, string command) => command switch
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => command switch
         {
             "getprop" => "[ro.product.brand]: [vivo]\n[ro.product.model]: [V2318A]\n[ro.product.device]: [PD2307]\n[ro.build.version.release]: [15]\n[ro.build.display.id]: [OriginOS 5]\n",
             "dumpsys battery" => "AC powered: false\nlevel: 78\nstatus: 3\n",
@@ -145,7 +145,7 @@ public class DeviceSessionServiceTests
     private sealed class EmptySessionNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => string.Empty;
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }
@@ -157,7 +157,7 @@ public class DeviceSessionServiceTests
     private sealed class FastbootSessionNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => "FAST123\tfastboot\n";
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => variable switch
         {
             "current-slot" => "b",
@@ -203,7 +203,7 @@ public class DeviceSessionServiceTests
             return string.Empty;
         }
 
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }

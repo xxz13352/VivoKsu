@@ -112,7 +112,7 @@ public sealed class VivoKsuDevicePatchServiceTests
         public List<string> ShellCommands { get; } = [];
 
         public string ListDevices() => string.Empty;
-        public string Shell(string? serial, string command)
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000)
         {
             ShellCommands.Add(command);
             return string.Empty;

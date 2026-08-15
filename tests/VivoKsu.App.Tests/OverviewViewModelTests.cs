@@ -78,7 +78,7 @@ public class OverviewViewModelTests
         public (string? Serial, string Target)? LastRebootRequest { get; private set; }
         public (string? Serial, string? Target)? LastFastbootRebootRequest { get; private set; }
         public string ListDevices() => string.Empty;
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) => LastRebootRequest = (serial, target);
         public void FastbootReboot(string? serial, string? target) => LastFastbootRebootRequest = (serial, target);

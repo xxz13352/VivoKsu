@@ -144,7 +144,7 @@ public class MainViewModelTests
     private sealed class CurrentDeviceApi : IFastbootRsNativeApi
     {
         public string ListDevices() => "AUTO\tdevice\n";
-        public string Shell(string? serial, string command) => command == "getprop"
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => command == "getprop"
             ? "[ro.product.model]: [自动检测设备]\n"
             : string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;

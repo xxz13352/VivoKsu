@@ -263,7 +263,7 @@ public class QuickFlashViewModelTests
 
         public string ListDevices() => "FAST123\tfastboot";
 
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
 
         public string GetVar(string? serial, string variable) => string.Empty;
 
@@ -281,7 +281,7 @@ public class QuickFlashViewModelTests
     private sealed class EmptyNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => string.Empty;
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }
@@ -300,7 +300,7 @@ public class QuickFlashViewModelTests
             return string.Empty;
         }
 
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }

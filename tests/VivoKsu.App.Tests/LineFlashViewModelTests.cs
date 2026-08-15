@@ -122,7 +122,7 @@ public class LineFlashViewModelTests
     private sealed class LineFlashNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => "FAST123\tfastboot\n";
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => variable switch
         {
             "current-slot" => "a",

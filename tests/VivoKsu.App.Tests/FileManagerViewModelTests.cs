@@ -327,7 +327,7 @@ public class FileManagerViewModelTests
     private class EmptyNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => string.Empty;
-        public virtual string Shell(string? serial, string command) => string.Empty;
+        public virtual string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public virtual void Push(string? serial, string localPath, string remotePath) { }
@@ -340,7 +340,7 @@ public class FileManagerViewModelTests
     {
         public string? LastShellCommand { get; private set; }
         public string ListDevices() => "RF8\tdevice\n";
-        public string Shell(string? serial, string command)
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000)
         {
             LastShellCommand = command;
             return "-rw-rw---- 1 u0_a123 media_rw 2048 2026-08-10 11:21 IMG_0001.jpg\n";
@@ -355,7 +355,7 @@ public class FileManagerViewModelTests
 
     private sealed class FailingDirectoryNativeApi : EmptyNativeApi
     {
-        public override string Shell(string? serial, string command) =>
+        public override string Shell(string? serial, string command, int timeoutMilliseconds = 15000) =>
             throw new InvalidOperationException("permission denied");
     }
 
@@ -363,7 +363,7 @@ public class FileManagerViewModelTests
     {
         public List<string> ShellCommands { get; } = [];
 
-        public override string Shell(string? serial, string command)
+        public override string Shell(string? serial, string command, int timeoutMilliseconds = 15000)
         {
             ShellCommands.Add(command);
             return string.Empty;
@@ -374,7 +374,7 @@ public class FileManagerViewModelTests
     {
         public bool PushCalled { get; private set; }
 
-        public override string Shell(string? serial, string command) =>
+        public override string Shell(string? serial, string command, int timeoutMilliseconds = 15000) =>
             throw new InvalidOperationException("device disconnected after upload");
 
         public override void Push(string? serial, string localPath, string remotePath)
@@ -388,7 +388,7 @@ public class FileManagerViewModelTests
         ManualResetEventSlim releasePush) : IFastbootRsNativeApi
     {
         public string ListDevices() => string.Empty;
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath)

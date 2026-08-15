@@ -7,6 +7,8 @@ namespace VivoKsu.App.Services;
 public sealed class VivoVendorBootProcessor
 {
     private const long MaxPatchGrowthBytes = 16L * 1024 * 1024;
+    /// <summary>magiskboot 解包/重打包在设备上要解压数百 MB ramdisk,远超 adb shell 默认 15s;给足 3 分钟。</summary>
+    private const int LongCommandTimeoutMilliseconds = 180_000;
     private const string RemoteBase = "/data/local/tmp/vivo_vendor_boot";
     private static readonly Regex GkiDirectoryPattern = new(
         @"lib/modules/(?<version>[0-9][^/\r\n]*?)-gki(?:/|\r?$)",
@@ -72,7 +74,7 @@ public sealed class VivoVendorBootProcessor
                 serial,
                 $"cd {remoteRoot} && chmod 755 magiskboot && ./magiskboot unpack vendor_boot.img 2>&1; " +
                 $"echo UNPACK_EXIT=$?; find . -maxdepth 3 -name '*.cpio' 2>/dev/null",
-                cancellationToken);
+                cancellationToken, LongCommandTimeoutMilliseconds);
             if (!unpack.Contains("vendor_ramdisk/ramdisk.cpio", StringComparison.Ordinal))
             {
                 throw new InvalidDataException($"vendor_boot 未找到 vendor_ramdisk/ramdisk.cpio。解包输出:\n{unpack}");
@@ -81,7 +83,7 @@ public sealed class VivoVendorBootProcessor
             var listing = await backend.ShellAsync(
                 serial,
                 $"cd {vendorRamdiskDir} && {magiskboot} cpio ramdisk.cpio \"ls /lib/modules/\"",
-                cancellationToken);
+                cancellationToken, LongCommandTimeoutMilliseconds);
             // 官版 KernelSU 一次处理全部内核路径：官方内核( lib/modules )加上 vendor
             // ramdisk 里检测到的所有 GKI 模块目录，避免漏掉任一模块加载清单。
             var targetDirectories = ResolveTargetDirectories(listing);
@@ -101,7 +103,7 @@ public sealed class VivoVendorBootProcessor
                             serial,
                             $"cd {vendorRamdiskDir} && {magiskboot} cpio ramdisk.cpio \"extract {path} {fileName}\" " +
                             $"&& test -f {fileName} && echo READY",
-                            cancellationToken);
+                            cancellationToken, LongCommandTimeoutMilliseconds);
                     }
                     catch (OperationCanceledException)
                     {
@@ -131,7 +133,7 @@ public sealed class VivoVendorBootProcessor
                         serial,
                         $"cd {vendorRamdiskDir} && {filter} && " +
                         $"{magiskboot} cpio ramdisk.cpio \"add 0644 {path} {fileName}\" && rm -f {fileName}",
-                        cancellationToken);
+                        cancellationToken, LongCommandTimeoutMilliseconds);
                 }
             }
 
@@ -139,7 +141,7 @@ public sealed class VivoVendorBootProcessor
                 serial,
                 $"cd {remoteRoot} && {magiskboot} repack vendor_boot.img " +
                 "2>&1 && test -f new-boot.img && echo REPACKED",
-                cancellationToken);
+                cancellationToken, LongCommandTimeoutMilliseconds);
             EnsureOutput(repack, "REPACKED", "vendor_boot 重打包失败，未生成 new-boot.img");
 
             context?.ReportStage("正在获取修补后的 vendor_boot 镜像");

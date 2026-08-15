@@ -212,7 +212,7 @@ public partial class MainViewModel : ObservableObject
     private sealed class UnavailableNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => string.Empty;
-        public string Shell(string? serial, string command) => throw new InvalidOperationException("设备服务未初始化。");
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => throw new InvalidOperationException("设备服务未初始化。");
         public string GetVar(string? serial, string variable) => throw new InvalidOperationException("设备服务未初始化。");
         public void Reboot(string? serial, string target) => throw new InvalidOperationException("设备服务未初始化。");
         public void Push(string? serial, string localPath, string remotePath) => throw new InvalidOperationException("设备服务未初始化。");

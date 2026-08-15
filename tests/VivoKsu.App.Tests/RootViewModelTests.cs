@@ -198,7 +198,7 @@ public sealed class RootViewModelTests
     private class EmptyNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => string.Empty;
-        public virtual string Shell(string? serial, string command) => command.StartsWith("pm path", StringComparison.Ordinal) ? "package:/data/app/manager.apk" : string.Empty;
+        public virtual string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => command.StartsWith("pm path", StringComparison.Ordinal) ? "package:/data/app/manager.apk" : string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }
@@ -211,7 +211,7 @@ public sealed class RootViewModelTests
     {
         public List<string> ShellCommands { get; } = [];
 
-        public override string Shell(string? serial, string command)
+        public override string Shell(string? serial, string command, int timeoutMilliseconds = 15000)
         {
             ShellCommands.Add(command);
             return base.Shell(serial, command);
@@ -228,7 +228,7 @@ public sealed class RootViewModelTests
 
         public string ListDevices() => isFastboot ? "ADB123\tfastboot\n" : "ADB123\tdevice\n";
 
-        public string Shell(string? serial, string command) => command.StartsWith("pm path", StringComparison.Ordinal)
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => command.StartsWith("pm path", StringComparison.Ordinal)
             ? "package:/data/app/manager.apk"
             : string.Empty;
 

@@ -49,7 +49,7 @@ public class DeviceInfoServiceTests
     private sealed class PropertyNativeApi(string properties) : IFastbootRsNativeApi
     {
         public string ListDevices() => "RF8\tdevice\n";
-        public string Shell(string? serial, string command) => command == "getprop" ? properties : string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => command == "getprop" ? properties : string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }
@@ -61,7 +61,7 @@ public class DeviceInfoServiceTests
     private sealed class EmptyNativeApi : IFastbootRsNativeApi
     {
         public string ListDevices() => "FAST123\tfastboot\n";
-        public string Shell(string? serial, string command) => string.Empty;
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => string.Empty;
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void Push(string? serial, string localPath, string remotePath) { }

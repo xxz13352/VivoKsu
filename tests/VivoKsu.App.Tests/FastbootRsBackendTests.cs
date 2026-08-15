@@ -75,7 +75,7 @@ public class FastbootRsBackendTests
         public (string? Serial, string Partition, string OutputPath)? FetchRequest { get; private set; }
 
         public string ListDevices() => devices;
-        public string Shell(string? serial, string command)
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000)
         {
             LastShellRequest = (serial, command);
             return ShellResult;

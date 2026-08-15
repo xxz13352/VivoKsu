@@ -137,7 +137,7 @@ public class AdbFileServiceTests
         public string? PullDestination { get; private set; }
         public string? LastShellCommand { get; private set; }
         public string ListDevices() => string.Empty;
-        public string Shell(string? serial, string command)
+        public string Shell(string? serial, string command, int timeoutMilliseconds = 15000)
         {
             LastShellCommand = command;
             return ShellResult;

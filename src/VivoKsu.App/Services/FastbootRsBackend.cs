@@ -20,9 +20,9 @@ public sealed class FastbootRsBackend
         }, cancellationToken);
     }
 
-    public Task<string> ShellAsync(string? serial, string command, CancellationToken cancellationToken)
+    public Task<string> ShellAsync(string? serial, string command, CancellationToken cancellationToken, int timeoutMilliseconds = 15000)
     {
-        return Task.Run(() => nativeApi.Shell(serial, command), cancellationToken);
+        return Task.Run(() => nativeApi.Shell(serial, command, timeoutMilliseconds), cancellationToken);
     }
 
     public Task<string> GetVarAsync(string? serial, string variable, CancellationToken cancellationToken)

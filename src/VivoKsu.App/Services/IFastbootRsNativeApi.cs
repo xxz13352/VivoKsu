@@ -3,7 +3,8 @@ namespace VivoKsu.App.Services;
 public interface IFastbootRsNativeApi
 {
     string ListDevices();
-    string Shell(string? serial, string command);
+    /// <summary>执行 adb shell 命令。timeoutMilliseconds 供重操作(如 magiskboot 解包/重打包)放宽默认 15s。</summary>
+    string Shell(string? serial, string command, int timeoutMilliseconds = 15000);
     string GetVar(string? serial, string variable);
     void Reboot(string? serial, string target);
     void FastbootReboot(string? serial, string? target) => throw new NotSupportedException("当前 native 实现不支持 Fastboot 重启。");

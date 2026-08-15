@@ -90,8 +90,8 @@ public sealed class PlatformToolsNativeApi : IFastbootRsNativeApi
         return string.Join("\n", ParseAdbDevices(adb.StandardOutput).Concat(ParseFastbootDevices(fastboot.StandardOutput)));
     }
 
-    public string Shell(string? serial, string command) =>
-        Run(adbExecutable, WithSerial(serial, "shell", command)).CombinedOutput;
+    public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) =>
+        Run(adbExecutable, WithSerial(serial, "shell", command), timeoutMilliseconds).CombinedOutput;
 
     public string GetVar(string? serial, string variable)
     {
