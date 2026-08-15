@@ -63,10 +63,12 @@ public sealed class VivoVendorBootProcessor
             await backend.PushAsync(serial, sourceSnapshot.Path, $"{remoteRoot}/vendor_boot.img", cancellationToken);
 
             context?.ReportStage("正在处理 vendor_boot 镜像");
+            // 2>&1:magiskboot 的错误输出并入 stdout 供 ShellAsync 捕获——失败时能拿到真实原因
+            // (此前 /dev/null 2>&1 把错误全吞,只剩「退出码 1,未返回诊断信息」)。
             var unpack = await backend.ShellAsync(
                 serial,
                 $"cd {remoteRoot} && chmod 755 magiskboot && ./magiskboot unpack vendor_boot.img " +
-                ">/dev/null 2>&1 && test -f vendor_boot/vendor_ramdisk/ramdisk.cpio && echo VENDOR_RAMDISK_READY",
+                "2>&1 && test -f vendor_boot/vendor_ramdisk/ramdisk.cpio && echo VENDOR_RAMDISK_READY",
                 cancellationToken);
             EnsureOutput(unpack, "VENDOR_RAMDISK_READY", "vendor_boot 未找到可处理的 vendor_ramdisk/ramdisk.cpio");
 
@@ -130,7 +132,7 @@ public sealed class VivoVendorBootProcessor
             var repack = await backend.ShellAsync(
                 serial,
                 $"cd {remoteRoot}/vendor_boot && ../magiskboot repack vendor_boot.img " +
-                ">/dev/null 2>&1 && test -f new-boot.img && echo REPACKED",
+                "2>&1 && test -f new-boot.img && echo REPACKED",
                 cancellationToken);
             EnsureOutput(repack, "REPACKED", "vendor_boot 重打包失败，未生成 new-boot.img");
 

@@ -38,6 +38,38 @@ public sealed class VivoVendorBootProcessorTests
     }
 
     [Fact]
+    public async Task Unpack_and_repack_commands_surface_magiskboot_output_for_diagnostics()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var sourcePath = Path.Combine(directory, "vendor_boot.img");
+        await File.WriteAllBytesAsync(sourcePath, "vendor-stock"u8.ToArray());
+        var source = await InspectAsync(sourcePath);
+        var native = new VendorPatchNativeApi();
+        var backend = new FastbootRsBackend(native);
+        var service = new VivoVendorBootProcessor(backend, new VivoRootResourceService(AppContext.BaseDirectory), new QuickFlashService(backend, new FakeFastbootCliRunner(), new OperationLogService()));
+
+        try
+        {
+            await service.PatchAsync("ADB123", source, CancellationToken.None);
+
+            // 诊断修复:magiskboot 错误输出须 2>&1 并入 stdout 供 ShellAsync 捕获,绝不能用 /dev/null 吞掉
+            // (否则失败只剩「退出码 1,未返回诊断信息」,无法定位)。防止回归。
+            var unpack = native.ShellCommands.Single(command => command.Contains("unpack vendor_boot.img", StringComparison.Ordinal));
+            Assert.Contains("2>&1", unpack);
+            Assert.DoesNotContain("/dev/null", unpack);
+
+            var repack = native.ShellCommands.Single(command => command.Contains("repack vendor_boot.img", StringComparison.Ordinal));
+            Assert.Contains("2>&1", repack);
+            Assert.DoesNotContain("/dev/null", repack);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
     public async Task PatchAsync_keeps_processing_the_official_kernel_when_no_gki_directory_is_present()
     {
         var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));

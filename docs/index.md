@@ -49,7 +49,7 @@ VivoKsu 工具/
 │  ├─ website/src/index.html # nwflash.cc.cd 官网(高级白液态玻璃单页)
 │  ├─ website/src/index.ts   # nwflash.cc.cd · Worker nwflash-site(托管官网)
 │  └─ wrangler.toml          # D1 绑定 + 自定义域 + vars + Cron
-├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(391 用例)
+├─ tests/VivoKsu.App.Tests/  # 桌面应用单元测试(392 用例)
 ├─ scripts/                  # Publish-Release.ps1 / Upload-Resources.ps1 / verify-*.ps1
 └─ docs/                     # 本文档 + architecture.md + safeflash-ota.md
 ```
@@ -94,7 +94,7 @@ VivoKsu 工具/
 
 - **后端**:全部 Cloudflare;旧自建 .NET 服务端已删除;api / web / user / website 均已部署。
 - **后台**:「固件登记簿」控制台(五菜单 + 服务健康带 + № 登记册 + 撕口 token 凭证 + OKAY/FAIL 协议回显)已上线。
-- **桌面端**:391 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
+- **桌面端**:392 测试全绿;登录门禁 + 强制登录 + 封禁 / 版本控制接线完整。
 - **发布瘦身(2026-08-15)**:framework-dependent + 原生 AOT 引导器(`VivoKsu.Launcher.exe`,.NET 缺失→微软直链静默装);scrcpy / ROOT 管理器 APK / payload_dumper 外置按需下载(GitHub Release + gh-proxy.com/ghfast.top/ghproxy.net 多镜像 failover + SHA-256 校验);驱动 / adb-fastboot / magiskboot 保留随包。解压 ~205MB → ~24MB,zip ~95MB → ~11MB。详情见 [architecture.md §9](architecture.md)。
 - **界面整合(2026-08-15)**:左侧菜单按刷机链路分组;左下角账号/时间/登出栏(同进程登出回登录窗,刷写中登出禁用);全部主进度统一到右上角「操作进度」区;文件管理传出弹保存位置对话框。设计文档见 [设计规格](superpowers/specs/2026-08-15-ui-consolidation-design.md) / [实施计划](superpowers/plans/2026-08-15-ui-consolidation.md)。
 - **在线会话**:客户端每 5s 心跳保持在线;后台「在线状态」实时查看会话(用户/版本/IP/时长)并**强制下线**(≤5s 内客户端退出);客户端「在线状态」页查看在线用户与时长;心跳 force_exit / 封禁 / 426 均走防变砖退出(刷写中先取消、等 Idle 再退)。
