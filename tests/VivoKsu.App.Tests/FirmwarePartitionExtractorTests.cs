@@ -127,4 +127,81 @@ public class FirmwarePartitionExtractorTests
             return path;
         }
     }
+
+    [Fact]
+    public async Task ListPartitionsAsync_on_an_extracted_folder_lists_images_and_filters_preloader_lk()
+    {
+        var directory = TestDirectories.Create();
+        try
+        {
+            File.WriteAllBytes(Path.Combine(directory, "boot.img"), new byte[] { 0x01 });
+            File.WriteAllBytes(Path.Combine(directory, "lk.img"), new byte[] { 0x02 });
+            File.WriteAllBytes(Path.Combine(directory, "preloader.img"), new byte[] { 0x03 });
+            File.WriteAllBytes(Path.Combine(directory, "system.new.dat"), new byte[100]);
+            var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
+
+            var partitions = await extractor.ListPartitionsAsync(directory, CancellationToken.None);
+
+            partitions.Select(partition => partition.Name).Should().BeEquivalentTo(["boot"]);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExtractPartitionAsync_from_an_extracted_folder_references_the_existing_image()
+    {
+        var directory = TestDirectories.Create();
+        try
+        {
+            var image = Path.Combine(directory, "vendor.img");
+            File.WriteAllBytes(image, new byte[] { 0xAA, 0xBB, 0xCC });
+            var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
+
+            var result = await extractor.ExtractPartitionAsync(
+                directory, "vendor", Path.Combine(directory, "out"), CancellationToken.None);
+
+            result.PartitionName.Should().Be("vendor");
+            result.ImagePath.Should().Be(image);
+            result.SizeBytes.Should().Be(3);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void HasBlockBasedContent_returns_false_for_an_extracted_folder()
+    {
+        var directory = TestDirectories.Create();
+        try
+        {
+            File.WriteAllBytes(Path.Combine(directory, "system.img"), new byte[] { 0x01 });
+            var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
+
+            extractor.HasBlockBasedContent(directory).Should().BeFalse();
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void IsDirectorySource_detects_an_extracted_folder()
+    {
+        var directory = TestDirectories.Create();
+        try
+        {
+            FirmwarePartitionExtractor.IsDirectorySource(directory).Should().BeTrue();
+            FirmwarePartitionExtractor.IsDirectorySource(directory + ".img").Should().BeFalse();
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 }

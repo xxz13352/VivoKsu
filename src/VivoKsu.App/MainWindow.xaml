@@ -1084,6 +1084,7 @@
               <StackPanel Grid.Column="2" Orientation="Horizontal">
                 <Button Content="下载+刷入" Style="{StaticResource PrimaryButtonStyle}" Command="{Binding SafeFlash.DownloadAndFlashCommand}" Padding="16,8"/>
                 <Button Content="选择固件" Style="{StaticResource ToolButtonStyle}" Command="{Binding SafeFlash.SelectAndFlashCommand}" Margin="10,0,0,0" Padding="16,8"/>
+                <Button Content="选择解包文件夹" Style="{StaticResource ToolButtonStyle}" Command="{Binding SafeFlash.SelectFolderCommand}" Margin="10,0,0,0" Padding="16,8" AutomationProperties.Name="选择解包文件夹"/>
               </StackPanel>
             </Grid>
             <TextBlock Grid.Row="1" Margin="24,12,24,0" Text="固件中可直接刷写的分区镜像会被逐个刷入,preloader 与 lk 被跳过;含块式内容(如 system/vendor/product 的 .new.dat)的固件会在确认时给出警告。" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>

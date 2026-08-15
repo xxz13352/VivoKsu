@@ -287,7 +287,7 @@ public sealed class AppComposition
         LogoutRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>清理可达数 GB 的临时文件(URL 下载 gzip + 安全刷写 staging)。正常退出与强制退出共用。</summary>
+    /// <summary>清理可达数 GB 的临时文件(URL 下载 gzip;安全刷写 staging 成功时已由页面清理)。正常退出与强制退出共用。</summary>
     private static void CleanupTemporaryFiles()
     {
         try
@@ -303,26 +303,9 @@ public sealed class AppComposition
             // Best effort; Windows 磁盘清理最终会回收临时目录。
         }
 
-        try
-        {
-            foreach (var drive in DriveInfo.GetDrives())
-            {
-                if (!drive.IsReady || drive.DriveType != DriveType.Fixed)
-                {
-                    continue;
-                }
-
-                var safeFlashRoot = Path.Combine(drive.RootDirectory.FullName, "VivoKsu", "safe-flash");
-                if (Directory.Exists(safeFlashRoot))
-                {
-                    Directory.Delete(safeFlashRoot, recursive: true);
-                }
-            }
-        }
-        catch
-        {
-            // Best effort; 下次启动的 CleanupStaging 会继续处理当前 staging。
-        }
+        // 不再清空 {盘}\VivoKsu\safe-flash:设备断开/失败时解包好的镜像保留在该处,
+        // 供「VIVO 线刷 → 选择解包文件夹」跨重启复用。成功路径已由 SafeFlashViewModel 自行
+        // CleanupStaging;失败路径刻意保留。残留可由用户手动清理。
     }
 
     private string? pendingForceExitReason;

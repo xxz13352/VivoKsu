@@ -50,6 +50,44 @@ public class SafeFlashViewModelTests
     }
 
     [Fact]
+    public async Task ConfirmFlashAsync_keeps_extracted_images_when_the_flash_fails()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var zip = Path.Combine(directory, "ota.zip");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            {
+                CreateEntry(archive, "boot.img", [0x01, 0x02]);
+            }
+
+            var session = new DeviceSessionViewModel();
+            session.ApplyDevice(new DeviceSnapshot(
+                DeviceConnectionState.FastbootConnected, "FB123", "fastboot 已连接", "vivo"));
+            var api = new FlashApi();
+            var logs = new OperationLogService();
+            var fake = new FakeFastbootCliRunner { FailPartition = "boot" };
+            var viewModel = CreateViewModel(session, api, logs, fake);
+            var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
+            var partitions = await extractor.ListPartitionsAsync(zip, CancellationToken.None);
+            var staging = Path.Combine(directory, "staging");
+            viewModel.SetPendingSourceForTesting(zip, staging, partitions);
+
+            await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
+
+            // 设备断开/刷写失败:解包好的镜像保留(不 CleanupStaging),并给用户提示路径。
+            Directory.Exists(staging).Should().BeTrue();
+            Directory.Exists(Path.Combine(staging, "extract")).Should().BeTrue();
+            logs.Entries.Should().Contain(entry => entry.Message.Contains("已保留解包好的镜像"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ConfirmFlashAsync_skips_partitions_not_present_on_the_device()
     {
         var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));

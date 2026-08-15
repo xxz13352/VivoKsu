@@ -53,11 +53,21 @@ public sealed class FirmwarePartitionExtractor
     public static bool IsPayloadSource(string source) =>
         !IsZip(source) || ContainsPayloadBin(source);
 
+    /// <summary>源是否为「已解包的镜像文件夹」(用户选择 / 设备断开后保留的提取目录)。</summary>
+    public static bool IsDirectorySource(string source) => Directory.Exists(source);
+
     /// <summary>列出源中的待刷分区(已过滤 preloader*/lk)。</summary>
     public async Task<IReadOnlyList<PayloadPartitionEntry>> ListPartitionsAsync(
         string source,
         CancellationToken cancellationToken)
     {
+        if (IsDirectorySource(source))
+        {
+            return ListDirectoryImages(source)
+                .Where(entry => !ShouldSkip(entry.Name))
+                .ToList();
+        }
+
         var kind = await FirmwareFormatDetector.DetectAsync(source, cancellationToken);
         if (kind == FirmwareFormatDetector.FirmwareKind.VivoGzip)
         {
@@ -98,6 +108,13 @@ public sealed class FirmwarePartitionExtractor
         IProgress<long>? writeProgress = null)
     {
         Directory.CreateDirectory(outputDirectory);
+        if (IsDirectorySource(source))
+        {
+            // 已解包的文件夹源:镜像就在源目录,直接引用不复制(避免再拷贝数 GB)。
+            var imagePath = FindDirectoryImage(source, partitionName);
+            return new SafeFlashImageInfo(partitionName, imagePath, new FileInfo(imagePath).Length);
+        }
+
         if (IsPayloadSource(source))
         {
             if (payloadDumper is null)
@@ -157,6 +174,12 @@ public sealed class FirmwarePartitionExtractor
     /// </summary>
     public bool HasBlockBasedContent(string source)
     {
+        if (IsDirectorySource(source))
+        {
+            // 已解包文件夹只含可直接刷的镜像,无块式内容。
+            return false;
+        }
+
         if (IsPayloadSource(source))
         {
             return false;
@@ -167,6 +190,47 @@ public sealed class FirmwarePartitionExtractor
             entry.Name.EndsWith(".new.dat", StringComparison.OrdinalIgnoreCase) ||
             entry.Name.EndsWith(".patch.dat", StringComparison.OrdinalIgnoreCase) ||
             entry.Name.EndsWith(".transfer.list", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>解包文件夹里的可刷镜像:顶层 *.img / *.bin(排除 payload.bin)。</summary>
+    private static IEnumerable<PayloadPartitionEntry> ListDirectoryImages(string source)
+    {
+        foreach (var file in Directory.EnumerateFiles(source, "*.*", SearchOption.TopDirectoryOnly))
+        {
+            var extension = Path.GetExtension(file);
+            if (!ImageExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (name.Equals("payload", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            yield return new PayloadPartitionEntry(name, new FileInfo(file).Length, "store");
+        }
+    }
+
+    /// <summary>按分区名在解包文件夹里定位镜像(支持 .img/.bin 扩展名)。</summary>
+    private static string FindDirectoryImage(string source, string partitionName)
+    {
+        foreach (var file in Directory.EnumerateFiles(source, "*.*", SearchOption.TopDirectoryOnly))
+        {
+            var extension = Path.GetExtension(file);
+            if (!ImageExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.Equals(Path.GetFileNameWithoutExtension(file), partitionName, StringComparison.OrdinalIgnoreCase))
+            {
+                return file;
+            }
+        }
+
+        throw new InvalidDataException($"解包文件夹内未找到分区 {partitionName} 的镜像。");
     }
 
     /// <summary>zip 里的可刷镜像条目:顶层 *.img / *.bin(排除 payload.bin 与 META-INF)。</summary>

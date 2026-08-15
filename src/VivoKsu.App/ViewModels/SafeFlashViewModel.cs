@@ -57,6 +57,7 @@ public partial class SafeFlashViewModel : ObservableObject
     }
 
     private string stagingRoot = string.Empty;
+    private string extractDirectory = string.Empty;
     private string sourcePath = string.Empty;
     private IReadOnlyList<PayloadPartitionEntry> pendingPartitions = [];
     private long lastExtractSpeedBytes;
@@ -125,6 +126,7 @@ public partial class SafeFlashViewModel : ObservableObject
 
         DownloadAndFlashCommand = new AsyncRelayCommand(DownloadAndFlashAsync, CanDownloadAndFlash);
         SelectAndFlashCommand = new AsyncRelayCommand(SelectAndFlashAsync, CanSelectAndFlash);
+        SelectFolderCommand = new AsyncRelayCommand(SelectFolderAndFlashAsync, CanSelectAndFlash);
         ConfirmFlashCommand = new AsyncRelayCommand(ConfirmFlashAsync, CanConfirmFlash);
         CancelFlashCommand = new RelayCommand(CancelFlash, CanConfirmFlash);
         StopCommand = new RelayCommand(Stop, CanStop);
@@ -133,6 +135,9 @@ public partial class SafeFlashViewModel : ObservableObject
     public IAsyncRelayCommand DownloadAndFlashCommand { get; }
 
     public IAsyncRelayCommand SelectAndFlashCommand { get; }
+
+    /// <summary>选择「已解包的固件文件夹」(设备断开后保留的提取目录 / 手动解好的镜像目录),直接刷写。</summary>
+    public IAsyncRelayCommand SelectFolderCommand { get; }
 
     public IAsyncRelayCommand ConfirmFlashCommand { get; }
 
@@ -164,6 +169,7 @@ public partial class SafeFlashViewModel : ObservableObject
         OnPropertyChanged(nameof(CurrentPartitionProgressPercent));
         DownloadAndFlashCommand.NotifyCanExecuteChanged();
         SelectAndFlashCommand.NotifyCanExecuteChanged();
+        SelectFolderCommand.NotifyCanExecuteChanged();
         ConfirmFlashCommand.NotifyCanExecuteChanged();
         CancelFlashCommand.NotifyCanExecuteChanged();
         StopCommand.NotifyCanExecuteChanged();
@@ -177,6 +183,7 @@ public partial class SafeFlashViewModel : ObservableObject
     {
         DownloadAndFlashCommand.NotifyCanExecuteChanged();
         SelectAndFlashCommand.NotifyCanExecuteChanged();
+        SelectFolderCommand.NotifyCanExecuteChanged();
         ConfirmFlashCommand.NotifyCanExecuteChanged();
         CancelFlashCommand.NotifyCanExecuteChanged();
     }
@@ -206,6 +213,7 @@ public partial class SafeFlashViewModel : ObservableObject
     {
         DownloadAndFlashCommand.NotifyCanExecuteChanged();
         SelectAndFlashCommand.NotifyCanExecuteChanged();
+        SelectFolderCommand.NotifyCanExecuteChanged();
         ConfirmFlashCommand.NotifyCanExecuteChanged();
         CancelFlashCommand.NotifyCanExecuteChanged();
         StopCommand.NotifyCanExecuteChanged();
@@ -293,6 +301,22 @@ public partial class SafeFlashViewModel : ObservableObject
         await PrepareFlashAsync();
     }
 
+    /// <summary>②b 选择「已解包固件文件夹」(设备断开后保留的提取目录 / 手动解好的镜像目录):直接列出分区刷写,免下载解包。</summary>
+    private async Task SelectFolderAndFlashAsync()
+    {
+        var dialog = new OpenFolderDialog { Title = "选择已解包的固件文件夹" };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        stagingRoot = CreateStagingRoot();
+        Directory.CreateDirectory(stagingRoot);
+        sourcePath = dialog.FolderName;
+        logs.Write(OperationLogLevel.Info, $"已选择解包固件文件夹 {sourcePath}");
+        await PrepareFlashAsync();
+    }
+
     /// <summary>读取源中的待刷分区,弹内联确认(列出跳过 preloader*/lk 后的分区数)。</summary>
     private async Task PrepareFlashAsync()
     {
@@ -355,10 +379,9 @@ public partial class SafeFlashViewModel : ObservableObject
 
         var partitionsToFlash = pendingPartitions;
         IsConfirmVisible = false;
-        await RunOperationAsync(OperationKind.Flashing, "VIVO 线刷", async (context, ct) =>
+        extractDirectory = Path.Combine(stagingRoot, "extract", Guid.NewGuid().ToString("N"));
+        var success = await RunOperationAsync(OperationKind.Flashing, "VIVO 线刷", async (context, ct) =>
         {
-            var extractDirectory = Path.Combine(stagingRoot, "extract", Guid.NewGuid().ToString("N"));
-
             // 1. 解压解包所有分区镜像。先确认 staging 盘放得下全部镜像(OTA 包已在 staging)。
             var taskStopwatch = Stopwatch.StartNew();
             OtaDownloadService.EnsureDiskSpace(
@@ -471,7 +494,32 @@ public partial class SafeFlashViewModel : ObservableObject
                 ? $"已刷入 {images.Count - skipped} 个分区,跳过 {skipped} 个设备不存在的分区"
                 : $"已刷入 {images.Count} 个分区";
             logs.Write(OperationLogLevel.Success, StatusText);
-        }, cleanup: CleanupStaging);
+        });
+
+        // 成功:镜像已消费,清掉 staging。失败(设备断开/取消):保留解包好的镜像,
+        // 记录完整路径,用户重连后在「选择解包文件夹」直接复用,免下载/解包。
+        if (success)
+        {
+            CleanupStaging();
+        }
+        else
+        {
+            RetainExtractedForResume();
+        }
+    }
+
+    /// <summary>设备断开/失败时保留解包好的镜像,醒目提示位置供「选择解包文件夹」复用。</summary>
+    private void RetainExtractedForResume()
+    {
+        if (string.IsNullOrWhiteSpace(extractDirectory) || !Directory.Exists(extractDirectory))
+        {
+            return;
+        }
+
+        var message = $"设备连接断开或刷写失败,已保留解包好的镜像:\n{extractDirectory}\n\n" +
+            "重连设备后请在「VIVO 线刷 → 选择解包文件夹」选择该目录直接刷写,无需重新下载/解包。";
+        StatusText = message;
+        logs.Write(OperationLogLevel.Warning, message);
     }
 
     /// <summary>读取设备版本号。优先 ro.build.version.bbk(权威,解析出代号+版本),回退候选属性。</summary>
