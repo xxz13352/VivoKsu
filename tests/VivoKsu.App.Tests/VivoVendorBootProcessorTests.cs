@@ -147,7 +147,7 @@ public sealed class VivoVendorBootProcessorTests
         {
             ShellCommands.Add(command);
             if (command.Contains("ls /lib/modules/", StringComparison.Ordinal)) return ModuleListing;
-            if (command.Contains("unpack vendor_boot.img", StringComparison.Ordinal)) return "vendor_boot/vendor_ramdisk/ramdisk.cpio";
+            if (command.Contains("unpack vendor_boot.img", StringComparison.Ordinal)) return "./vendor_ramdisk/ramdisk.cpio";
             if (command.Contains("extract ", StringComparison.Ordinal)) return "READY";
             if (command.Contains("repack vendor_boot.img", StringComparison.Ordinal)) return "REPACKED";
             if (command.Contains("test -d", StringComparison.Ordinal)) return "READY";

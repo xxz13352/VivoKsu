@@ -63,21 +63,24 @@ public sealed class VivoVendorBootProcessor
             await backend.PushAsync(serial, sourceSnapshot.Path, $"{remoteRoot}/vendor_boot.img", cancellationToken);
 
             context?.ReportStage("正在处理 vendor_boot 镜像");
-            // 诊断式解包:magiskboot 失败不再提前中断(2>&1 已并入 stderr),把退出码 + 解出的
-            // *.cpio 位置一并回显,失败时日志能区分「解包失败」还是「ramdisk.cpio 路径不同」。
+            // 布局事实(2026-08-15 真机验证):magiskboot 把 vendor_boot v4 解到「当前目录」,
+            // 即 {remoteRoot}/vendor_ramdisk/ramdisk.cpio(+recovery.cpio)与 dtb,不存在 vendor_boot/ 子层。
+            // 且 MTK v4 镜像即使解包成功 magiskboot 也返回退出码 3(非致命,按产物判断)。
+            var vendorRamdiskDir = $"{remoteRoot}/vendor_ramdisk";
+            var magiskboot = $"{remoteRoot}/magiskboot";
             var unpack = await backend.ShellAsync(
                 serial,
                 $"cd {remoteRoot} && chmod 755 magiskboot && ./magiskboot unpack vendor_boot.img 2>&1; " +
-                $"echo UNPACK_EXIT=$?; find vendor_boot -maxdepth 3 -name '*.cpio' 2>/dev/null",
+                $"echo UNPACK_EXIT=$?; find . -maxdepth 3 -name '*.cpio' 2>/dev/null",
                 cancellationToken);
-            if (!unpack.Contains("vendor_boot/vendor_ramdisk/ramdisk.cpio", StringComparison.Ordinal))
+            if (!unpack.Contains("vendor_ramdisk/ramdisk.cpio", StringComparison.Ordinal))
             {
                 throw new InvalidDataException($"vendor_boot 未找到 vendor_ramdisk/ramdisk.cpio。解包输出:\n{unpack}");
             }
 
             var listing = await backend.ShellAsync(
                 serial,
-                $"cd {remoteRoot}/vendor_boot/vendor_ramdisk && ../../magiskboot cpio ramdisk.cpio \"ls /lib/modules/\"",
+                $"cd {vendorRamdiskDir} && {magiskboot} cpio ramdisk.cpio \"ls /lib/modules/\"",
                 cancellationToken);
             // 官版 KernelSU 一次处理全部内核路径：官方内核( lib/modules )加上 vendor
             // ramdisk 里检测到的所有 GKI 模块目录，避免漏掉任一模块加载清单。
@@ -96,7 +99,7 @@ public sealed class VivoVendorBootProcessor
                     {
                         extract = await backend.ShellAsync(
                             serial,
-                            $"cd {remoteRoot}/vendor_boot/vendor_ramdisk && ../../magiskboot cpio ramdisk.cpio \"extract {path} {fileName}\" " +
+                            $"cd {vendorRamdiskDir} && {magiskboot} cpio ramdisk.cpio \"extract {path} {fileName}\" " +
                             $"&& test -f {fileName} && echo READY",
                             cancellationToken);
                     }
@@ -126,21 +129,21 @@ public sealed class VivoVendorBootProcessor
                         : $"sed -i '/vr\\.ko/d' {fileName}";
                     await backend.ShellAsync(
                         serial,
-                        $"cd {remoteRoot}/vendor_boot/vendor_ramdisk && {filter} && " +
-                        $"../../magiskboot cpio ramdisk.cpio \"add 0644 {path} {fileName}\" && rm -f {fileName}",
+                        $"cd {vendorRamdiskDir} && {filter} && " +
+                        $"{magiskboot} cpio ramdisk.cpio \"add 0644 {path} {fileName}\" && rm -f {fileName}",
                         cancellationToken);
                 }
             }
 
             var repack = await backend.ShellAsync(
                 serial,
-                $"cd {remoteRoot}/vendor_boot && ../magiskboot repack vendor_boot.img " +
+                $"cd {remoteRoot} && {magiskboot} repack vendor_boot.img " +
                 "2>&1 && test -f new-boot.img && echo REPACKED",
                 cancellationToken);
             EnsureOutput(repack, "REPACKED", "vendor_boot 重打包失败，未生成 new-boot.img");
 
             context?.ReportStage("正在获取修补后的 vendor_boot 镜像");
-            var pulledLength = await backend.PullAsync(serial, $"{remoteRoot}/vendor_boot/new-boot.img", localOutput, cancellationToken);
+            var pulledLength = await backend.PullAsync(serial, $"{remoteRoot}/new-boot.img", localOutput, cancellationToken);
             if (pulledLength <= 0 || !File.Exists(localOutput))
             {
                 throw new InvalidDataException("未能获取有效的 vendor_boot 修补镜像。" );
