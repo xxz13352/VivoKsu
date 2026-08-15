@@ -56,8 +56,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
                 return existing;
             }
 
-            var release = await httpClient.GetFromJsonAsync<GitHubRelease>(LatestReleaseUri, cancellationToken)
-                ?? throw new InvalidDataException("GitHub 未返回 scrcpy 发行信息。");
+            var release = await GetLatestReleaseAsync(cancellationToken);
             var asset = release.Assets.FirstOrDefault(candidate =>
                 candidate.Name.StartsWith("scrcpy-win64-v", StringComparison.OrdinalIgnoreCase) &&
                 candidate.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
@@ -105,6 +104,41 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
     }
 
     private string? FindInstalledExecutable() => FindExecutable(InstallationRoot, skipStagingDirectories: true);
+
+    /// <summary>
+    /// 查 scrcpy 最新发行信息。api.github.com 在国内常被直连阻断(2026-08-15 实测直连 000,
+    /// gh-proxy.com 代理 200),按直连 → 各镜像顺序 failover,与下载段同一套镜像列表。
+    /// </summary>
+    private async Task<GitHubRelease> GetLatestReleaseAsync(CancellationToken cancellationToken)
+    {
+        Exception? lastError = null;
+        foreach (var candidate in BuildApiCandidates(LatestReleaseUri.ToString()))
+        {
+            try
+            {
+                var release = await httpClient.GetFromJsonAsync<GitHubRelease>(candidate, cancellationToken);
+                if (release is not null)
+                {
+                    return release;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                lastError = exception;
+            }
+        }
+
+        throw new InvalidDataException("GitHub 未返回 scrcpy 发行信息。", lastError);
+    }
+
+    private static IEnumerable<string> BuildApiCandidates(string apiUrl)
+    {
+        yield return apiUrl;
+        foreach (var mirror in RemoteAssetCatalog.Mirrors)
+        {
+            yield return mirror.TrimEnd('/') + "/" + apiUrl;
+        }
+    }
 
     private void CleanupStaleStagingDirectories()
     {
