@@ -57,5 +57,76 @@ public class OperationLogServiceTests
         viewModel.ClearCommand.Execute(null);
 
         Assert.False(viewModel.HasEntries);
+    [Fact]
+    public void Write_persists_formatted_lines_to_the_log_file()
+    {
+        var logPath = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"), "operations.log");
+        var service = new OperationLogService(logPath);
+        try
+        {
+            service.Write(OperationLogLevel.Info, "开始刷写");
+            service.Write(OperationLogLevel.Error, "vendor_boot 修补失败");
+
+            var lines = File.ReadAllLines(logPath);
+            Assert.Equal(2, lines.Length);
+            Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[Info\] 开始刷写$", lines[0]);
+            Assert.Contains("[Error] vendor_boot 修补失败", lines[1]);
+        }
+        finally
+        {
+            TryDeleteDirectory(Path.GetDirectoryName(logPath)!);
+        }
+    }
+
+    [Fact]
+    public void Null_path_writes_only_to_memory()
+    {
+        var defaultPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VivoKsu",
+            "operations.log");
+        var before = File.Exists(defaultPath);
+
+        var service = new OperationLogService();
+        service.Write(OperationLogLevel.Info, "仅内存");
+
+        // 未指定路径时不落盘:默认文件状态不变。
+        Assert.Equal(before, File.Exists(defaultPath));
+    }
+
+    [Fact]
+    public void Clear_keeps_the_disk_log_for_troubleshooting()
+    {
+        var logPath = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"), "operations.log");
+        var service = new OperationLogService(logPath);
+        try
+        {
+            service.Write(OperationLogLevel.Info, "第一条");
+
+            service.Clear();
+
+            Assert.Empty(service.Entries);           // UI 面板清空
+            Assert.True(File.Exists(logPath));       // 磁盘原始记录保留
+            Assert.Contains("第一条", File.ReadAllText(logPath));
+        }
+        finally
+        {
+            TryDeleteDirectory(Path.GetDirectoryName(logPath)!);
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, true);
+            }
+        }
+        catch
+        {
+            // Best effort.
+        }
     }
 }

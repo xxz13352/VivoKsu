@@ -23,13 +23,14 @@ public sealed class AppComposition
         ToolPathPreferences? preferences = null,
         Action<string>? notifyBlocked = null,
         bool enableServerGate = true,
-        UsageLogUploader? usageReporter = null)
+        UsageLogUploader? usageReporter = null,
+        string? operationsLogPath = null)
     {
         var backend = new FastbootRsBackend(nativeApi);
         // 唯一 fastboot 执行器:全部刷写 / 读变量 / 擦除 / 重启 / 槽位操作走它(fastboot-rs DLL 已移除)。
         var cliRunner = new FastbootCliRunner(
             Path.Combine(AppContext.BaseDirectory, "platform-tools", "fastboot.exe"));
-        LogService = new OperationLogService();
+        LogService = new OperationLogService(operationsLogPath);
         Session = new DeviceSessionViewModel();
         // 客户端 API 基座:登录后注入 token;操作许可门禁与使用日志上报共用它。需先于 Coordinator 创建。
         otaClient = new OtaApiClient();
@@ -227,7 +228,11 @@ public sealed class AppComposition
     public static AppComposition CreateDefault() => new(
         FastbootRsApiFactory.CreateDefault(),
         new SystemProcessRunner(),
-        notifyBlocked: message => MessageBox.Show(message, "奶蛙Flash", MessageBoxButton.OK, MessageBoxImage.Information));
+        notifyBlocked: message => MessageBox.Show(message, "奶蛙Flash", MessageBoxButton.OK, MessageBoxImage.Information),
+        operationsLogPath: Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VivoKsu",
+            "operations.log"));
 
     public static AppComposition CreateForTesting(IFastbootRsNativeApi nativeApi, IProcessRunner processRunner) =>
         new(
