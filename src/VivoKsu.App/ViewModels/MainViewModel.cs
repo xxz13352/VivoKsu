@@ -215,8 +215,8 @@ public partial class MainViewModel : ObservableObject
         public string Shell(string? serial, string command, int timeoutMilliseconds = 15000) => throw new InvalidOperationException("设备服务未初始化。");
         public string GetVar(string? serial, string variable) => throw new InvalidOperationException("设备服务未初始化。");
         public void Reboot(string? serial, string target) => throw new InvalidOperationException("设备服务未初始化。");
-        public void Push(string? serial, string localPath, string remotePath) => throw new InvalidOperationException("设备服务未初始化。");
-        public long Pull(string? serial, string remotePath, string localPath) => throw new InvalidOperationException("设备服务未初始化。");
+        public void Push(string? serial, string localPath, string remotePath, int timeoutMilliseconds = 15000) => throw new InvalidOperationException("设备服务未初始化。");
+        public long Pull(string? serial, string remotePath, string localPath, int timeoutMilliseconds = 15000) => throw new InvalidOperationException("设备服务未初始化。");
         public string Install(string? serial, string apkPath, bool replace) => throw new InvalidOperationException("设备服务未初始化。");
         public void Flash(string? serial, string partition, string imagePath) => throw new InvalidOperationException("设备服务未初始化。");
     }

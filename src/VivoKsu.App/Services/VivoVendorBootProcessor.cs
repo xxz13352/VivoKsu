@@ -7,8 +7,9 @@ namespace VivoKsu.App.Services;
 public sealed class VivoVendorBootProcessor
 {
     private const long MaxPatchGrowthBytes = 16L * 1024 * 1024;
-    /// <summary>magiskboot 解包/重打包在设备上要解压数百 MB ramdisk,远超 adb shell 默认 15s;给足 3 分钟。</summary>
-    private const int LongCommandTimeoutMilliseconds = 180_000;
+    /// <summary>修补 vendor_boot 不设超时限制:解压/重打包/push 128MB 镜像远超市默认 15s,
+    /// 且用户明确要求该步骤不设超时;取消由 OperationCoordinator 兜底。</summary>
+    private const int LongCommandTimeoutMilliseconds = Timeout.Infinite;
     private const string RemoteBase = "/data/local/tmp/vivo_vendor_boot";
     private static readonly Regex GkiDirectoryPattern = new(
         @"lib/modules/(?<version>[0-9][^/\r\n]*?)-gki(?:/|\r?$)",
@@ -60,9 +61,9 @@ public sealed class VivoVendorBootProcessor
         {
             await backend.ShellAsync(serial, $"mkdir -p {remoteRoot}", cancellationToken);
             context?.ReportStage("正在上传 vendor_boot 修补工具");
-            await backend.PushAsync(serial, tool.Path, $"{remoteRoot}/magiskboot", cancellationToken);
+            await backend.PushAsync(serial, tool.Path, $"{remoteRoot}/magiskboot", cancellationToken, LongCommandTimeoutMilliseconds);
             context?.ReportStage("正在上传 vendor_boot 镜像");
-            await backend.PushAsync(serial, sourceSnapshot.Path, $"{remoteRoot}/vendor_boot.img", cancellationToken);
+            await backend.PushAsync(serial, sourceSnapshot.Path, $"{remoteRoot}/vendor_boot.img", cancellationToken, LongCommandTimeoutMilliseconds);
 
             context?.ReportStage("正在处理 vendor_boot 镜像");
             // 布局事实(2026-08-15 真机验证):magiskboot 把 vendor_boot v4 解到「当前目录」,
@@ -145,7 +146,7 @@ public sealed class VivoVendorBootProcessor
             EnsureOutput(repack, "REPACKED", "vendor_boot 重打包失败，未生成 new-boot.img");
 
             context?.ReportStage("正在获取修补后的 vendor_boot 镜像");
-            var pulledLength = await backend.PullAsync(serial, $"{remoteRoot}/new-boot.img", localOutput, cancellationToken);
+            var pulledLength = await backend.PullAsync(serial, $"{remoteRoot}/new-boot.img", localOutput, cancellationToken, LongCommandTimeoutMilliseconds);
             if (pulledLength <= 0 || !File.Exists(localOutput))
             {
                 throw new InvalidDataException("未能获取有效的 vendor_boot 修补镜像。" );

@@ -58,8 +58,8 @@ public class AppCompositionTests
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
         public void FastbootReboot(string? serial, string? target) { }
-        public void Push(string? serial, string localPath, string remotePath) { }
-        public long Pull(string? serial, string remotePath, string localPath) => 0;
+        public void Push(string? serial, string localPath, string remotePath, int timeoutMilliseconds = 15000) { }
+        public long Pull(string? serial, string remotePath, string localPath, int timeoutMilliseconds = 15000) => 0;
         public string Install(string? serial, string apkPath, bool replace) => string.Empty;
         public void Flash(string? serial, string partition, string imagePath) { }
     }

@@ -45,14 +45,14 @@ public sealed class FastbootRsBackend
         return Task.Run(() => nativeApi.SetActive(serial, slot), cancellationToken);
     }
 
-    public Task PushAsync(string? serial, string localPath, string remotePath, CancellationToken cancellationToken)
+    public Task PushAsync(string? serial, string localPath, string remotePath, CancellationToken cancellationToken, int timeoutMilliseconds = 15000)
     {
-        return Task.Run(() => nativeApi.Push(serial, localPath, remotePath), cancellationToken);
+        return Task.Run(() => nativeApi.Push(serial, localPath, remotePath, timeoutMilliseconds), cancellationToken);
     }
 
-    public Task<long> PullAsync(string? serial, string remotePath, string localPath, CancellationToken cancellationToken)
+    public Task<long> PullAsync(string? serial, string remotePath, string localPath, CancellationToken cancellationToken, int timeoutMilliseconds = 15000)
     {
-        return Task.Run(() => nativeApi.Pull(serial, remotePath, localPath), cancellationToken);
+        return Task.Run(() => nativeApi.Pull(serial, remotePath, localPath, timeoutMilliseconds), cancellationToken);
     }
 
     public Task<string> InstallAsync(string? serial, string apkPath, bool replace, CancellationToken cancellationToken)

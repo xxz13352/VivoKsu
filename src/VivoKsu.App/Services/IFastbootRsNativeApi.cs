@@ -9,8 +9,8 @@ public interface IFastbootRsNativeApi
     void Reboot(string? serial, string target);
     void FastbootReboot(string? serial, string? target) => throw new NotSupportedException("当前 native 实现不支持 Fastboot 重启。");
     void SetActive(string? serial, string slot) => throw new NotSupportedException("当前 native 实现不支持切换活动槽位。");
-    void Push(string? serial, string localPath, string remotePath);
-    long Pull(string? serial, string remotePath, string localPath);
+    void Push(string? serial, string localPath, string remotePath, int timeoutMilliseconds = 15000);
+    long Pull(string? serial, string remotePath, string localPath, int timeoutMilliseconds = 15000);
     string Install(string? serial, string apkPath, bool replace);
     void Flash(string? serial, string partition, string imagePath);
     void Erase(string? serial, string partition) => throw new NotSupportedException("当前 native 实现不支持擦除分区。");

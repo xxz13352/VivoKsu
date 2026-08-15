@@ -125,12 +125,12 @@ public sealed class PlatformToolsNativeApi : IFastbootRsNativeApi
     public void SetActive(string? serial, string slot) =>
         Run(fastbootExecutable, WithSerial(serial, "set_active", slot));
 
-    public void Push(string? serial, string localPath, string remotePath) =>
-        Run(adbExecutable, WithSerial(serial, "push", localPath, remotePath));
+    public void Push(string? serial, string localPath, string remotePath, int timeoutMilliseconds = 15000) =>
+        Run(adbExecutable, WithSerial(serial, "push", localPath, remotePath), timeoutMilliseconds);
 
-    public long Pull(string? serial, string remotePath, string localPath)
+    public long Pull(string? serial, string remotePath, string localPath, int timeoutMilliseconds = 15000)
     {
-        Run(adbExecutable, WithSerial(serial, "pull", remotePath, localPath));
+        Run(adbExecutable, WithSerial(serial, "pull", remotePath, localPath), timeoutMilliseconds);
         return File.Exists(localPath) ? new FileInfo(localPath).Length : 0;
     }
 

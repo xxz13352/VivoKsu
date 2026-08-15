@@ -157,8 +157,8 @@ public sealed class VivoVendorBootProcessorTests
 
         public string GetVar(string? serial, string variable) => string.Empty;
         public void Reboot(string? serial, string target) { }
-        public void Push(string? serial, string localPath, string remotePath) => PushedRemotePaths.Add(remotePath);
-        public long Pull(string? serial, string remotePath, string localPath)
+        public void Push(string? serial, string localPath, string remotePath, int timeoutMilliseconds = 15000) => PushedRemotePaths.Add(remotePath);
+        public long Pull(string? serial, string remotePath, string localPath, int timeoutMilliseconds = 15000)
         {
             File.WriteAllBytes(localPath, "vendor-patched"u8.ToArray());
             return new FileInfo(localPath).Length;

@@ -411,11 +411,11 @@ public class SafeFlashViewModelTests
 
         public void FastbootReboot(string? serial, string? target) => FastbootRebootCalled = true;
 
-        public void Push(string? serial, string localPath, string remotePath)
+        public void Push(string? serial, string localPath, string remotePath, int timeoutMilliseconds = 15000)
         {
         }
 
-        public long Pull(string? serial, string remotePath, string localPath) => 0;
+        public long Pull(string? serial, string remotePath, string localPath, int timeoutMilliseconds = 15000) => 0;
 
         public string Install(string? serial, string apkPath, bool replace) => string.Empty;
 
