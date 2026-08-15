@@ -202,8 +202,11 @@
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-              <Border Width="40" Height="40" CornerRadius="11" Background="{StaticResource Teal}" BorderBrush="#1F7B73" BorderThickness="1">
-                <TextBlock Text="NWF" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              <Border Width="40" Height="40">
+                <Border.Clip>
+                  <RectangleGeometry Rect="0,0,40,40" RadiusX="11" RadiusY="11"/>
+                </Border.Clip>
+                <Image Source="pack://application:,,,/Assets/logo.jpg" Stretch="UniformToFill"/>
               </Border>
               <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
                 <TextBlock Text="奶蛙Flash" Foreground="{StaticResource Ink}" FontSize="16" FontWeight="SemiBold"/>

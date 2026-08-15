@@ -207,8 +207,13 @@ internal static class Program
         consoleAllocated = true;
         try
         {
-            var writer = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
-            Console.SetOut(writer);
+            // 中文系统控制台默认代码页是 GBK(936),而 StreamWriter 默认按 UTF-8 写出,两者
+            // 不一致会把中文进度/错误信息显示成乱码。这里把控制台代码页切到 UTF-8(65001)
+            // 并统一用 UTF-8 输出:Console.OutputEncoding setter 内部会调用 SetConsoleOutputCP,
+            // 任意语言系统下中文都能正确显示。UTF8 编码在 AOT 裁剪下始终可用,不依赖 CodePages。
+            Console.OutputEncoding = new UTF8Encoding(false);
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), Console.OutputEncoding) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError(), Console.OutputEncoding) { AutoFlush = true });
         }
         catch
         {

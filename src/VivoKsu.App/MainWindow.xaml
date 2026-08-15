@@ -31,8 +31,11 @@
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <Border Width="36" Height="36" Background="#102F44" CornerRadius="7">
-            <TextBlock Text="NWF" Foreground="White" FontSize="13" FontWeight="Bold" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+          <Border Width="36" Height="36">
+            <Border.Clip>
+              <RectangleGeometry Rect="0,0,36,36" RadiusX="7" RadiusY="7"/>
+            </Border.Clip>
+            <Image Source="pack://application:,,,/Assets/logo.jpg" Stretch="UniformToFill"/>
           </Border>
           <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="奶蛙Flash" FontSize="18" FontWeight="Bold"/>
@@ -1060,7 +1063,7 @@
           <StackPanel>
             <TextBlock Text="VIVO LINE FLASH" Style="{StaticResource PageEyebrowStyle}"/>
             <TextBlock Text="VIVO 线刷" Style="{StaticResource PageTitleStyle}"/>
-            <TextBlock Text="查询设备 → 下载 OTA → 解压解包 → 跳过 preloader/lk → fastbootd 刷入其余" Style="{StaticResource PageSubtitleStyle}"/>
+            <TextBlock Text="查询设备 → 下载 OTA → 解压解包 → 自动重启 fastbootd → 逐个刷入分区" Style="{StaticResource PageSubtitleStyle}"/>
           </StackPanel>
           <Border Grid.Column="1" Style="{StaticResource StatusChipStyle}" VerticalAlignment="Bottom">
             <StackPanel Orientation="Horizontal"><Ellipse Width="7" Height="7" Fill="{StaticResource ConnectionBrush}" Margin="0,4,8,0"/><TextBlock Text="{Binding SafeFlash.StatusText}" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource ConnectionBrush}" TextTrimming="CharacterEllipsis"/></StackPanel>
@@ -1087,7 +1090,7 @@
                 <Button Content="选择解包文件夹" Style="{StaticResource ToolButtonStyle}" Command="{Binding SafeFlash.SelectFolderCommand}" Margin="10,0,0,0" Padding="16,8" AutomationProperties.Name="选择解包文件夹"/>
               </StackPanel>
             </Grid>
-            <TextBlock Grid.Row="1" Margin="24,12,24,0" Text="固件中可直接刷写的分区镜像会被逐个刷入,preloader 与 lk 被跳过;含块式内容(如 system/vendor/product 的 .new.dat)的固件会在确认时给出警告。" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+            <TextBlock Grid.Row="1" Margin="24,12,24,0" Text="固件中可直接刷写的分区镜像会被逐个刷入;含块式内容(如 system/vendor/product 的 .new.dat)的固件会在确认时给出警告。" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
             <Border Grid.Row="2" Margin="24,12,24,0" Background="#FFF4F0" BorderBrush="{StaticResource SignalBrush}" BorderThickness="1" Padding="16" CornerRadius="8" Visibility="{Binding SafeFlash.IsConfirmVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
               <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

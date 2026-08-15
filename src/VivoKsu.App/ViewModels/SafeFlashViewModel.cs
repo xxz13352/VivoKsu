@@ -342,13 +342,13 @@ public partial class SafeFlashViewModel : ObservableObject
             return;
         }
 
-        logs.Write(OperationLogLevel.Info, $"固件含 {FlashCount} 个分区(已跳过 preloader/lk)");
+        logs.Write(OperationLogLevel.Info, $"固件含 {FlashCount} 个可刷写分区");
         foreach (var partition in pendingPartitions)
         {
             logs.Write(OperationLogLevel.Info, $"{partition.Name}.img > {partition.Name} | {FormatBytes(partition.SizeBytes)}");
         }
 
-        ConfirmSummary = $"将刷入 {FlashCount} 个分区(已跳过 preloader/lk),随后重启到 fastbootd 逐个刷写。";
+        ConfirmSummary = $"将刷入 {FlashCount} 个分区,随后重启到 fastbootd 逐个刷写。";
         if (extractor.HasBlockBasedContent(sourcePath))
         {
             var blockWarning = "⚠ 固件含块式分区内容(.new.dat / transfer.list,如 system/vendor/product),暂不支持刷写,本次只会刷可直接镜像的分区,其余保持原样。";

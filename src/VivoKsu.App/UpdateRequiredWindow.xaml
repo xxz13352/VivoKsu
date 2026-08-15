@@ -119,8 +119,11 @@
         <!-- 品牌 + 关闭 -->
         <Grid>
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-            <Border Width="38" Height="38" CornerRadius="10" Background="{StaticResource Teal}" BorderBrush="#1F7B73" BorderThickness="1">
-              <TextBlock Text="NWF" Foreground="White" FontFamily="Segoe UI" FontWeight="Bold" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border Width="38" Height="38">
+              <Border.Clip>
+                <RectangleGeometry Rect="0,0,38,38" RadiusX="10" RadiusY="10"/>
+              </Border.Clip>
+              <Image Source="pack://application:,,,/Assets/logo.jpg" Stretch="UniformToFill"/>
             </Border>
             <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
               <TextBlock Text="奶蛙Flash" Foreground="{StaticResource Ink}" FontSize="15" FontWeight="SemiBold"/>

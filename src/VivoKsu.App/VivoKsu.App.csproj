@@ -21,6 +21,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 应用品牌 logo(嵌入程序集,pack URI 引用) -->
+    <Resource Include="Assets\logo.jpg" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="VivoKsu.App.Tests" />
   </ItemGroup>
 
