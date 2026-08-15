@@ -55,6 +55,21 @@ public class ScrcpyProvisioningServiceTests
         }
     }
 
+    [Fact]
+    public void BuildApiCandidates_orders_direct_first_then_mirrors()
+    {
+        const string apiUrl = "https://api.github.com/repos/Genymobile/scrcpy/releases/latest";
+
+        var candidates = ScrcpyProvisioningService.BuildApiCandidates(apiUrl).ToArray();
+
+        // 直连 api.github.com 国内常被墙,必须先直连后镜像(与下载段同一套镜像列表)。
+        Assert.Equal(apiUrl, candidates[0]);
+        Assert.Equal(1 + RemoteAssetCatalog.Mirrors.Count, candidates.Length);
+        Assert.Equal(
+            RemoteAssetCatalog.Mirrors[0].TrimEnd('/') + "/" + apiUrl,
+            candidates[1]);
+    }
+
     private static byte[] CreateScrcpyArchive()
     {
         using var stream = new MemoryStream();

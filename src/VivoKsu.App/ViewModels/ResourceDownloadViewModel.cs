@@ -53,6 +53,11 @@ public sealed partial class ResourceDownloadViewModel : ObservableObject
     /// <summary>缺失(未就绪)项数。</summary>
     public int MissingCount => Items.Count(item => !item.IsInstalled);
 
+    /// <summary>主按钮文案:全部缺失项都勾选时「全部安装」,部分勾选时「下载所选 (N)」。
+    /// 对应「可选装或全装」:默认全勾 = 全装,用户取消个别勾选后 = 只装所选。</summary>
+    public string InstallButtonText =>
+        SelectedCount > 0 && SelectedCount < MissingCount ? $"下载所选 ({SelectedCount})" : "全部安装";
+
     /// <summary>正在下载中的项数(用于底部「N / M 下载中」)。</summary>
     public int DownloadingCount => Items.Count(item => item.Status == ResourceDownloadStatus.Downloading);
 
@@ -208,6 +213,7 @@ public sealed partial class ResourceDownloadViewModel : ObservableObject
         OnPropertyChanged(nameof(MissingCount));
         OnPropertyChanged(nameof(DownloadingCount));
         OnPropertyChanged(nameof(FailedCount));
+        OnPropertyChanged(nameof(InstallButtonText));
         SummaryText = FailedCount > 0
             ? $"缺失 {MissingCount} 项 · {FailedCount} 项失败,可稍后在软件页重试"
             : $"缺失 {MissingCount} 项 · 已选 {SelectedCount} 项";

@@ -127,6 +127,22 @@ public class ResourceDownloadViewModelTests
         Assert.True(finished);
     }
 
+    [Fact]
+    public void InstallButtonText_adapts_to_selection()
+    {
+        var vm = CreateVm();
+        vm.AddItem("a", "A", "1 MB", isInstalled: true, installer: (_, _) => Task.CompletedTask);
+        vm.AddItem("b", "B", "1 MB", isInstalled: false, installer: (_, _) => Task.CompletedTask);
+        vm.AddItem("c", "C", "1 MB", isInstalled: false, installer: (_, _) => Task.CompletedTask);
+
+        // 全部缺失项都勾选 → 「全部安装」
+        Assert.Equal("全部安装", vm.InstallButtonText);
+
+        // 用户取消一个勾选 → 「下载所选 (N)」
+        vm.Items[1].IsSelected = false;
+        Assert.Equal("下载所选 (1)", vm.InstallButtonText);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 5000)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(timeoutMs);

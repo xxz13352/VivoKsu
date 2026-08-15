@@ -182,7 +182,7 @@
                 </Style>
               </Button.Style>
             </Button>
-            <Button Content="全部安装" Command="{Binding InstallAllCommand}" AutomationProperties.Name="全部安装">
+            <Button Content="{Binding InstallButtonText}" Command="{Binding InstallSelectedCommand}" AutomationProperties.Name="安装所选组件">
               <Button.Style>
                 <Style TargetType="Button" BasedOn="{StaticResource PrimaryButtonStyle}">
                   <Setter Property="Padding" Value="18,8"/>

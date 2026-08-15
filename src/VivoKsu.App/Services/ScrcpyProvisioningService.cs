@@ -131,7 +131,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
         throw new InvalidDataException("GitHub 未返回 scrcpy 发行信息。", lastError);
     }
 
-    private static IEnumerable<string> BuildApiCandidates(string apiUrl)
+    internal static IEnumerable<string> BuildApiCandidates(string apiUrl)
     {
         yield return apiUrl;
         foreach (var mirror in RemoteAssetCatalog.Mirrors)

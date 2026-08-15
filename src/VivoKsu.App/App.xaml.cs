@@ -173,6 +173,8 @@ public partial class App : Application
             if (viewModel.HasMissing)
             {
                 new ResourceDownloadWindow(viewModel).ShowDialog();
+                // 关窗后刷新软件页组件状态:下载器可能刚把 scrcpy/APK/payload 装进 C:\nwflash。
+                composition.MainViewModel.Software.RefreshCommand.Execute(null);
             }
         }
         catch
