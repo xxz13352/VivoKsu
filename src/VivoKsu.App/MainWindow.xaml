@@ -1076,6 +1076,7 @@
               <RowDefinition Height="Auto"/>
               <RowDefinition Height="Auto"/>
               <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
               <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
             <Grid Margin="24,20,24,0">
@@ -1091,7 +1092,30 @@
               </StackPanel>
             </Grid>
             <TextBlock Grid.Row="1" Margin="24,12,24,0" Text="固件中可直接刷写的分区镜像会被逐个刷入;含块式内容(如 system/vendor/product 的 .new.dat)的固件会在确认时给出警告。" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
-            <Border Grid.Row="2" Margin="24,12,24,0" Background="#FFF4F0" BorderBrush="{StaticResource SignalBrush}" BorderThickness="1" Padding="16" CornerRadius="8" Visibility="{Binding SafeFlash.IsConfirmVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <Border Grid.Row="2" Margin="24,12,24,0" Background="#F6FAFA" BorderBrush="{StaticResource EdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="14,10" IsEnabled="{Binding SafeFlash.IsOptionsEnabled}">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                  <TextBlock Text="刷写选项" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                  <CheckBox Content="清除数据" IsChecked="{Binding SafeFlash.IsWipeData, Mode=TwoWay}" FontSize="11" VerticalAlignment="Center"/>
+                  <CheckBox Content="安全刷写" IsChecked="{Binding SafeFlash.IsSafeFlash, Mode=TwoWay}" FontSize="11" VerticalAlignment="Center" Margin="14,0,0,0"/>
+                  <CheckBox Content="保留ROOT" IsChecked="{Binding SafeFlash.IsKeepRoot, Mode=TwoWay}" FontSize="11" VerticalAlignment="Center" Margin="14,0,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,0,0">
+                  <TextBlock Text="槽位" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                  <RadioButton Content="当前槽" GroupName="SafeFlashSlot" IsChecked="{Binding SafeFlash.IsSlotCurrent, Mode=TwoWay}" FontSize="11" VerticalAlignment="Center"/>
+                  <RadioButton Content="对槽" GroupName="SafeFlashSlot" IsChecked="{Binding SafeFlash.IsSlotOther, Mode=TwoWay}" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                  <RadioButton Content="双槽" GroupName="SafeFlashSlot" IsChecked="{Binding SafeFlash.IsSlotBoth, Mode=TwoWay}" FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                </StackPanel>
+                <Button Grid.Column="3" Content="回锁BL" Style="{StaticResource ToolButtonStyle}" IsEnabled="False" ToolTip="暂未开放" Margin="14,0,0,0" Padding="12,5" FontSize="11"/>
+              </Grid>
+            </Border>
+            <Border Grid.Row="3" Margin="24,12,24,0" Background="#FFF4F0" BorderBrush="{StaticResource SignalBrush}" BorderThickness="1" Padding="16" CornerRadius="8" Visibility="{Binding SafeFlash.IsConfirmVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
               <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <StackPanel VerticalAlignment="Center">
@@ -1105,7 +1129,7 @@
                 </StackPanel>
               </Grid>
             </Border>
-            <StackPanel Grid.Row="3" Margin="24,12,24,20">
+            <StackPanel Grid.Row="4" Margin="24,12,24,20">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="当前分区:" FontSize="11" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
                 <TextBlock Text="{Binding SafeFlash.CurrentPartition}" FontSize="12" FontWeight="SemiBold" FontFamily="Cascadia Mono" VerticalAlignment="Center" Margin="6,0,0,0"/>
