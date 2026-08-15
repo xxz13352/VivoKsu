@@ -61,7 +61,7 @@ VivoKsu 工具/
 | `api.nwflash.cc.cd` | `nwflash-rom` | 桌面登录(`/api/login`)、ROM 查询(`/api/rom`,强制 token + 版本门禁 + 记日志)、版本策略(`/api/app/version`) |
 | `web.nwflash.cc.cd` | `nwflash-web` | 管理控制台:管理员登录 / Nwflash 版本控制(强制更新) / 用户管理 / 访问日志 |
 | `user.nwflash.cc.cd` | `nwflash-user` | **用户自助门户**:我的查询日志 / 在线会话(可强制下线) / 修改密码 |
-| `nwflash.cc.cd` | `nwflash-site` | **官网**:产品介绍 / 功能 / VIVO 线刷 / 更新日志(高级白液态玻璃落地页) |
+| `nwflash.cc.cd` | `nwflash-site` | **官网**:产品介绍 / 功能 / 更新日志(高级白液态玻璃落地页) |
 
 **D1 `nwflash-db`** 由三个 Worker 共用:
 
@@ -101,4 +101,4 @@ VivoKsu 工具/
 - **操作门禁 + 使用日志**:客户端每个用户操作运行前经服务端 `POST /api/operation/authorize` 许可(默认放行、封禁/停用拒绝);执行后批量上传使用日志,后台「使用日志」按操作分类查看。
 - **软件菜单 + 驱动安装**:「软件」页展示 Nwflash 版本 / USB 驱动 / scrcpy / payload_dumper 就绪状态;启动检测到未装 vivo USB 驱动时弹窗提醒,一键以管理员权限静默安装(pnputil 通配符递归装 ADB / fastboot / 联发科驱动 + 写 adb_usb.ini)。
 - **用户门户**:`user.nwflash.cc.cd` 客户自助后台(高级白 + 毛玻璃)——我的查询日志 / 在线会话(⟠ 强制下线)/ 修改密码,已上线。
-- **官网**:`nwflash.cc.cd` 官网(高级白 + 液态玻璃 + 高斯模糊)单页已设计,含产品介绍 / 功能 / VIVO 线刷 / 更新日志,待部署。
+- **官网**:`nwflash.cc.cd` 官网(高级白 + 液态玻璃 + 高斯模糊)单页已上线,含产品介绍 / 功能 / 更新日志。

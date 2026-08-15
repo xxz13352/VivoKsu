@@ -483,7 +483,7 @@ flowchart LR
 
 - **对外营销面**,不鉴权、无 D1;Worker 仅托管单页 `index.html`(任何路径统一返回),安全头与后台一致。
 - **设计语言**:高级白 + 液态玻璃(磨砂半透明白玻璃面板 + `backdrop-filter` 高斯模糊 + 内高光 + 发丝描边,Apple Liquid Glass 网页近似);单一深青强调;数据等宽 mono。
-- **区块**:HERO(动能排字 + 液态玻璃设备控制台迷你 UI)、功能 Bento、VIVO 线刷五步、技术栈条、更新日志、下载 CTA、页脚。
+- **区块**:HERO(动能排字 + 液态玻璃设备控制台迷你 UI)、功能 Bento、技术栈条、更新日志、下载 CTA、页脚。
 - **更新日志**:在官网单页内维护(发版时在 `index.html` 更新日志区块登记版本号与变更)。
 - 部署:`cd cloudflare/website && npx wrangler deploy`(绑定根域 `nwflash.cc.cd`)。
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
-<meta name="description" content="奶蛙Flash(Nwflash, NWF):Vivo 手机刷机与 Root 商业工具箱。Windows 桌面端一站式完成 OTA 下载、解包、线刷与 Root,商用授权,账号登录即用。">
+<meta name="description" content="奶蛙Flash(Nwflash, NWF):Vivo 手机刷机与 Root 商业工具箱。Windows 桌面端一站式完成线刷包获取、解包、线刷与 Root,商用授权,账号登录即用。">
 <title>奶蛙Flash · Nwflash</title>
 <style>
   /* ============================================================
@@ -176,15 +176,6 @@
   .flow-mini .fm .bar{flex:1;height:6px;border-radius:99px;background:rgba(23,35,46,.07);overflow:hidden}
   .flow-mini .fm .bar i{display:block;height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--cyan-bright),var(--cyan));animation:progfill 9s cubic-bezier(.32,.72,0,1) infinite}
 
-  /* ---------- VIVO 线刷流程 ---------- */
-  .flow-track{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-top:46px;position:relative}
-  .flow-track::before{content:"";position:absolute;top:34px;left:6%;right:6%;height:1px;background:linear-gradient(90deg,transparent,var(--hair-strong) 15%,var(--hair-strong) 85%,transparent)}
-  .step{border-radius:var(--r-md);padding:22px;position:relative}
-  .step .n{position:absolute;top:12px;right:16px;font-family:var(--mono);font-size:21px;font-weight:760;color:rgba(47,214,200,.45)}
-  .step h4{font-size:16.5px;font-weight:720}
-  .step p{font-size:13px;color:var(--muted);line-height:1.65;margin-top:7px}
-  .step .arr{margin-top:16px;color:var(--cyan-bright);font-size:15px}
-
   /* ---------- 更新日志 ---------- */
   .changelog{display:grid;gap:16px;margin-top:46px}
   .rel{border-radius:var(--r-lg);padding:32px}
@@ -233,8 +224,6 @@
     .nav .links{display:none}
     .hero{grid-template-columns:1fr;gap:44px;padding-top:64px}
     .console{max-width:560px}
-    .flow-track{grid-template-columns:1fr;gap:12px}
-    .flow-track::before{display:none}
     .bento{grid-template-columns:1fr 1fr}
     .tile.s6,.tile.s8,.tile.s4,.tile.s3{grid-column:span 1}
   }
@@ -259,7 +248,6 @@
       </div>
       <div class="links">
         <a href="#features">功能</a>
-        <a href="#flow">VIVO 线刷</a>
         <a href="#changelog">更新日志</a>
       </div>
       <a class="cta" href="#download">下载<span class="ar">↓</span></a>
@@ -277,7 +265,7 @@
         <span class="w" style="animation-delay:.35s">Root,</span><br>
         <span class="w cyan" style="animation-delay:.45s">一键到底。</span>
       </h1>
-      <p class="sub">桌面端一站式完成 <code>OTA</code> 下载、解包、线刷与 Root。商用授权,账号登录即用,不限次数。</p>
+      <p class="sub">桌面端一站式完成 <code>线刷包</code> 获取、解包、线刷与 Root。商用授权,账号登录即用,不限次数。</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="#download">下载 Nwflash<span class="ar">→</span></a>
         <a class="btn btn-ghost" href="#features">查看功能</a>
@@ -403,31 +391,15 @@
         <div>
           <div class="tag">ota · fastbootd</div>
           <h3>VIVO 线刷</h3>
-          <p>一键完成:读取设备 PD 与版本,云端取 OTA 直链,多分片下载,解包 payload,跳过 preloader 与 lk,重启 fastbootd 逐个刷入其余分区,最后重启回系统。</p>
+          <p>一键完成:读取设备 PD 与版本,获取线刷包,多分片下载,解包 payload,跳过 preloader 与 lk,重启 fastbootd 逐个刷入其余分区,最后重启回系统。</p>
         </div>
         <div class="viz flow-mini" style="margin-top:18px">
           <div class="fm"><b>读取设备</b><span class="bar"><i></i></span></div>
-          <div class="fm"><b>获取 OTA</b><span class="bar"><i style="animation-delay:.4s"></i></span></div>
+          <div class="fm"><b>获取线刷包</b><span class="bar"><i style="animation-delay:.4s"></i></span></div>
           <div class="fm"><b>下载解包</b><span class="bar"><i style="animation-delay:.8s"></i></span></div>
           <div class="fm"><b>刷入分区</b><span class="bar"><i style="animation-delay:1.2s"></i></span></div>
         </div>
       </div>
-    </div>
-  </section>
-
-  <!-- VIVO 线刷流程 -->
-  <section class="wrap" id="flow">
-    <div class="sec-head reveal">
-      <div class="sec-eyebrow">ONE-CLICK SAFE FLASH</div>
-      <h2 class="sec-title">VIVO 线刷,五步到底</h2>
-      <p class="sec-sub">跳过 preloader 与 lk,逐分区预检,缺失分区自动跳过。全程可取消,失败即停,绝不半刷。</p>
-    </div>
-    <div class="flow-track">
-      <div class="glass step reveal"><span class="n">01</span><h4>读取设备</h4><p>通过 adb 读取设备 PD 码与系统版本。</p><div class="arr">→</div></div>
-      <div class="glass step reveal" style="transition-delay:.06s"><span class="n">02</span><h4>获取 OTA</h4><p>云端取回对应版本的 OTA 直链,版本门禁校验。</p><div class="arr">→</div></div>
-      <div class="glass step reveal" style="transition-delay:.12s"><span class="n">03</span><h4>下载解包</h4><p>多分片下载,流式解压解包 payload,跳过 preloader 与 lk。</p><div class="arr">→</div></div>
-      <div class="glass step reveal" style="transition-delay:.18s"><span class="n">04</span><h4>刷入分区</h4><p>重启 fastbootd,逐分区预检后刷入,缺失分区自动跳过。</p><div class="arr">→</div></div>
-      <div class="glass step reveal" style="transition-delay:.24s"><span class="n">05</span><h4>完成重启</h4><p>全部刷入后重启回系统,全程进度可读可取消。</p></div>
     </div>
   </section>
 
@@ -446,7 +418,7 @@
           <span class="rel-pill">当前</span>
         </div>
         <ul class="rel-list">
-          <li>VIVO 线刷:一键完成 OTA 下载、解包、刷入,跳过 preloader 与 lk,缺失分区自动跳过</li>
+          <li>VIVO 线刷:一键获取线刷包、解包、刷入,跳过 preloader 与 lk,缺失分区自动跳过</li>
           <li>快速刷写:KernelSU 预设分区表,一键刷入,自动重启与双槽处理</li>
           <li>Vivo ROOT:vendor_boot 补丁,官方与 GKI 内核自动处理</li>
           <li>固件提取:payload 解包,云端直链按需下载,不落地整包,实时进度</li>
@@ -481,7 +453,6 @@
       </div>
       <div class="foot-links">
         <a href="#features">功能</a>
-        <a href="#flow">VIVO 线刷</a>
         <a href="#changelog">更新日志</a>
         <a href="#download">下载</a>
       </div>
@@ -497,7 +468,7 @@
   var logs = [
     "[OKAY] 设备已连接 · PD2417",
     "[OKAY] 读取系统版本 · 16.2.12.0.W10.V000L1",
-    "[OKAY] 云端已取回 OTA 直链",
+    "[OKAY] 已获取线刷包",
     "[INFO] 正在解包 payload.bin",
     "[OKAY] 跳过 preloader / lk",
     "[OKAY] 刷入 boot 分区",

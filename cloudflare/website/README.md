@@ -18,7 +18,6 @@ Nwflash(奶蛙Flash,NWF)对外营销落地页(Cloudflare Worker `nwflash-site`,�
 | HERO | 动能排字 + 设备控制台迷你 UI + 下载 CTA |
 | 技术栈条 | adb / fastboot / KernelSU / magiskboot / scrcpy / payload_dumper |
 | 功能 Bento | 8 格非对称(设备概览 / ROOT / 快速刷写 / 可视刷写 / 投屏 / 固件提取 / 文件管理 / VIVO 线刷) |
-| VIVO 线刷 | 五步流程:读取设备 → 获取 OTA → 下载解包 → 刷入分区 → 完成重启 |
 | 更新日志 | 版本登记册(发版时在此登记版本号与变更) |
 | 下载 CTA | 下载入口 + 商用授权说明 |
 
