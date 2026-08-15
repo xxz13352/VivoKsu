@@ -326,7 +326,7 @@ public partial class SafeFlashViewModel : ObservableObject
             return;
         }
 
-        logs.Write(OperationLogLevel.Info, $"已选择固件 {sourcePath}");
+        logs.Write(OperationLogLevel.Info, "已选择固件");
         await PrepareFlashAsync();
     }
 
@@ -347,7 +347,7 @@ public partial class SafeFlashViewModel : ObservableObject
         stagingRoot = CreateStagingRoot();
         Directory.CreateDirectory(stagingRoot);
         sourcePath = dialog.FileName;
-        logs.Write(OperationLogLevel.Info, $"已选择固件 {sourcePath}");
+        logs.Write(OperationLogLevel.Info, "已选择固件");
         await PrepareFlashAsync();
     }
 
@@ -363,7 +363,7 @@ public partial class SafeFlashViewModel : ObservableObject
         stagingRoot = CreateStagingRoot();
         Directory.CreateDirectory(stagingRoot);
         sourcePath = dialog.FolderName;
-        logs.Write(OperationLogLevel.Info, $"已选择解包固件文件夹 {sourcePath}");
+        logs.Write(OperationLogLevel.Info, "已选择固件");
         await PrepareFlashAsync();
     }
 
@@ -459,6 +459,16 @@ public partial class SafeFlashViewModel : ObservableObject
                 extractDirectory,
                 partitionsToFlash.Sum(partition => Math.Max(partition.SizeBytes, 0)));
             context.ReportStage("正在解压解包固件");
+
+            // 清除数据:先解出内嵌 wipe-data 镜像,尽早失败(避免刷一半才发现资源缺失)。
+            string? wipeDataPath = null;
+            if (IsWipeData)
+            {
+                wipeDataPath = Path.Combine(extractDirectory, "wipe-data.img");
+                context.ReportStage("正在准备数据清除");
+                await EmbeddedWipeData.WriteToAsync(wipeDataPath, ct);
+            }
+
             var images = new List<SafeFlashImageInfo>(partitionsToFlash.Count);
             for (var index = 0; index < partitionsToFlash.Count; index++)
             {
@@ -466,11 +476,11 @@ public partial class SafeFlashViewModel : ObservableObject
                 var partition = partitionsToFlash[index];
                 var capturedIndex = index;
                 var size = partition.SizeBytes;
-                CurrentPartition = partition.Name;
+                CurrentPartition = $"分区 {index + 1}/{partitionsToFlash.Count}";
                 CurrentPartitionProgress = 0;
                 lastExtractSpeedBytes = 0;
                 lastExtractSpeedTicks = 0;
-                context.ReportStage($"正在解包 {partition.Name}({index + 1}/{partitionsToFlash.Count})", OperationKind.Hashing);
+                context.ReportStage($"正在解包分区 {index + 1}/{partitionsToFlash.Count}", OperationKind.Hashing);
                 var writeProgress = new Progress<long>(bytes =>
                 {
                     var fraction = size > 0 ? Math.Clamp(bytes / (double)size, 0, 1) : 0;
@@ -493,7 +503,7 @@ public partial class SafeFlashViewModel : ObservableObject
                     throw new TimeoutException("设备重启后未检测到 fastboot 设备。");
                 }
 
-                logs.Write(OperationLogLevel.Info, $"已连接 {session.Serial} | 用时 {taskStopwatch.Elapsed.TotalSeconds:0} 秒");
+                logs.Write(OperationLogLevel.Info, $"已连接设备 | 用时 {taskStopwatch.Elapsed.TotalSeconds:0} 秒");
                 // 设备刚进入 fastbootd 时 USB 可能仍在枚举;等一小段再发 getvar,
                 // 避免瞬态探测失败被误判为“设备无此分区”而静默跳过必需分区。
                 logs.Write(OperationLogLevel.Info, "等待设备连接稳定...");
@@ -504,65 +514,98 @@ public partial class SafeFlashViewModel : ObservableObject
                 throw new InvalidOperationException("请先连接 ADB 或 fastboot 设备再刷写。");
             }
 
-            // 3. 逐个刷入(其余全刷,preloader*/lk 已过滤)。用当前 session.Serial,
+            // 3. 逐个刷入(目标分区名由槽位模式决定)。用当前 session.Serial,
             //    并依赖 fastboot 调用自身在设备断开时报错——不额外校验会话状态,
             //    避免长时间刷大分区时监控瞬时抖动导致误中止。
+            var serial = session.Serial;
+            var currentSlot = SafeFlashSlotPlanner.IsSlotBasedMode(SlotMode)
+                ? await ReadCurrentSlotAsync(serial, ct)
+                : null;
             var skipped = 0;
             for (var index = 0; index < images.Count; index++)
             {
                 ct.ThrowIfCancellationRequested();
-                var serial = session.Serial;
                 if (string.IsNullOrWhiteSpace(serial) || session.ConnectionState != DeviceConnectionState.FastbootConnected)
                 {
                     throw new InvalidOperationException("刷写过程中设备连接已断开。");
                 }
 
                 var image = images[index];
-                // 设备上不存在的分区(如 OTA 里各区域变体专属的分区)先 getvar 探一下,
-                // 不存在就跳过,避免未知分区导致整条流程中止、设备被刷到一半。
-                if (!await PartitionExistsAsync(serial, image.PartitionName, ct))
-                {
-                    logs.Write(OperationLogLevel.Warning, $"设备无 {image.PartitionName} 分区,已跳过。");
-                    skipped++;
-                    continue;
-                }
+                // 当前槽模式:不查 has-slot,目标即分区名,行为与原来完全一致。
+                string[] targets = SafeFlashSlotPlanner.IsSlotBasedMode(SlotMode)
+                    ? SafeFlashSlotPlanner.ComputeTargets(
+                        image.PartitionName, SlotMode, currentSlot,
+                        await HasSlotAsync(serial, image.PartitionName, ct))
+                    : [image.PartitionName];
 
-                CurrentPartition = image.PartitionName;
-                // fastboot CLI 带连续传输进度(进程写字节/镜像大小),实时更新右侧栏当前分区进度 + 速度。
-                CurrentPartitionProgress = 0;
-                lastExtractSpeedBytes = 0;
-                lastExtractSpeedTicks = 0;
-                SpeedText = string.Empty;
-                context.ReportStage($"正在刷写 {image.PartitionName}({index + 1}/{images.Count})", OperationKind.Flashing);
-                var flashWatch = Stopwatch.StartNew();
-                logs.Write(OperationLogLevel.Info, $"Sending '{image.PartitionName}' ({Math.Max(image.SizeBytes / 1024, 1)} KB)");
-                var flashProgress = new Progress<double>(fraction =>
+                foreach (var target in targets)
                 {
-                    CurrentPartitionProgress = fraction;
-                    OverallProgress = 0.5 + ((index + fraction) / images.Count) * 0.5;
-                    UpdateExtractSpeed((long)(fraction * image.SizeBytes));
-                });
-                // fastboot CLI 会打印可读错误(无设备/镜像缺失/设备 FAIL 消息)。
-                await cliRunner.FlashAsync(serial, image.PartitionName, image.ImagePath, flashProgress, ct);
-                flashWatch.Stop();
-                var seconds = flashWatch.Elapsed.TotalSeconds;
-                logs.Write(OperationLogLevel.Info, $"OKAY [  {seconds:0.3f}s]");
-                logs.Write(OperationLogLevel.Info, $"Writing '{image.PartitionName}'                               OKAY [  {seconds:0.3f}s]");
-                logs.Write(OperationLogLevel.Info, $"Finished. Total time: {seconds:0.3f}s");
-                logs.Write(OperationLogLevel.Info, $"Flashing {Path.GetFileName(image.ImagePath)}...OK");
-                OverallProgress = 0.5 + ((index + 1) / (double)images.Count) * 0.5;
+                    // 设备上不存在的分区先 getvar 探一下,不存在就跳过,避免未知分区中止整条流程。
+                    if (!await PartitionExistsAsync(serial, target, ct))
+                    {
+                        logs.Write(OperationLogLevel.Warning, "有 1 个分区不可用,已跳过。");
+                        skipped++;
+                        continue;
+                    }
+
+                    CurrentPartition = $"分区 {index + 1}/{images.Count}";
+                    // fastboot CLI 带连续传输进度(进程写字节/镜像大小),实时更新当前分区进度 + 速度。
+                    CurrentPartitionProgress = 0;
+                    lastExtractSpeedBytes = 0;
+                    lastExtractSpeedTicks = 0;
+                    SpeedText = string.Empty;
+                    context.ReportStage($"正在刷写分区 {index + 1}/{images.Count}", OperationKind.Flashing);
+                    var flashWatch = Stopwatch.StartNew();
+                    var flashProgress = new Progress<double>(fraction =>
+                    {
+                        CurrentPartitionProgress = fraction;
+                        OverallProgress = 0.5 + ((index + fraction) / images.Count) * 0.5;
+                        UpdateExtractSpeed((long)(fraction * image.SizeBytes));
+                    });
+                    // fastboot CLI 会打印可读错误(无设备/镜像缺失/设备 FAIL 消息)。
+                    await cliRunner.FlashAsync(serial, target, image.ImagePath, flashProgress, ct);
+                    flashWatch.Stop();
+                    logs.Write(OperationLogLevel.Info, $"分区 {index + 1}/{images.Count} 写入完成");
+                    OverallProgress = 0.5 + ((index + 1) / (double)images.Count) * 0.5;
+                }
             }
 
-            // 4. 重启回系统。
+            // 4. 对槽:切到对槽启动(仅当能确定对槽)。
+            if (SlotMode == SafeFlashSlotMode.OtherSlot)
+            {
+                var otherSlot = SafeFlashSlotPlanner.OtherSlot(currentSlot);
+                if (otherSlot is not null)
+                {
+                    await cliRunner.SetActiveAsync(serial, otherSlot, ct);
+                }
+            }
+
+            // 5. 清除数据:最后写入 misc(触发开机数据清除)。
+            if (IsWipeData && wipeDataPath is not null)
+            {
+                context.ReportStage("正在执行数据清除");
+                logs.Write(OperationLogLevel.Info, "正在执行数据清除");
+                if (!await PartitionExistsAsync(serial, "misc", ct))
+                {
+                    logs.Write(OperationLogLevel.Warning, "数据清除未完成,设备分区不可用。");
+                }
+                else
+                {
+                    await cliRunner.FlashAsync(serial, "misc", wipeDataPath, null, ct);
+                    logs.Write(OperationLogLevel.Info, "数据清除完成");
+                }
+            }
+
+            // 6. 重启回系统。
             logs.Write(OperationLogLevel.Info, "[Rebooting]发送重启命令...");
             context.ReportStage("正在重启设备");
-            await cliRunner.RebootAsync(session.Serial, ct); // fastboot reboot
+            await cliRunner.RebootAsync(serial, ct); // fastboot reboot
 
             OverallProgress = 1;
             taskStopwatch.Stop();
             logs.Write(OperationLogLevel.Success, $"任务结束,耗时{taskStopwatch.Elapsed.TotalSeconds:0.0}秒.");
             StatusText = skipped > 0
-                ? $"已刷入 {images.Count - skipped} 个分区,跳过 {skipped} 个设备不存在的分区"
+                ? $"已刷入 {images.Count - skipped} 个分区,已跳过 {skipped} 个不可用分区"
                 : $"已刷入 {images.Count} 个分区";
             logs.Write(OperationLogLevel.Success, StatusText);
         });
@@ -675,6 +718,35 @@ public partial class SafeFlashViewModel : ObservableObject
     /// <summary>用 <c>getvar partition-type:&lt;name&gt;</c> 探测分区是否存在于设备。</summary>
     private async Task<bool> PartitionExistsAsync(string serial, string partition, CancellationToken cancellationToken)
         => await cliRunner.PartitionExistsAsync(serial, partition, cancellationToken);
+
+    /// <summary>读当前活动槽位(a/b);读不到/非 a/b 返回 null(非 A/B 设备安全降级)。</summary>
+    private async Task<string?> ReadCurrentSlotAsync(string serial, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var value = await cliRunner.GetVarAsync(serial, "current-slot", cancellationToken);
+            var slot = value?.Trim().TrimStart('_').ToLowerInvariant();
+            return slot is "a" or "b" ? slot : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>分区是否有槽位(has-slot);查询失败按 false 处理(回退原样刷写)。</summary>
+    private async Task<bool> HasSlotAsync(string serial, string partition, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var value = await cliRunner.GetVarAsync(serial, $"has-slot:{partition}", cancellationToken);
+            return value?.Trim().ToLowerInvariant() is "yes" or "true" or "1";
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// 选 staging 盘:系统盘(通常是 SSD,bezzad 多分片随机写才不卡)有 ≥15GB 空闲就优先,

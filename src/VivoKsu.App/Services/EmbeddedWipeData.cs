@@ -13,6 +13,12 @@ internal static class EmbeddedWipeData
         var resourceName = assembly.GetManifestResourceNames()
             .FirstOrDefault(name => name.EndsWith("wipe-data.img", StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("数据清除资源不可用。");
+        var parentDirectory = Path.GetDirectoryName(destinationPath);
+        if (!string.IsNullOrEmpty(parentDirectory))
+        {
+            Directory.CreateDirectory(parentDirectory);
+        }
+
         await using var input = assembly.GetManifestResourceStream(resourceName)
             ?? throw new InvalidOperationException("数据清除资源不可用。");
         await using (var output = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, useAsync: true))
