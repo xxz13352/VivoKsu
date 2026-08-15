@@ -17,6 +17,7 @@ public partial class SoftwareViewModel : ObservableObject
     private readonly VivoDriverDetector driverDetector;
     private readonly IScrcpyToolLocator scrcpyLocator;
     private readonly PayloadDumperRunner payloadDumper;
+    private readonly PayloadDumperProvisioner? provisioner;
     private readonly ToolPathPreferences? preferences;
     private readonly string scrcpyInstallationRoot;
     private readonly Action? onReinstallDriver;
@@ -32,13 +33,16 @@ public partial class SoftwareViewModel : ObservableObject
         PayloadDumperRunner? payloadDumper = null,
         ToolPathPreferences? preferences = null,
         string? scrcpyInstallationRoot = null,
-        Action? onReinstallDriver = null)
+        Action? onReinstallDriver = null,
+        PayloadDumperProvisioner? provisioner = null)
     {
         AppVersion = AppInfo.Version;
         this.driverDetector = driverDetector ?? VivoDriverDetector.CreateDefault();
         this.scrcpyLocator = scrcpyLocator ?? new ScrcpyToolLocator(applicationRoot);
+        this.provisioner = provisioner;
+        // 发布版不随包:runner 指向 provisioner 缓存路径(未下载则 IsAvailable=false)。
         this.payloadDumper = payloadDumper ?? new PayloadDumperRunner(
-            Path.Combine(applicationRoot, "payload-tools", "payload_dumper.exe"));
+            provisioner?.ExecutablePath ?? Path.Combine(applicationRoot, "payload-tools", "payload_dumper.exe"));
         this.preferences = preferences;
         this.scrcpyInstallationRoot = scrcpyInstallationRoot ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -124,7 +128,9 @@ public partial class SoftwareViewModel : ObservableObject
             IsScrcpyReady = scrcpyExecutable is not null;
             ScrcpyStatusText = scrcpyExecutable is not null ? "scrcpy 已就绪" : "未检测到 scrcpy.exe";
             IsPayloadReady = payloadReady;
-            PayloadStatusText = payloadReady ? "就绪" : "未就绪";
+            PayloadStatusText = payloadReady
+                ? "就绪"
+                : provisioner is not null ? "未随包分发,首次固件提取时自动下载" : "未就绪";
         }
         catch
         {

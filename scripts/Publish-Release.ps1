@@ -1,12 +1,16 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$Configuration = "Release",
     [string]$RuntimeIdentifier = "win-x64"
 )
 
+# NOTE: keep this file ASCII-only. On this machine a BOM-less UTF-8 .ps1 is read as
+# GBK, and non-ASCII comments corrupt the parser. English comments only.
+
 $ErrorActionPreference = "Stop"
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $projectPath = Join-Path $repositoryRoot "src\VivoKsu.App\VivoKsu.App.csproj"
+$bootstrapperProjectPath = Join-Path $repositoryRoot "src\VivoKsu.Bootstrapper\VivoKsu.Bootstrapper.csproj"
 $outputPath = Join-Path $repositoryRoot "artifacts\release\VivoKsu-$RuntimeIdentifier"
 $releaseDirectory = Split-Path -Parent $outputPath
 $archivePath = Join-Path $releaseDirectory "VivoKsu-$RuntimeIdentifier.zip"
@@ -14,68 +18,50 @@ $archivePath = Join-Path $releaseDirectory "VivoKsu-$RuntimeIdentifier.zip"
 Write-Host "Restoring $RuntimeIdentifier assets..."
 dotnet restore $projectPath -r $RuntimeIdentifier
 
-Write-Host "Publishing self-contained application..."
+# ---- framework-dependent publish (no bundled .NET runtime) ----
+# The runtime is detected on first launch by the native AOT launcher
+# (VivoKsu.Launcher.exe): if missing it downloads the Microsoft installer
+# and silently installs it.
+Write-Host "Publishing framework-dependent application..."
 dotnet publish $projectPath `
     -c $Configuration `
     -r $RuntimeIdentifier `
-    --self-contained true `
+    --self-contained false `
     --no-restore `
     -o $outputPath
 
-$bundledScrcpyExecutable = Join-Path $outputPath "scrcpy\scrcpy.exe"
-$bundledScrcpyServer = Join-Path $outputPath "scrcpy\scrcpy-server"
-if (-not (Test-Path -LiteralPath $bundledScrcpyExecutable) -or -not (Test-Path -LiteralPath $bundledScrcpyServer)) {
-    throw "发布目录缺少内置 scrcpy 资源，已停止打包。"
+# ---- native AOT launcher ----
+# AOT linking needs vswhere.exe to locate the VC++ toolchain (MSVC BuildTools is
+# installed); prepend its folder to PATH so the ILCompiler can find it.
+$vsInstaller = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer"
+if (Test-Path -LiteralPath $vsInstaller) {
+    $env:PATH = "$vsInstaller;$env:PATH"
 }
+$bootstrapperStaging = Join-Path $outputPath "bootstrapper-staging"
+Write-Host "Publishing native AOT bootstrapper..."
+dotnet publish $bootstrapperProjectPath `
+    -c $Configuration `
+    -r $RuntimeIdentifier `
+    -o $bootstrapperStaging
+
+$launcherSource = Join-Path $bootstrapperStaging "VivoKsu.Bootstrapper.exe"
+if (-not (Test-Path -LiteralPath $launcherSource)) {
+    throw "AOT launcher publish failed: VivoKsu.Bootstrapper.exe not found."
+}
+Copy-Item -LiteralPath $launcherSource -Destination (Join-Path $outputPath "VivoKsu.Launcher.exe") -Force
+Remove-Item -LiteralPath $bootstrapperStaging -Recurse -Force
 
 $manifestPath = Join-Path $outputPath "SHA256SUMS.txt"
 
 # ---- Release size reduction ----
-# 1. Remove WinForms assemblies (pure WPF app does not need them)
-$winFormsAssemblies = @(
-    "System.Windows.Forms.dll",
-    "System.Windows.Forms.Design.dll",
-    "System.Windows.Forms.Design.Editors.dll",
-    "System.Windows.Forms.Primitives.dll",
-    "Accessibility.dll"
-)
-foreach ($assembly in $winFormsAssemblies) {
-    $winFormsPath = Join-Path $outputPath $assembly
-    if (Test-Path -LiteralPath $winFormsPath) {
-        Remove-Item -LiteralPath $winFormsPath -Force
-    }
-}
-
-# 2. Trim satellite language packs: keep only Chinese/English
+# Trim satellite language packs: keep only Chinese/English.
 $keepLanguages = @("zh-Hans", "zh-Hant")
 Get-ChildItem $outputPath -Directory |
     Where-Object { $_.Name -match '^[a-z]{2}(-[A-Za-z]+)?$' -and $_.Name -notin $keepLanguages } |
     Remove-Item -Recurse -Force
 
-# 3. Remove scrcpy-bundled adb (app sets the ADB env var to platform-tools\adb.exe)
-$scrcpyRedundant = @(
-    (Join-Path $outputPath "scrcpy\adb.exe"),
-    (Join-Path $outputPath "scrcpy\AdbWinApi.dll"),
-    (Join-Path $outputPath "scrcpy\AdbWinUsbApi.dll")
-)
-foreach ($asset in $scrcpyRedundant) {
-    if (Test-Path -LiteralPath $asset) {
-        Remove-Item -LiteralPath $asset -Force
-    }
-}
-
-$obsoleteReleaseAssets = @(
-    (Join-Path $outputPath "apk\Sukisu.APK"),
-    (Join-Path $outputPath "platform-tools\ksud.exe"),
-    (Join-Path $outputPath "platform-tools\libksud.exe")
-)
-foreach ($asset in $obsoleteReleaseAssets) {
-    if (Test-Path -LiteralPath $asset) {
-        Remove-Item -LiteralPath $asset -Force
-    }
-}
 Get-ChildItem $outputPath -File -Recurse |
-    Where-Object { $_.FullName -ne $manifestPath -and $_.Name -ne "Sukisu.APK" -and $_.Name -ne "ksud.exe" -and $_.Name -ne "libksud.exe" } |
+    Where-Object { $_.FullName -ne $manifestPath } |
     Sort-Object FullName |
     ForEach-Object {
         $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash

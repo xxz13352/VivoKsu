@@ -632,7 +632,9 @@ public partial class RootViewModel : ObservableObject
             throw new InvalidOperationException("未初始化 Fastboot 后端。 ");
         }
 
-        var manager = resources.ResolveManager(SelectedManagerKey);
+        // 发布版 APK 不随包:ROOT 安装前确保可用(随包/缓存未命中则按需下载)。
+        var manager = await resources.EnsureManagerApkAsync(
+            resources.ResolveManager(SelectedManagerKey), cancellationToken);
         context?.ReportStage($"正在安装 {SelectedManagerLabel} 管理器", OperationKind.Installing);
         await backend.InstallAsync(session.Serial, manager.ApkPath, replace: true, cancellationToken);
         context?.ReportStage("正在验证 ROOT 管理器安装状态", OperationKind.Installing);

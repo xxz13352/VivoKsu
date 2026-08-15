@@ -86,7 +86,7 @@ flowchart LR
 
 ```
 VivoKsu 工具/
-├─ VivoKsu.slnx                     # 解决方案(src 1 项目 + tests 1 项目)
+├─ VivoKsu.slnx                     # 解决方案(src 2 项目 + tests 1 项目)
 ├─ src/
 │  ├─ VivoKsu.App/                  # 桌面应用(net8.0-windows, WPF)
 │  │  ├─ App.xaml(.cs)              # 启动门禁 / 崩溃日志 / 退出清理
@@ -95,17 +95,18 @@ VivoKsu 工具/
 │  │  ├─ Models/                    # 领域模型(AppPage / 分区 / payload / 快照 / 日志…)
 │  │  ├─ ViewModels/                # 各页面 MVVM 视图模型(15 个)
 │  │  ├─ Services/                  # 业务服务与基础设施(40+ 个)
-│  │  ├─ apk/                       # KernelSU 安装包(KSU.APK / KernelSU.apk)
-│  │  ├─ payload-tools/             # payload_dumper.exe(payload-dumper-rust)
-│  │  ├─ platform-tools/            # adb.exe + 唯一 fastboot.exe(带进度)
-│  │  ├─ root-tools/                # magiskboot.so
-│  │  └─ scrcpy/                    # scrcpy(发布脚本自动补齐)
+│  │  ├─ apk/                       # KernelSU 安装包(外置,仅开发/测试随包)
+│  │  ├─ payload-tools/             # payload_dumper.exe(外置,仅开发/测试随包)
+│  │  ├─ platform-tools/            # adb.exe + 唯一 fastboot.exe(随包)
+│  │  ├─ root-tools/                # magiskboot.so(随包)
+│  │  └─ scrcpy/                    # scrcpy(外置,仅开发/测试随包)
+│  └─ VivoKsu.Bootstrapper/          # 原生 AOT 引导器(运行时首启检测/静默装)
 ├─ cloudflare/                      # Worker + 后台 + 用户门户 + 官网(见 §4 §5)
 ├─ tests/
 │  └─ VivoKsu.App.Tests/            # 桌面应用单元测试(约 50 个文件)
 ├─ scripts/
-│  ├─ Publish-Release.ps1           # 一键发布 self-contained win-x64
-│  ├─ Ensure-Scrcpy.ps1             # 发布前自动获取 scrcpy
+│  ├─ Publish-Release.ps1           # 一键发布 framework-dependent + AOT 引导器
+│  ├─ Upload-Resources.ps1          # 上传外置资源(APK/payload_dumper)到 GitHub Release
 │  └─ verify-*.ps1                  # UI 自动化验证脚本(UIA 导航 + 截图像素采样)
 ├─ docs/                            # architecture.md(本文) / safeflash-ota.md
 ```
@@ -565,12 +566,16 @@ sequenceDiagram
 | 进度条分散在各页面底部 | 全部主进度统一到右上角「操作进度」区,按操作运行显示(固件提取 / 文件传输入位,页面移除重复条) |
 | 传出文件固定下到当前目录 | 弹保存对话框选择位置(选择器可注入以便单测),成功后本地目录跟随 |
 | 左侧菜单顺序混乱 | 按刷机链路分组重排(概览/文件/投屏 ‖ 刷写/提取/ROOT ‖ 在线/软件) |
+| self-contained 发布 205MB 解压 | 发布瘦身:framework-dependent + AOT 引导器首启检测(.NET 缺失→微软直链静默装)+ scrcpy/APK/payload_dumper 外置按需下载,解压降至 ~24MB |
+| 无 .NET 8 运行时 App 无法自检 | 入口改为原生 AOT 引导器 `VivoKsu.Launcher.exe`(不依赖运行时),先检测再拉起 App;检测逻辑共享源文件编入 App 供测试 |
+| 国内直连 GitHub 下载不稳 | `RemoteAssetDownloader` 直连→gh-proxy.com→ghfast.top→ghproxy.net 多镜像 failover,全失败给手动链接;staging+哈希校验+原子落盘 |
+| 外置 APK/payload 被替换风险 | 下载后强校验:APK 走 `ManagerApkSha256`(已有),payload_dumper 走 `PayloadDumperSha256`(解压后校验 exe,zip 仅作传输) |
 
 ---
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**353 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**374 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长;2026-08-15 新增保存对话框注入下载到指定路径、`DownloadToFileAsync` 路径安全校验、登出命令触发回调、**登出忙时禁用**(协调器忙 + 会话忙兜底)、协调器下载失败可见提示、本地目录跟随。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 
@@ -582,16 +587,33 @@ sequenceDiagram
 ./scripts/Publish-Release.ps1
 ```
 
-产出 **self-contained win-x64**:`artifacts/release/VivoKsu-win-x64/` + `.zip` + `.sha256` + `SHA256SUMS.txt`(目录内逐文件清单)。发布前 `Ensure-Scrcpy.ps1` 自动补齐 scrcpy 并清理废弃资源(Sukisu.APK、ksud)。
+产出 **framework-dependent win-x64**(不内嵌 .NET 运行时):`artifacts/release/VivoKsu-win-x64/` + `.zip` + `.sha256` + `SHA256SUMS.txt`(目录内逐文件清单)。解压约 **24MB** / zip 约 **11MB**。
 
-| 内置组件 | 来源 | 用途 |
+### 9.1 发布瘦身(2026-08-15)
+
+| 组成 | 体积 | 处置 |
 | --- | --- | --- |
-| `payload-tools/payload_dumper.exe` | payload-dumper-rust | OTA payload 解包、云提取 |
-| `platform-tools/adb.exe · fastboot.exe` | Android SDK Platform Tools | 设备通信(回退路径) |
-| `platform-tools/fastboot.exe` | fastboot 35.0.2-eng(带进度,用户提供) | 全部 fastboot 刷写 / 读变量 / 擦除 / 重启 / 槽位 |
-| `scrcpy/` | scrcpy | 屏幕镜像(发布时自动获取) |
-| `root-tools/magiskboot.so` | Magisk | vendor_boot 补丁处理 |
-| `apk/KSU.APK · KernelSU.apk` | KernelSU | Root 管理器安装包(带 SHA-256 校验) |
+| .NET 8 WPF 运行时 | ~147MB | **移除** → framework-dependent + 首启引导器 |
+| scrcpy | ~31MB | **外置**,首次投屏从 GitHub 按需下载(已有 `ScrcpyProvisioningService`) |
+| ROOT 管理器 APK ×2 | ~18MB | **外置**,ROOT 前下载 + SHA-256 校验(`EnsureManagerApkAsync`) |
+| vivo USB 驱动 | ~12MB | **保留随包**(装驱动需离线可靠) |
+| platform-tools(adb/fastboot) | ~7.7MB | **保留随包**(一切设备操作前提) |
+| payload_dumper | ~3.8MB | **外置**,固件提取/安全刷写前下载 + SHA-256 校验(`PayloadDumperProvisioner`) |
+| App 本体 + 依赖 | ~5MB | 保留 |
+
+**原生 AOT 引导器(`src/VivoKsu.Bootstrapper/`)**:framework-dependent 后 App 本体无法自检运行时,入口改为原生 exe `VivoKsu.Launcher.exe`(AOT 编译 ≈5MB,不依赖任何运行时)。流程:检测 `Microsoft.WindowsDesktop.App 8.x`(注册表 `HKLM\…\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App` + `dotnet --list-runtimes` 兜底)→ 已装直接拉起 `VivoKsu.App.exe`;缺失 → 微软直链下载 `windowsdesktop-runtime-8.0.x`(~56MB)→ `runas` 静默装 `/install /quiet /norestart`(UAC 一次)→ 复查后拉起。检测逻辑 `DotNetRuntimeDetector` 以共享源文件同时编入 App(测试)与引导器(AOT 兼容,无反射/WPF 依赖)。AOT 发布需 MSVC(vswhere 目录已由发布脚本加进 PATH)。
+
+**外置资源托管**:GitHub 公开仓库 Release(owner/repo/tag 集中在 `RemoteAssetCatalog` 一处)。客户端 `RemoteAssetDownloader` 按 直连 → `gh-proxy.com` → `ghfast.top` → `ghproxy.net` 顺序 failover,下载到 staging → 长度/SHA-256 校验 → 原子落缓存 `%LOCALAPPDATA%\VivoKsu\resources|tools`;全失败抛 `RemoteAssetDownloadException`(消息含手动下载链接)。上传用 `scripts/Upload-Resources.ps1`(`gh` CLI)。2026-08-15 实测:直连 github 超时,三个镜像均可用(206)。
+
+| 内置组件 | 随包/外置 | 来源 | 用途 |
+| --- | --- | --- | --- |
+| `platform-tools/adb.exe · fastboot.exe` | **随包** | Android SDK Platform Tools | 设备通信(回退路径) |
+| `platform-tools/fastboot.exe` | **随包** | fastboot 35.0.2-eng(带进度) | 全部 fastboot 刷写 / 读变量 / 擦除 / 重启 / 槽位 |
+| `drivers/vivo-usb-driver.7z` | **随包** | vivo 官方 | 驱动提醒窗静默安装 |
+| `root-tools/magiskboot.so` | **随包** | Magisk | vendor_boot 补丁处理 |
+| `scrcpy/` | **外置**按需 | scrcpy | 屏幕镜像 |
+| `apk/KSU.APK · KernelSU.apk` | **外置**按需 | KernelSU | Root 管理器安装包(带 SHA-256 校验) |
+| `payload-tools/payload_dumper.exe` | **外置**按需 | payload-dumper-rust | OTA payload 解包、云提取 |
 
 ---
 

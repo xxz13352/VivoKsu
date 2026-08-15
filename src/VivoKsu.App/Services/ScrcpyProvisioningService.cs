@@ -15,11 +15,13 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
 {
     private static readonly Uri LatestReleaseUri = new("https://api.github.com/repos/Genymobile/scrcpy/releases/latest");
     private readonly HttpClient httpClient;
+    private readonly IRemoteAssetDownloader downloader;
     private readonly SemaphoreSlim provisioningLock = new(1, 1);
 
-    public ScrcpyProvisioningService(HttpClient? httpClient = null, string? installationRoot = null)
+    public ScrcpyProvisioningService(HttpClient? httpClient = null, string? installationRoot = null, IRemoteAssetDownloader? downloader = null)
     {
         this.httpClient = httpClient ?? new HttpClient();
+        this.downloader = downloader ?? new RemoteAssetDownloader(this.httpClient);
         if (!this.httpClient.DefaultRequestHeaders.UserAgent.Any())
         {
             this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("VivoKsu-App/1.0");
@@ -71,13 +73,12 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
             try
             {
                 Directory.CreateDirectory(stagingDirectory);
-                using (var response = await httpClient.GetAsync(assetUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
-                {
-                    response.EnsureSuccessStatusCode();
-                    await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-                    await using var output = File.Create(archivePath);
-                    await input.CopyToAsync(output, cancellationToken);
-                }
+                // 走多镜像 failover 下载器(直连 github 国内不稳,镜像兜底)。
+                await downloader.DownloadAsync(
+                    new RemoteAssetSpec("scrcpy", assetUri.ToString()),
+                    archivePath,
+                    progress: null,
+                    cancellationToken);
 
                 ExtractArchiveSafely(archivePath, payloadDirectory);
                 var executable = FindExecutable(payloadDirectory)

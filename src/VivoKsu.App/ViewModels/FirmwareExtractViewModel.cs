@@ -14,7 +14,8 @@ namespace VivoKsu.App.ViewModels;
 
 public partial class FirmwareExtractViewModel : ObservableObject
 {
-    private readonly PayloadDumperRunner? payloadDumper;
+    private PayloadDumperRunner? payloadDumper;
+    private readonly PayloadDumperProvisioner? provisioner;
     private readonly VivoFirmwareExtractor? vivoExtractor;
     private readonly OperationLogService logs;
     private Action<FlashImageInfo, QuickFlashPartition>? flashContinuation;
@@ -65,11 +66,13 @@ public partial class FirmwareExtractViewModel : ObservableObject
     public FirmwareExtractViewModel(
         OperationLogService logs,
         PayloadDumperRunner? payloadDumper = null,
-        VivoFirmwareExtractor? vivoExtractor = null)
+        VivoFirmwareExtractor? vivoExtractor = null,
+        PayloadDumperProvisioner? provisioner = null)
     {
         this.logs = logs;
         this.payloadDumper = payloadDumper;
         this.vivoExtractor = vivoExtractor;
+        this.provisioner = provisioner;
 
         SelectPayloadCommand = new AsyncRelayCommand(SelectPayloadAsync, CanManagePayload);
         SelectOutputPathCommand = new AsyncRelayCommand(SelectOutputPathAsync, CanManagePayload);
@@ -151,6 +154,26 @@ public partial class FirmwareExtractViewModel : ObservableObject
     private bool CanExtract() =>
         payloadDumper is not null && !IsPayloadBusy && PayloadPartitions.Any(partition => partition.IsSelected);
 
+    /// <summary>
+    /// 取得可用的 payload_dumper runner;发布版不随包,首次使用经 provisioner 按需下载。
+    /// provisioner 为 null(测试)时原样返回已有 runner,保持既有注入行为。
+    /// </summary>
+    private async Task<PayloadDumperRunner?> AcquirePayloadDumperAsync(CancellationToken cancellationToken)
+    {
+        if (payloadDumper?.IsAvailable == true)
+        {
+            return payloadDumper;
+        }
+
+        if (provisioner is null)
+        {
+            return payloadDumper;
+        }
+
+        payloadDumper = await provisioner.EnsureInstalledAsync(cancellationToken);
+        return payloadDumper;
+    }
+
     private async Task SelectPayloadAsync()
     {
         var dialog = new OpenFileDialog
@@ -225,14 +248,14 @@ public partial class FirmwareExtractViewModel : ObservableObject
             }
             else if (kind == FirmwareFormatDetector.FirmwareKind.PayloadZip)
             {
-                if (payloadDumper is null)
+                if (await AcquirePayloadDumperAsync(readCancellation.Token) is not { } dumper)
                 {
                     PayloadStatusText = "payload 提取器未就绪。";
                     return;
                 }
 
                 PayloadStatusText = "正在读取 payload 分区列表…";
-                var partitions = await payloadDumper.ListPartitionsAsync(source, readCancellation.Token);
+                var partitions = await dumper.ListPartitionsAsync(source, readCancellation.Token);
                 PopulatePartitions(partitions.Select(partition => new PayloadPartitionItemViewModel(partition)));
             }
             else
@@ -439,7 +462,7 @@ public partial class FirmwareExtractViewModel : ObservableObject
             }
             else
             {
-                if (payloadDumper is null)
+                if (await AcquirePayloadDumperAsync(extractionCancellation.Token) is not { } dumper)
                 {
                     PayloadStatusText = "payload 提取器未就绪。";
                     return;
@@ -463,7 +486,7 @@ public partial class FirmwareExtractViewModel : ObservableObject
                     lastSampledRunBytes = 0;
                     PayloadStatusText = $"正在提取 {name}（{index + 1}/{selected.Length}）…";
                     var progress = new Progress<long>(OnPayloadWriteProgress);
-                    var results = await payloadDumper.ExtractAsync(
+                    var results = await dumper.ExtractAsync(
                         payloadSource, [name], outputDirectory, extractionCancellation.Token, progress);
                     extracted.AddRange(results);
 

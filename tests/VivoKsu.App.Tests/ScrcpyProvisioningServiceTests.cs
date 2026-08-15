@@ -18,7 +18,7 @@ public class ScrcpyProvisioningServiceTests
         {
             var serviceType = typeof(MirrorService).Assembly.GetType("VivoKsu.App.Services.ScrcpyProvisioningService");
             Assert.NotNull(serviceType);
-            var service = Activator.CreateInstance(serviceType!, client, root);
+            var service = Activator.CreateInstance(serviceType!, [client, root, null]);
             Assert.NotNull(service);
             var ensureInstalled = serviceType!.GetMethod("EnsureInstalledAsync");
             Assert.NotNull(ensureInstalled);

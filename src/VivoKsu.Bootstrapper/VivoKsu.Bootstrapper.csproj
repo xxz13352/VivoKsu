@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishAot>true</PublishAot>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- 与主 App 的版本号保持一致,便于发版对照 -->
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <!-- 共享运行时检测逻辑:同一源文件编入 App(测试)与本引导器(AOT)。必须保持 AOT 兼容。 -->
+  <ItemGroup>
+    <Compile Include="..\VivoKsu.App\Services\DotNetRuntimeDetector.cs" Link="DotNetRuntimeDetector.cs" />
+  </ItemGroup>
+
+</Project>

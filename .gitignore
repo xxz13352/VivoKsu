@@ -18,7 +18,8 @@ target/
 临时/
 logs/
 *.log
-artifacts/                       # 发布产物(截图/旧包/self-contained 目录),不入库
+# 发布产物(截图/旧包/self-contained 目录),不入库
+artifacts/
 
 # ---- 其它 ----
 .DS_Store

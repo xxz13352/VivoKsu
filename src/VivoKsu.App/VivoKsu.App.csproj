@@ -12,10 +12,6 @@
     <Version>1.0.0</Version>
   </PropertyGroup>
 
-  <Target Name="EnsureBundledScrcpy" BeforeTargets="Publish">
-    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\..\..\scripts\Ensure-Scrcpy.ps1&quot; -DestinationRoot &quot;$(MSBuildProjectDirectory)\scrcpy&quot;" />
-  </Target>
-
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageReference Include="Downloader" Version="5.9.5" />
@@ -29,25 +25,28 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 投屏工具:随包开发/测试用,发布外置(运行时从 GitHub 按需下载) -->
     <None Update="scrcpy\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </None>
     <None Update="platform-tools\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
+    <!-- OTA 解包工具:发布外置(固件提取/URL 刷写时按需下载) -->
     <None Update="payload-tools\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </None>
+    <!-- ROOT 管理器 APK:发布外置(ROOT 时按需下载,SHA-256 校验) -->
     <None Update="apk\KSU.APK">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </None>
     <None Update="apk\KernelSU.apk">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </None>
     <None Update="root-tools\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

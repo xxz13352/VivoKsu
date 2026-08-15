@@ -42,6 +42,16 @@ public sealed class VivoRootResourceService
         };
 
     private readonly string projectRoot;
+    private readonly IRemoteAssetDownloader? downloader;
+
+    /// <summary>按需下载的缓存根目录(发布瘦身后 APK 不再随包,ROOT 前下载到这里)。</summary>
+    private static string CacheRoot => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "VivoKsu",
+        "resources");
+
+    private static string CacheApkPath(string key) =>
+        Path.Combine(CacheRoot, "apk", ApkFileName(key));
 
     /// <summary>
     /// 随包分发的管理器 APK 的 SHA-256。更新 apk/ 下的 APK 后必须同步更新,
@@ -55,9 +65,10 @@ public sealed class VivoRootResourceService
             ["OfficialKsu"] = "dca1cf72a6f6cff4a116242fbe940a161099bafbd9d74ca4518756eaad5c8c03"
         };
 
-    public VivoRootResourceService(string projectRoot)
+    public VivoRootResourceService(string projectRoot, IRemoteAssetDownloader? downloader = null)
     {
         this.projectRoot = Path.GetFullPath(projectRoot);
+        this.downloader = downloader;
     }
 
     public static IReadOnlyList<string> SupportedKmis => kSupportedKmis;
@@ -71,8 +82,52 @@ public sealed class VivoRootResourceService
             throw new ArgumentException($"不支持的 ROOT 管理器: {key}", nameof(key));
         }
 
-        var fileName = catalog.Key == "KSU" ? "KSU.APK" : "KernelSU.apk";
-        return catalog with { ApkPath = Path.Combine(projectRoot, "apk", fileName) };
+        var bundledPath = Path.Combine(projectRoot, "apk", ApkFileName(key));
+        // 随包存在(开发/测试)用随包;发布版无 apk/ 目录 → 用按需下载缓存路径。
+        var apkPath = File.Exists(bundledPath) ? bundledPath : CacheApkPath(key);
+        return catalog with { ApkPath = apkPath };
+    }
+
+    /// <summary>管理器 APK 的文件名(远程资产名与随包文件名一致)。</summary>
+    private static string ApkFileName(string key) => key == "KSU" ? "KSU.APK" : "KernelSU.apk";
+
+    /// <summary>
+    /// 确保管理器 APK 可用:随包/缓存已存在且通过完整性校验则直接返回;否则从远程
+    /// 下载到缓存并做强校验(SHA-256 + APK 结构),失败抛异常由调用方按失败处理。
+    /// </summary>
+    public async Task<VivoRootManagerResource> EnsureManagerApkAsync(
+        VivoRootManagerResource manager,
+        CancellationToken cancellationToken)
+    {
+        if (File.Exists(manager.ApkPath))
+        {
+            try
+            {
+                VerifyManagerApk(manager);
+                return manager;
+            }
+            catch (Exception exception) when (exception is InvalidDataException or FileNotFoundException)
+            {
+                // 本地文件损坏/为空:视为缺失,重新下载到缓存。
+            }
+        }
+
+        if (downloader is null)
+        {
+            throw new InvalidOperationException($"{manager.Key} 管理器 APK 缺失且没有配置下载器。");
+        }
+
+        var cachePath = CacheApkPath(manager.Key);
+        var spec = new RemoteAssetSpec(
+            $"{manager.Key} 管理器 APK",
+            RemoteAssetCatalog.GitHubDownloadUrl(ApkFileName(manager.Key)),
+            ExpectedSha256: ManagerApkSha256.GetValueOrDefault(manager.Key));
+        await downloader.DownloadAsync(spec, cachePath, progress: null, cancellationToken);
+
+        var cached = manager with { ApkPath = cachePath };
+        // 下载后的强校验:哈希不符 / 非有效 APK 都会抛。
+        VerifyManagerApk(cached);
+        return cached;
     }
 
     public VivoRootToolResource ResolveMagiskboot() => new(

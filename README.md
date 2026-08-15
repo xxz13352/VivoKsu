@@ -38,7 +38,7 @@ Nwflash 是**商业付费工具**:
 - **CommunityToolkit.Mvvm** 8.4 —— `[ObservableProperty]` / `[RelayCommand]`
 - **HandyControl** 3.5.1 —— UI 控件库
 - **SharpCompress** 0.37.2、**ZstdSharp.Port** 0.8.1 —— 压缩 / zstd 解压
-- **xunit** + **FluentAssertions** —— 单元测试(当前 **353** 个应用用例全绿)
+- **xunit** + **FluentAssertions** —— 单元测试(当前 **374** 个应用用例全绿)
 
 ## 目录结构
 
@@ -51,17 +51,18 @@ VivoKsu 工具/
 │  │  ├─ Services/                  # 业务服务与基础设施
 │  │  ├─ ViewModels/                # 各页面 MVVM 视图模型
 │  │  ├─ MainWindow.xaml            # 单窗口多页面导航与全部 XAML
-│  │  ├─ apk/                       # KernelSU 安装包(KSU.APK / KernelSU.apk)
-│  │  ├─ payload-tools/             # payload_dumper.exe(payload-dumper-rust)
-│  │  ├─ platform-tools/            # adb / fastboot
-│  │  ├─ root-tools/                # magiskboot.so
-│  │  └─ scrcpy/                    # scrcpy(发布时由脚本自动补齐)
+│  │  ├─ apk/                       # KernelSU 安装包(外置,仅开发/测试随包)
+│  │  ├─ payload-tools/             # payload_dumper.exe(外置,仅开发/测试随包)
+│  │  ├─ platform-tools/            # adb / fastboot(随包)
+│  │  ├─ root-tools/                # magiskboot.so(随包)
+│  │  └─ scrcpy/                    # scrcpy(外置,仅开发/测试随包)
+│  └─ VivoKsu.Bootstrapper/          # 原生 AOT 引导器(.NET 运行时首启检测/静默装)
 ├─ cloudflare/                      # Cloudflare Worker:Nwflash ROM 代理(api.nwflash.cc.cd)
 ├─ tests/
 │  └─ VivoKsu.App.Tests/            # 桌面应用单元测试
 ├─ scripts/
-│  ├─ Publish-Release.ps1           # 一键发布 self-contained 版本
-│  ├─ Ensure-Scrcpy.ps1             # 发布前自动获取 scrcpy
+│  ├─ Publish-Release.ps1           # 一键发布 framework-dependent + AOT 引导器版本
+│  ├─ Upload-Resources.ps1          # 上传外置资源(scrcpy 之外的 APK/payload_dumper)到 GitHub Release
 │  └─ verify-*.ps1                  # UI 自动化验证脚本(启动→UIA 导航→截图)
 ```
 
@@ -165,23 +166,35 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 ./scripts/Publish-Release.ps1
 ```
 
-产出 **self-contained** `win-x64` 版本:
+产出 **framework-dependent** `win-x64` 版本(不内嵌 .NET 运行时):
 
 - `artifacts/release/VivoKsu-win-x64/` —— 可分发目录
 - `artifacts/release/VivoKsu-win-x64.zip` + `.sha256`
 - `SHA256SUMS.txt` —— 目录内每个文件的 SHA-256 清单
 
-发布前 `Ensure-Scrcpy.ps1` 自动补齐 scrcpy,并清理废弃资源(Sukisu.APK、ksud)。
+**发布体积**:解压约 **24MB** / zip 约 **11MB**(较改造前的 self-contained 约 205MB / 95MB 缩减约 90%)。
+
+**首次启动**:入口为原生 AOT 引导器 `VivoKsu.Launcher.exe`(≈5MB,不依赖任何运行时)。
+机器缺少 .NET 8 桌面运行时 → 引导器从微软直链下载 ~56MB 静默安装(一次 UAC)后拉起
+`VivoKsu.App.exe`;已装则直接启动。检测逻辑见 `DotNetRuntimeDetector`。
+
+**外置资源(不随包,首次使用按需下载)**:scrcpy、ROOT 管理器 APK、payload_dumper。
+托管在 GitHub 公开仓库 Release(owner/repo/tag 在 `RemoteAssetCatalog` 一处可改),下载按
+直连 → gh-proxy.com → ghfast.top → ghproxy.net 顺序自动 failover,全部失败给出手动下载链接。
+上传资源:装好 `gh` CLI 后运行 `./scripts/Upload-Resources.ps1`(或手动建 Release 上传);
+APK 的 SHA-256 已 pin 在 `VivoRootResourceService.ManagerApkSha256`,payload_dumper 的 pin 在
+`RemoteAssetCatalog.PayloadDumperSha256`。
 
 ## 内置组件
 
-| 组件 | 来源 | 用途 |
-| --- | --- | --- |
-| `payload-tools/payload_dumper.exe` | payload-dumper-rust | OTA payload 解包、云提取(本地 / zip / URL) |
-| `platform-tools/` | Android SDK Platform Tools | adb、fastboot |
-| `scrcpy/` | scrcpy | 屏幕镜像(发布时自动获取) |
-| `root-tools/magiskboot.so` | Magisk | vendor_boot 补丁处理 |
-| `apk/KSU.APK`、`apk/KernelSU.apk` | KernelSU | Root 管理器安装包 |
+| 组件 | 随包/外置 | 来源 | 用途 |
+| --- | --- | --- | --- |
+| `platform-tools/`(adb、fastboot) | **随包** | Android SDK Platform Tools | 设备连接、刷写 |
+| `drivers/vivo-usb-driver.7z` | **随包** | vivo 官方 | 驱动提醒窗静默安装 |
+| `root-tools/magiskboot.so` | **随包** | Magisk | vendor_boot 补丁处理 |
+| `scrcpy/` | **外置**按需 | scrcpy | 屏幕镜像 |
+| `apk/KSU.APK`、`apk/KernelSU.apk` | **外置**按需 | KernelSU | ROOT 管理器安装包 |
+| `payload-tools/payload_dumper.exe` | **外置**按需 | payload-dumper-rust | OTA payload 解包 |
 
 ## 已知限制
 

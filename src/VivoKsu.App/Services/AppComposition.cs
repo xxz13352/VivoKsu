@@ -40,11 +40,16 @@ public sealed class AppComposition
 
         var toolPreferences = preferences ?? ToolPathPreferences.CreateDefault();
         var quickFlashService = new QuickFlashService(backend, cliRunner, LogService);
-        var payloadDumper = new PayloadDumperRunner(
-            Path.Combine(AppContext.BaseDirectory, "payload-tools", "payload_dumper.exe"));
-        mirrorService = new MirrorService(processRunner, LogService, provisioner: new ScrcpyProvisioningService());
+        // 发布瘦身:scrcpy/APK/payload_dumper 不再随包;统一走多镜像 failover 下载器按需获取。
+        var assetDownloader = new RemoteAssetDownloader();
+        var payloadDumperProvisioner = new PayloadDumperProvisioner(
+            assetDownloader,
+            bundledExecutablePath: Path.Combine(AppContext.BaseDirectory, "payload-tools", "payload_dumper.exe"));
+        var payloadDumper = new PayloadDumperRunner(payloadDumperProvisioner.ExecutablePath);
+        mirrorService = new MirrorService(processRunner, LogService, provisioner: new ScrcpyProvisioningService(downloader: assetDownloader));
         var quickFlash = new QuickFlashViewModel(Session, quickFlashService, LogService, Coordinator);
-        var firmwareExtract = new FirmwareExtractViewModel(LogService, payloadDumper, new VivoFirmwareExtractor());
+        var firmwareExtract = new FirmwareExtractViewModel(
+            LogService, payloadDumper, new VivoFirmwareExtractor(), provisioner: payloadDumperProvisioner);
         var mirror = new MirrorViewModel(Session, mirrorService, toolPreferences);
         var fileManager = new FileManagerViewModel(
             Session,
@@ -74,7 +79,7 @@ public sealed class AppComposition
             quickFlashService,
             LogService,
             backend,
-            new VivoRootResourceService(AppContext.BaseDirectory),
+            new VivoRootResourceService(AppContext.BaseDirectory, assetDownloader),
             Coordinator);
         var overview = new OverviewViewModel(Session, backend, LogService, Coordinator);
         // 心跳与设备操作无关,独立于 OperationCoordinator 运行;强制退出回调处理「不打断刷写」。
@@ -89,7 +94,7 @@ public sealed class AppComposition
             backend,
             otaClient,
             new OtaDownloadService(),
-            new FirmwarePartitionExtractor(payloadDumper),
+            new FirmwarePartitionExtractor(payloadDumper, payloadDumperProvisioner),
             Coordinator,
             cliRunner);
 
@@ -112,7 +117,8 @@ public sealed class AppComposition
             new SoftwareViewModel(
                 AppContext.BaseDirectory,
                 preferences: toolPreferences,
-                onReinstallDriver: () => new DriverReminderWindow(reinstallMode: true).ShowDialog()),
+                onReinstallDriver: () => new DriverReminderWindow(reinstallMode: true).ShowDialog(),
+                provisioner: payloadDumperProvisioner),
             onLogout: OnLogoutAsync);
         Monitor.DeviceRefreshed += MainViewModel.OnDeviceRefreshedAsync;
 

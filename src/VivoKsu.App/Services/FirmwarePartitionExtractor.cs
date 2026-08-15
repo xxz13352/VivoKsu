@@ -18,11 +18,30 @@ public sealed class FirmwarePartitionExtractor
 {
     private static readonly string[] ImageExtensions = [".img", ".bin"];
 
-    private readonly PayloadDumperRunner? payloadDumper;
+    private PayloadDumperRunner? payloadDumper;
+    private readonly PayloadDumperProvisioner? provisioner;
 
-    public FirmwarePartitionExtractor(PayloadDumperRunner? payloadDumper)
+    public FirmwarePartitionExtractor(PayloadDumperRunner? payloadDumper, PayloadDumperProvisioner? provisioner = null)
     {
         this.payloadDumper = payloadDumper;
+        this.provisioner = provisioner;
+    }
+
+    /// <summary>取得可用的 payload_dumper runner;未就绪(发布版不随包)时经 provisioner 按需下载。</summary>
+    private async Task<PayloadDumperRunner> AcquirePayloadDumperAsync(CancellationToken cancellationToken)
+    {
+        if (payloadDumper?.IsAvailable == true)
+        {
+            return payloadDumper;
+        }
+
+        if (provisioner is null)
+        {
+            throw new InvalidOperationException("payload 提取器未就绪。");
+        }
+
+        payloadDumper = await provisioner.EnsureInstalledAsync(cancellationToken);
+        return payloadDumper;
     }
 
     /// <summary>安全刷写要跳过的分区:lk 与 preloader*。其余全部刷入。</summary>
@@ -63,7 +82,7 @@ public sealed class FirmwarePartitionExtractor
 
         if (payloadDumper is null)
         {
-            throw new InvalidOperationException("payload 提取器未就绪。");
+            payloadDumper = await AcquirePayloadDumperAsync(cancellationToken);
         }
 
         var partitions = await payloadDumper.ListPartitionsAsync(source, cancellationToken);
@@ -83,7 +102,7 @@ public sealed class FirmwarePartitionExtractor
         {
             if (payloadDumper is null)
             {
-                throw new InvalidOperationException("payload 提取器未就绪。");
+                payloadDumper = await AcquirePayloadDumperAsync(cancellationToken);
             }
 
             var results = await payloadDumper.ExtractAsync(
