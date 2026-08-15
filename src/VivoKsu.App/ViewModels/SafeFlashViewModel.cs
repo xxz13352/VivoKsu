@@ -56,6 +56,17 @@ public partial class SafeFlashViewModel : ObservableObject
         return (parts[0], parts[^1]);
     }
 
+    /// <summary>保留ROOT 要跳过的启动分区(boot/init_boot/vendor_boot)。</summary>
+    private static bool IsBootPartition(string name) =>
+        name.Equals("boot", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("init_boot", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("vendor_boot", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>按选项决定某分区是否纳入刷写:安全刷写排除引导加载器,保留ROOT 排除启动分区。</summary>
+    private bool IsPartitionIncluded(string name) =>
+        (!IsSafeFlash || !FirmwarePartitionExtractor.ShouldSkip(name)) &&
+        (!IsKeepRoot || !IsBootPartition(name));
+
     private string stagingRoot = string.Empty;
     private string extractDirectory = string.Empty;
     private string sourcePath = string.Empty;
@@ -95,6 +106,40 @@ public partial class SafeFlashViewModel : ObservableObject
 
     [ObservableProperty]
     private string confirmSummary = string.Empty;
+
+    [ObservableProperty]
+    private bool isWipeData;
+
+    [ObservableProperty]
+    private bool isSafeFlash = true;
+
+    [ObservableProperty]
+    private bool isKeepRoot;
+
+    private SafeFlashSlotMode slotMode = SafeFlashSlotMode.CurrentSlot;
+
+    public SafeFlashSlotMode SlotMode
+    {
+        get => slotMode;
+        set
+        {
+            if (SetProperty(ref slotMode, value))
+            {
+                OnPropertyChanged(nameof(IsSlotCurrent));
+                OnPropertyChanged(nameof(IsSlotOther));
+                OnPropertyChanged(nameof(IsSlotBoth));
+            }
+        }
+    }
+
+    public bool IsSlotCurrent { get => SlotMode == SafeFlashSlotMode.CurrentSlot; set { if (value) SlotMode = SafeFlashSlotMode.CurrentSlot; } }
+
+    public bool IsSlotOther { get => SlotMode == SafeFlashSlotMode.OtherSlot; set { if (value) SlotMode = SafeFlashSlotMode.OtherSlot; } }
+
+    public bool IsSlotBoth { get => SlotMode == SafeFlashSlotMode.BothSlots; set { if (value) SlotMode = SafeFlashSlotMode.BothSlots; } }
+
+    /// <summary>刷写选项行可用性:忙碌或确认面板出现后锁定,避免计划与确认不一致。</summary>
+    public bool IsOptionsEnabled => !IsBusy && !IsConfirmVisible;
 
     public SafeFlashViewModel(
         DeviceSessionViewModel session,
@@ -167,6 +212,7 @@ public partial class SafeFlashViewModel : ObservableObject
         OnPropertyChanged(nameof(IsCurrentPartitionIndeterminate));
         OnPropertyChanged(nameof(OverallProgressPercent));
         OnPropertyChanged(nameof(CurrentPartitionProgressPercent));
+        OnPropertyChanged(nameof(IsOptionsEnabled));
         DownloadAndFlashCommand.NotifyCanExecuteChanged();
         SelectAndFlashCommand.NotifyCanExecuteChanged();
         SelectFolderCommand.NotifyCanExecuteChanged();
@@ -175,7 +221,11 @@ public partial class SafeFlashViewModel : ObservableObject
         StopCommand.NotifyCanExecuteChanged();
     }
 
-    partial void OnIsConfirmVisibleChanged(bool value) => OnConfirmAvailabilityChanged();
+    partial void OnIsConfirmVisibleChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsOptionsEnabled));
+        OnConfirmAvailabilityChanged();
+    }
 
     partial void OnFlashCountChanged(int value) => OnConfirmAvailabilityChanged();
 
@@ -324,8 +374,8 @@ public partial class SafeFlashViewModel : ObservableObject
         {
             context.ReportStage("正在读取分区列表");
             var partitions = await extractor.ListPartitionsAsync(sourcePath, ct);
-            pendingPartitions = partitions;
-            FlashCount = partitions.Count;
+            pendingPartitions = partitions.Where(partition => IsPartitionIncluded(partition.Name)).ToList();
+            FlashCount = pendingPartitions.Count;
             context.ReportProgress(1);
         });
         if (!success)
@@ -342,13 +392,34 @@ public partial class SafeFlashViewModel : ObservableObject
             return;
         }
 
-        logs.Write(OperationLogLevel.Info, $"固件含 {FlashCount} 个可刷写分区");
-        foreach (var partition in pendingPartitions)
-        {
-            logs.Write(OperationLogLevel.Info, $"{partition.Name}.img > {partition.Name} | {FormatBytes(partition.SizeBytes)}");
-        }
+        logs.Write(OperationLogLevel.Info, $"固件分析完成,共 {FlashCount} 个分区");
 
         ConfirmSummary = $"将刷入 {FlashCount} 个分区,随后重启到 fastbootd 逐个刷写。";
+        if (!IsSafeFlash)
+        {
+            ConfirmSummary += Environment.NewLine + "⚠ 未启用安全模式,将完整写入固件,存在风险。";
+        }
+
+        if (IsKeepRoot)
+        {
+            ConfirmSummary += Environment.NewLine + "将保留现有启动状态。";
+        }
+
+        if (IsWipeData)
+        {
+            ConfirmSummary += Environment.NewLine + "完成后将清除设备数据。";
+        }
+
+        switch (SlotMode)
+        {
+            case SafeFlashSlotMode.OtherSlot:
+                ConfirmSummary += Environment.NewLine + "完成后将从另一侧启动。";
+                break;
+            case SafeFlashSlotMode.BothSlots:
+                ConfirmSummary += Environment.NewLine + "将写入设备两侧。";
+                break;
+        }
+
         if (extractor.HasBlockBasedContent(sourcePath))
         {
             var blockWarning = "⚠ 固件含块式分区内容(.new.dat / transfer.list,如 system/vendor/product),暂不支持刷写,本次只会刷可直接镜像的分区,其余保持原样。";
@@ -786,8 +857,8 @@ public partial class SafeFlashViewModel : ObservableObject
     {
         sourcePath = source;
         this.stagingRoot = stagingRoot;
-        pendingPartitions = partitions;
-        FlashCount = partitions.Count;
+        pendingPartitions = partitions.Where(partition => IsPartitionIncluded(partition.Name)).ToList();
+        FlashCount = pendingPartitions.Count;
         IsConfirmVisible = true;
     }
 

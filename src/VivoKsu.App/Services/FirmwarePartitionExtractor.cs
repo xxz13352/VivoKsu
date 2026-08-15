@@ -12,7 +12,7 @@ public sealed record SafeFlashImageInfo(string PartitionName, string ImagePath, 
 /// 支持两类源:
 ///  1. payload 类 —— 含 payload.bin 的 OTA zip,或裸 payload.bin / CrAU,用 payload_dumper 按需解出;
 ///  2. 直接镜像 zip —— 如 MTK PD2057 的 OTA,zip 里直接是 *.img / *.bin,用 ZipFile 解出。
-/// 始终过滤 preloader* 与 lk(安全刷写只跳过引导加载器,其余全刷)。
+/// 返回固件内的全量可刷镜像(含引导加载器);是否剔除由上层选项决定。
 /// </summary>
 public sealed class FirmwarePartitionExtractor
 {
@@ -63,9 +63,7 @@ public sealed class FirmwarePartitionExtractor
     {
         if (IsDirectorySource(source))
         {
-            return ListDirectoryImages(source)
-                .Where(entry => !ShouldSkip(entry.Name))
-                .ToList();
+            return ListDirectoryImages(source).ToList();
         }
 
         var kind = await FirmwareFormatDetector.DetectAsync(source, cancellationToken);
@@ -82,7 +80,6 @@ public sealed class FirmwarePartitionExtractor
         if (!IsPayloadSource(source))
         {
             return ListImageEntries(source)
-                .Where(entry => !ShouldSkip(Path.GetFileNameWithoutExtension(entry.FullName)))
                 .Select(entry => new PayloadPartitionEntry(
                     Path.GetFileNameWithoutExtension(entry.FullName),
                     entry.Length,
@@ -96,7 +93,7 @@ public sealed class FirmwarePartitionExtractor
         }
 
         var partitions = await payloadDumper.ListPartitionsAsync(source, cancellationToken);
-        return partitions.Where(partition => !ShouldSkip(partition.Name)).ToList();
+        return partitions.ToList();
     }
 
     /// <summary>解出单个分区镜像到 outputDirectory,报告该分区的写入字节数。</summary>

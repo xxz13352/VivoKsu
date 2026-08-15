@@ -388,6 +388,80 @@ public class SafeFlashViewModelTests
         version.Should().NotBeNull();
     }
 
+    [Fact]
+    public async Task ConfirmFlashAsync_safe_flash_off_flashes_preloader_and_lk()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var zip = Path.Combine(directory, "ota.zip");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            {
+                CreateEntry(archive, "boot.img", [0x01]);
+                CreateEntry(archive, "lk.img", [0x02]);
+                CreateEntry(archive, "preloader.img", [0x03]);
+            }
+
+            var session = new DeviceSessionViewModel();
+            session.ApplyDevice(new DeviceSnapshot(
+                DeviceConnectionState.FastbootConnected, "FB123", "fastboot 已连接", "vivo"));
+            var logs = new OperationLogService();
+            var fake = new FakeFastbootCliRunner();
+            var viewModel = CreateViewModel(session, new FlashApi(), logs, fake);
+            viewModel.IsSafeFlash = false;
+            var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
+            var partitions = await extractor.ListPartitionsAsync(zip, CancellationToken.None);
+            viewModel.SetPendingSourceForTesting(zip, Path.Combine(directory, "staging"), partitions);
+
+            await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
+
+            fake.FlashRequests.Select(request => request.Partition)
+                .Should().BeEquivalentTo(["boot", "lk", "preloader"]);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConfirmFlashAsync_keep_root_skips_boot_partitions()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var zip = Path.Combine(directory, "ota.zip");
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            {
+                CreateEntry(archive, "boot.img", [0x01]);
+                CreateEntry(archive, "init_boot.img", [0x02]);
+                CreateEntry(archive, "vendor_boot.img", [0x03]);
+                CreateEntry(archive, "system.img", [0x04]);
+            }
+
+            var session = new DeviceSessionViewModel();
+            session.ApplyDevice(new DeviceSnapshot(
+                DeviceConnectionState.FastbootConnected, "FB123", "fastboot 已连接", "vivo"));
+            var logs = new OperationLogService();
+            var fake = new FakeFastbootCliRunner();
+            var viewModel = CreateViewModel(session, new FlashApi(), logs, fake);
+            viewModel.IsKeepRoot = true;
+            var extractor = new FirmwarePartitionExtractor(payloadDumper: null);
+            var partitions = await extractor.ListPartitionsAsync(zip, CancellationToken.None);
+            viewModel.SetPendingSourceForTesting(zip, Path.Combine(directory, "staging"), partitions);
+
+            await viewModel.ConfirmFlashCommand.ExecuteAsync(null);
+
+            fake.FlashRequests.Select(request => request.Partition).Should().BeEquivalentTo(["system"]);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static SafeFlashViewModel CreateViewModel(
         DeviceSessionViewModel session,
         FlashApi api,

@@ -23,7 +23,7 @@ public class FirmwarePartitionExtractorTests
     }
 
     [Fact]
-    public async Task ListPartitionsAsync_on_direct_image_zip_filters_preloader_lk_and_non_images()
+    public async Task ListPartitionsAsync_on_direct_image_zip_lists_all_images()
     {
         var directory = TestDirectories.Create();
         try
@@ -38,7 +38,9 @@ public class FirmwarePartitionExtractorTests
 
             var partitions = await extractor.ListPartitionsAsync(zip, CancellationToken.None);
 
-            partitions.Select(partition => partition.Name).Should().BeEquivalentTo(["boot"]);
+            // 纯目录:返回全量可刷镜像(含引导加载器),过滤交给上层选项。
+            partitions.Select(partition => partition.Name)
+                .Should().BeEquivalentTo(["boot", "lk", "preloader", "preloader_emmc"]);
         }
         finally
         {
@@ -129,7 +131,7 @@ public class FirmwarePartitionExtractorTests
     }
 
     [Fact]
-    public async Task ListPartitionsAsync_on_an_extracted_folder_lists_images_and_filters_preloader_lk()
+    public async Task ListPartitionsAsync_on_an_extracted_folder_lists_all_images()
     {
         var directory = TestDirectories.Create();
         try
@@ -142,7 +144,8 @@ public class FirmwarePartitionExtractorTests
 
             var partitions = await extractor.ListPartitionsAsync(directory, CancellationToken.None);
 
-            partitions.Select(partition => partition.Name).Should().BeEquivalentTo(["boot"]);
+            partitions.Select(partition => partition.Name)
+                .Should().BeEquivalentTo(["boot", "lk", "preloader"]);
         }
         finally
         {
