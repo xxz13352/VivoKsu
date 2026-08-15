@@ -293,6 +293,31 @@ public class FileManagerViewModelTests
         Assert.False(session.IsBusy);
     }
 
+    [Fact]
+    public async Task Download_notifies_the_error_when_the_coordinated_download_fails()
+    {
+        var session = new DeviceSessionViewModel();
+        session.ApplyDevice(new DeviceSnapshot(DeviceConnectionState.AdbConnected, "ADB001", "ADB 已连接"));
+        var coordinator = new OperationCoordinator(session, new OperationLogService());
+        string? notified = null;
+        var viewModel = new FileManagerViewModel(
+            session,
+            new AdbFileService(new FastbootRsBackend(new EmptyNativeApi()), new OperationLogService()),
+            new OperationLogService(),
+            coordinator: coordinator,
+            // 安卓端可存在 Windows 无法保存的文件名(CON.img)→ DownloadToFileAsync 拒绝,
+            // 协调器路径曾静默吞异常,现在应通过 notifyError 对用户可见。
+            saveLocationPicker: (_, _) => Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"), "out.bin"),
+            notifyError: message => notified = message);
+        viewModel.SelectedRemote = new DeviceFileEntry("CON.img", "/sdcard/CON.img", false, 1024);
+
+        await viewModel.DownloadCommand.ExecuteAsync(null);
+
+        Assert.NotNull(notified);
+        Assert.Contains("下载 CON.img 失败", notified);
+        Assert.Equal(OperationKind.Failed, session.OperationKind);
+    }
+
     private static FileManagerViewModel CreateViewModel(DeviceSessionViewModel session, IFastbootRsNativeApi native)
     {
         var logs = new OperationLogService();

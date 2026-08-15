@@ -46,7 +46,12 @@ public sealed class AppComposition
         var quickFlash = new QuickFlashViewModel(Session, quickFlashService, LogService, Coordinator);
         var firmwareExtract = new FirmwareExtractViewModel(LogService, payloadDumper, new VivoFirmwareExtractor());
         var mirror = new MirrorViewModel(Session, mirrorService, toolPreferences);
-        var fileManager = new FileManagerViewModel(Session, new AdbFileService(backend, LogService), LogService, Coordinator);
+        var fileManager = new FileManagerViewModel(
+            Session,
+            new AdbFileService(backend, LogService),
+            LogService,
+            Coordinator,
+            notifyError: message => MessageBox.Show(message, "奶蛙Flash", MessageBoxButton.OK, MessageBoxImage.Error));
         var lineFlash = new LineFlashViewModel(Session, new FastbootPartitionService(cliRunner), LogService);
         var fastbootPartitionTransport = new FastbootPartitionTransport(cliRunner);
         var adbExecutable = new PlatformToolsExecutableLocator(AppContext.BaseDirectory).Resolve("adb.exe");

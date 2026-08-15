@@ -15,6 +15,7 @@ public partial class FileManagerViewModel : ObservableObject
     private readonly OperationLogService logs;
     private readonly IOperationCoordinator? coordinator;
     private readonly Func<string, string, string?>? saveLocationPicker;
+    private readonly Action<string>? notifyError;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(GoUpLocalCommand))]
@@ -47,13 +48,15 @@ public partial class FileManagerViewModel : ObservableObject
         AdbFileService files,
         OperationLogService logs,
         IOperationCoordinator? coordinator = null,
-        Func<string, string, string?>? saveLocationPicker = null)
+        Func<string, string, string?>? saveLocationPicker = null,
+        Action<string>? notifyError = null)
     {
         this.session = session;
         this.files = files;
         this.logs = logs;
         this.coordinator = coordinator;
         this.saveLocationPicker = saveLocationPicker;
+        this.notifyError = notifyError;
         RefreshCommand = new AsyncRelayCommand(RefreshAsync, CanUseAdb);
         NavigateLocalCommand = new RelayCommand<DeviceFileEntry?>(NavigateLocal, entry => entry is { IsDirectory: true });
         NavigateRemoteCommand = new AsyncRelayCommand<DeviceFileEntry?>(NavigateRemoteAsync, entry => entry is { IsDirectory: true } && CanUseAdb());
@@ -306,11 +309,17 @@ public partial class FileManagerViewModel : ObservableObject
 
         if (coordinator is not null)
         {
-            await RunCoordinatedAsync(OperationKind.Transferring, $"正在下载 {selected.Name}", async (context, cancellationToken) =>
+            var succeeded = await RunCoordinatedAsync(OperationKind.Transferring, $"正在下载 {selected.Name}", async (context, cancellationToken) =>
             {
                 await files.DownloadToFileAsync(session.Serial, selected, destination, cancellationToken, context);
                 FollowDownloadedLocation(destination);
             });
+            // RunCoordinatedAsync 吞掉异常;经会话 Failed 态识别失败后对用户可见(生产=MessageBox)。
+            if (!succeeded && session.OperationKind == OperationKind.Failed)
+            {
+                NotifyDownloadFailure($"下载 {selected.Name} 失败,请查看操作日志了解原因。");
+            }
+
             return;
         }
 
@@ -325,6 +334,20 @@ public partial class FileManagerViewModel : ObservableObject
         {
             session.FailOperation("文件下载失败");
             logs.Write(OperationLogLevel.Error, exception.Message);
+            NotifyDownloadFailure($"下载 {selected.Name} 失败:{exception.Message}");
+        }
+    }
+
+    /// <summary>下载失败对用户可见(生产=MessageBox;单测注入回调断言)。</summary>
+    private void NotifyDownloadFailure(string message)
+    {
+        if (notifyError is not null)
+        {
+            notifyError(message);
+        }
+        else
+        {
+            logs.Write(OperationLogLevel.Error, message);
         }
     }
 
