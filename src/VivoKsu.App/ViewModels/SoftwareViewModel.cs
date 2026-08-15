@@ -44,10 +44,7 @@ public partial class SoftwareViewModel : ObservableObject
         this.payloadDumper = payloadDumper ?? new PayloadDumperRunner(
             provisioner?.ExecutablePath ?? Path.Combine(applicationRoot, "payload-tools", "payload_dumper.exe"));
         this.preferences = preferences;
-        this.scrcpyInstallationRoot = scrcpyInstallationRoot ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VivoKsu",
-            "scrcpy");
+        this.scrcpyInstallationRoot = scrcpyInstallationRoot ?? Path.Combine(ExternalResourceLocations.Root, "scrcpy");
         this.onReinstallDriver = onReinstallDriver;
         RefreshCommand = new AsyncRelayCommand(() => RefreshAsync());
         ReinstallDriverCommand = new RelayCommand(ReinstallDriver, () => onReinstallDriver is not null);

@@ -22,11 +22,7 @@ public sealed class PayloadDumperProvisioner
     {
         this.downloader = downloader ?? new RemoteAssetDownloader();
         this.bundledExecutablePath = bundledExecutablePath;
-        InstallationRoot = installationRoot ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VivoKsu",
-            "tools",
-            "payload-dumper");
+        InstallationRoot = installationRoot ?? Path.Combine(ExternalResourceLocations.Root, "payload-dumper");
     }
 
     public string InstallationRoot { get; }

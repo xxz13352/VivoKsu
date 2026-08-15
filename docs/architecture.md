@@ -603,7 +603,9 @@ sequenceDiagram
 
 **原生 AOT 引导器(`src/VivoKsu.Bootstrapper/`)**:framework-dependent 后 App 本体无法自检运行时,入口改为原生 exe `VivoKsu.Launcher.exe`(AOT 编译 ≈5MB,不依赖任何运行时)。流程:检测 `Microsoft.WindowsDesktop.App 8.x`(注册表 `HKLM\…\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App` + `dotnet --list-runtimes` 兜底)→ 已装直接拉起 `VivoKsu.App.exe`;缺失 → 微软直链下载 `windowsdesktop-runtime-8.0.x`(~56MB)→ `runas` 静默装 `/install /quiet /norestart`(UAC 一次)→ 复查后拉起。检测逻辑 `DotNetRuntimeDetector` 以共享源文件同时编入 App(测试)与引导器(AOT 兼容,无反射/WPF 依赖)。AOT 发布需 MSVC(vswhere 目录已由发布脚本加进 PATH)。
 
-**外置资源托管**:GitHub 公开仓库 Release(owner/repo/tag 集中在 `RemoteAssetCatalog` 一处)。客户端 `RemoteAssetDownloader` 按 直连 → `gh-proxy.com` → `ghfast.top` → `ghproxy.net` 顺序 failover,下载到 staging → 长度/SHA-256 校验 → 原子落缓存 `%LOCALAPPDATA%\VivoKsu\resources|tools`;全失败抛 `RemoteAssetDownloadException`(消息含手动下载链接)。上传用 `scripts/Upload-Resources.ps1`(`gh` CLI)。2026-08-15 实测:直连 github 超时,三个镜像均可用(206)。
+**外置资源托管**:GitHub 公开仓库 Release(owner/repo/tag 集中在 `RemoteAssetCatalog` 一处)。客户端 `RemoteAssetDownloader` 按 直连 → `gh-proxy.com` → `ghfast.top` → `ghproxy.net` 顺序 failover,下载到 staging → 长度/SHA-256 校验 → 原子落缓存;全失败抛 `RemoteAssetDownloadException`(消息含手动下载链接)。上传用 `scripts/Upload-Resources.ps1`(`gh` CLI)。2026-08-15 实测:直连 github 超时,三个镜像均可用(206)。
+
+**本地落盘位置(`ExternalResourceLocations`)**:固定释放到 `C:\nwflash`(机器级、跨用户;`apk/`、`payload-dumper/`、`scrcpy/` 三子目录)。写 C:\ 根需管理员权限,应用默认非提权 → 无权限时自动回退 `%LOCALAPPDATA%\VivoKsu`(会话启动时探测一次)。「下次检测文件存在则复用」由各 provisioner 的 `File.Exists` 检查完成。
 
 | 内置组件 | 随包/外置 | 来源 | 用途 |
 | --- | --- | --- | --- |

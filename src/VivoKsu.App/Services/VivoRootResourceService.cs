@@ -44,14 +44,11 @@ public sealed class VivoRootResourceService
     private readonly string projectRoot;
     private readonly IRemoteAssetDownloader? downloader;
 
-    /// <summary>按需下载的缓存根目录(发布瘦身后 APK 不再随包,ROOT 前下载到这里)。</summary>
-    private static string CacheRoot => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "VivoKsu",
-        "resources");
+    /// <summary>按需下载的 APK 缓存目录(固定 C:\nwflash,不可写时回退用户目录;ROOT 前下载到这里)。</summary>
+    private static string CacheApkDirectory => Path.Combine(ExternalResourceLocations.Root, "apk");
 
     private static string CacheApkPath(string key) =>
-        Path.Combine(CacheRoot, "apk", ApkFileName(key));
+        Path.Combine(CacheApkDirectory, ApkFileName(key));
 
     /// <summary>
     /// 随包分发的管理器 APK 的 SHA-256。更新 apk/ 下的 APK 后必须同步更新,

@@ -27,10 +27,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
             this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("VivoKsu-App/1.0");
         }
 
-        InstallationRoot = installationRoot ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VivoKsu",
-            "scrcpy");
+        InstallationRoot = installationRoot ?? Path.Combine(ExternalResourceLocations.Root, "scrcpy");
     }
 
     public string InstallationRoot { get; }
