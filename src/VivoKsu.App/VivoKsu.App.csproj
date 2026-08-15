@@ -23,6 +23,8 @@
   <ItemGroup>
     <!-- 应用品牌 logo(嵌入程序集,pack URI 引用) -->
     <Resource Include="Assets\logo.jpg" />
+    <!-- wipe-data 镜像:数据清除用,嵌入程序集(标准 .NET 资源,非 WPF pack URI) -->
+    <EmbeddedResource Include="Assets\wipe-data.img" />
   </ItemGroup>
 
   <ItemGroup>
