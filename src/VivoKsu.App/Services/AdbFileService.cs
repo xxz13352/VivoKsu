@@ -51,19 +51,6 @@ public sealed class AdbFileService
         Report(context, OperationLogLevel.Success, "文件上传完成。");
     }
 
-    public async Task DownloadAsync(
-        string serial,
-        DeviceFileEntry remoteFile,
-        string localDirectory,
-        CancellationToken cancellationToken,
-        OperationContext? context = null)
-    {
-        var destination = BuildSafeLocalDestination(localDirectory, remoteFile.Name);
-        Report(context, OperationLogLevel.Info, $"正在下载 {remoteFile.FullPath}。");
-        await backend.PullAsync(serial, remoteFile.FullPath, destination, cancellationToken);
-        Report(context, OperationLogLevel.Success, "文件下载完成。");
-    }
-
     public async Task DownloadToFileAsync(
         string serial,
         DeviceFileEntry remoteFile,
@@ -161,22 +148,6 @@ public sealed class AdbFileService
     {
         var normalizedDirectory = NormalizeRemotePath(directory);
         return normalizedDirectory == "/" ? $"/{name}" : $"{normalizedDirectory}/{name}";
-    }
-
-    private static string BuildSafeLocalDestination(string localDirectory, string fileName)
-    {
-        ValidateSafeFileName(fileName);
-        var normalizedDirectory = Path.GetFullPath(localDirectory);
-        var destination = Path.GetFullPath(Path.Combine(normalizedDirectory, fileName));
-        var directoryPrefix = Path.EndsInDirectorySeparator(normalizedDirectory)
-            ? normalizedDirectory
-            : normalizedDirectory + Path.DirectorySeparatorChar;
-        if (!destination.StartsWith(directoryPrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("下载目标超出当前本地目录。", nameof(fileName));
-        }
-
-        return destination;
     }
 
     private static void ValidateSafeFileName(string fileName)

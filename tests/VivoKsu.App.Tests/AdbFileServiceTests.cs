@@ -83,7 +83,7 @@ public class AdbFileServiceTests
     [InlineData("CON.img")]
     [InlineData("trailingdot.")]
     [InlineData("trailingspace ")]
-    public async Task DownloadAsync_rejects_names_that_are_not_safe_Windows_file_names(string remoteName)
+    public async Task DownloadToFileAsync_rejects_names_that_are_not_safe_Windows_file_names(string remoteName)
     {
         var localDirectory = Path.Combine(Path.GetTempPath(), "VivoKsu.Tests", Guid.NewGuid().ToString("N"));
         var native = new FileNativeApi();
@@ -91,7 +91,7 @@ public class AdbFileServiceTests
         var remoteFile = new DeviceFileEntry(remoteName, $"/sdcard/{remoteName}", false, 1);
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
-            service.DownloadAsync("RF8", remoteFile, localDirectory, CancellationToken.None));
+            service.DownloadToFileAsync("RF8", remoteFile, Path.Combine(localDirectory, "out.bin"), CancellationToken.None));
 
         Assert.False(native.PullCalled);
     }

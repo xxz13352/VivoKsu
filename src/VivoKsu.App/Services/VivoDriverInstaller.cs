@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using SharpCompress.Archives;
 using SharpCompress.Archives.SevenZip;
+using SharpCompress.Readers;
 
 namespace VivoKsu.App.Services;
 
@@ -119,9 +120,16 @@ public sealed class VivoDriverInstaller
     private static async Task ExtractArchiveAsync(string archivePath, string destination)
     {
         var destinationFull = Path.GetFullPath(destination);
-        using var archive = SevenZipArchive.Open(archivePath);
+        // 0.50.x 起 SevenZipArchive.Open 更名 OpenArchive(显式强制 7z,驱动包恒为 .7z)。
+        using var archive = SevenZipArchive.OpenArchive(archivePath, new ReaderOptions());
         foreach (var entry in archive.Entries.Where(e => !e.IsDirectory))
         {
+            // 0.50.x 起 Key 可空;7z 文件条目必有 Key,理论上的无路径条目直接跳过(避免解引用空引用)。
+            if (entry.Key is null)
+            {
+                continue;
+            }
+
             // 防路径穿越:entry.Key 含 ../ 或绝对路径时,归一化后必须仍以 staging 为前缀,否则拒绝。
             var target = Path.GetFullPath(Path.Combine(destinationFull, entry.Key.Replace('/', Path.DirectorySeparatorChar)));
             if (!target.StartsWith(destinationFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))

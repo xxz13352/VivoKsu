@@ -41,8 +41,11 @@ public sealed class LoginService : IDisposable
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new LoginFailedException(
-                payload.TryGetProperty("error", out var error) ? error.GetString() : $"登录失败({(int)response.StatusCode})");
+            // error 字段可能缺失或为空;GetString() 可返回 null,需兜底非空文案。
+            var message = payload.TryGetProperty("error", out var error)
+                ? error.GetString() ?? $"登录失败({(int)response.StatusCode})"
+                : $"登录失败({(int)response.StatusCode})";
+            throw new LoginFailedException(message);
         }
 
         var token = payload.TryGetProperty("token", out var t) ? t.GetString() : null;

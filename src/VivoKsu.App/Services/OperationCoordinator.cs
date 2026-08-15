@@ -147,9 +147,11 @@ public sealed class OperationCoordinator : IOperationCoordinator, IDisposable
         }
     }
 
-    private void RecordUsage(OperationKind kind, string title, string status, long startedAt, long startedMs, string operationId)
+    private void RecordUsage(OperationKind kind, string title, string status, long startedAt, long startedMs, string? operationId)
     {
-        if (usageReporter is null)
+        // operationId 为 null 说明失败发生在授权阶段(操作从未真正开始),不算一次真实操作,
+        // 不上报使用日志(也避免生成一条无关联的幽灵记录)。
+        if (usageReporter is null || operationId is null)
         {
             return;
         }
