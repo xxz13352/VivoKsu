@@ -45,8 +45,13 @@ public interface IRemoteAssetDownloader
 /// </summary>
 public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
 {
-    /// <summary>单候选源超时(含镜像);用户取消不受此限。</summary>
-    private static readonly TimeSpan PerCandidateTimeout = TimeSpan.FromMinutes(3);
+    /// <summary>单候选源总时长上限(兜底防病态慢速;正常下载不会触及)。用户取消不受此限。</summary>
+    private static readonly TimeSpan PerCandidateTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>无进展看门狗:候选源连续这么久没有新字节到达即放弃换下一个镜像。
+    /// 关键修复:镜像/直连可能「连上但不出数据」,按总量超时(原 3 分钟)会让模态窗假冻结数分钟;
+    /// 无进展即切换把单个候选源卡死时间压到 ~20s。</summary>
+    private static readonly TimeSpan NoProgressTimeout = TimeSpan.FromSeconds(20);
 
     private readonly HttpClient httpClient;
     private readonly IReadOnlyList<string> mirrorList;
@@ -115,10 +120,22 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
         IProgress<DownloadProgress>? progress,
         CancellationToken cancellationToken)
     {
-        using var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        // 无进展看门狗:候选源「连上但不出数据」或中途卡死时,连续 NoProgressTimeout 无字节
+        // 即取消本候选,交给 DownloadAsync 换下一个镜像(总时长还有 PerCandidateTimeout 兜底)。
+        using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var lastProgressTick = Environment.TickCount64;
+        using var watchdog = new Timer(_ =>
+        {
+            if (Environment.TickCount64 - lastProgressTick > NoProgressTimeout.TotalMilliseconds)
+            {
+                watchdogCts.Cancel();
+            }
+        }, null, TimeSpan.FromSeconds(8), TimeSpan.FromSeconds(4));
+
+        using var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, watchdogCts.Token);
         response.EnsureSuccessStatusCode();
         var totalBytes = response.Content.Headers.ContentLength;
-        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await using var input = await response.Content.ReadAsStreamAsync(watchdogCts.Token);
         await using var output = File.Create(stagingPath);
         var buffer = new byte[81920];
         long read = 0L;
@@ -126,10 +143,11 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
         long lastTick = Environment.TickCount64;
         double bytesPerSecond = 0;
         int count;
-        while ((count = await input.ReadAsync(buffer, cancellationToken)) > 0)
+        while ((count = await input.ReadAsync(buffer, watchdogCts.Token)) > 0)
         {
-            await output.WriteAsync(buffer.AsMemory(0, count), cancellationToken);
+            await output.WriteAsync(buffer.AsMemory(0, count), watchdogCts.Token);
             read += count;
+            lastProgressTick = Environment.TickCount64;
             // 速度按 ~250ms 采样一次,避免每次 ReadAsync 都算(高频无意义)。
             var now = Environment.TickCount64;
             var elapsed = now - lastTick;
