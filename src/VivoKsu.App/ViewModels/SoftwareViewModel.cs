@@ -21,6 +21,7 @@ public partial class SoftwareViewModel : ObservableObject
     private readonly ToolPathPreferences? preferences;
     private readonly string scrcpyInstallationRoot;
     private readonly Action? onReinstallDriver;
+    private readonly Action? openResourceDownloader;
 
     public SoftwareViewModel() : this(AppContext.BaseDirectory)
     {
@@ -34,7 +35,8 @@ public partial class SoftwareViewModel : ObservableObject
         ToolPathPreferences? preferences = null,
         string? scrcpyInstallationRoot = null,
         Action? onReinstallDriver = null,
-        PayloadDumperProvisioner? provisioner = null)
+        PayloadDumperProvisioner? provisioner = null,
+        Action? openResourceDownloader = null)
     {
         AppVersion = AppInfo.Version;
         this.driverDetector = driverDetector ?? VivoDriverDetector.CreateDefault();
@@ -46,8 +48,10 @@ public partial class SoftwareViewModel : ObservableObject
         this.preferences = preferences;
         this.scrcpyInstallationRoot = scrcpyInstallationRoot ?? Path.Combine(ExternalResourceLocations.Root, "scrcpy");
         this.onReinstallDriver = onReinstallDriver;
+        this.openResourceDownloader = openResourceDownloader;
         RefreshCommand = new AsyncRelayCommand(() => RefreshAsync());
         ReinstallDriverCommand = new RelayCommand(ReinstallDriver, () => onReinstallDriver is not null);
+        OpenResourceDownloaderCommand = new RelayCommand(OpenResourceDownloader, () => openResourceDownloader is not null);
 
         // 页面未打开前即开始检测;完成后自动更新绑定。
         _ = RefreshAsync();
@@ -92,10 +96,25 @@ public partial class SoftwareViewModel : ObservableObject
     /// <summary>重新安装 USB 驱动(弹驱动安装窗,三类可重装)。</summary>
     public IRelayCommand ReinstallDriverCommand { get; }
 
+    /// <summary>打开「组件安装」窗,下载缺失的外置资源(scrcpy/APK/payload)。</summary>
+    public IRelayCommand OpenResourceDownloaderCommand { get; }
+
     private void ReinstallDriver()
     {
         onReinstallDriver?.Invoke();
         // 安装窗关闭后刷新,让软件页驱动状态与真实情况一致。
+        _ = RefreshAsync();
+    }
+
+    private void OpenResourceDownloader()
+    {
+        if (openResourceDownloader is null)
+        {
+            return;
+        }
+
+        openResourceDownloader();
+        // 安装窗关闭后刷新,让 scrcpy / payload_dumper 状态与真实情况一致。
         _ = RefreshAsync();
     }
 

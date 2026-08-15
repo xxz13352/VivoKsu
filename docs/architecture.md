@@ -575,7 +575,7 @@ sequenceDiagram
 
 ## 8. 测试
 
-- **VivoKsu.App.Tests**:约 50 个测试文件、**374 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
+- **VivoKsu.App.Tests**:约 50 个测试文件、**384 个用例**全绿 —— 覆盖各服务与 VM 的分支、取消、进度、错误路径。
 - 关键测试:SafeFlash ADB→fastboot 过渡、本地 gzip 不被误删、截断备份被拒、多布局重解析、单预设只刷单个分区、篡改 APK 被拒、RecordRunner 3 参签名适配、心跳(周期 / force_exit 触发 / goodbye / 瞬时失败恢复 / 426)、在线列表解析与时长;2026-08-15 新增保存对话框注入下载到指定路径、`DownloadToFileAsync` 路径安全校验、登出命令触发回调、**登出忙时禁用**(协调器忙 + 会话忙兜底)、协调器下载失败可见提示、本地目录跟随。
 - 运行:`dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug`
 
@@ -606,6 +606,8 @@ sequenceDiagram
 **外置资源托管**:GitHub 公开仓库 Release(owner/repo/tag 集中在 `RemoteAssetCatalog` 一处)。客户端 `RemoteAssetDownloader` 按 直连 → `gh-proxy.com` → `ghfast.top` → `ghproxy.net` 顺序 failover,下载到 staging → 长度/SHA-256 校验 → 原子落缓存;全失败抛 `RemoteAssetDownloadException`(消息含手动下载链接)。上传用 `scripts/Upload-Resources.ps1`(`gh` CLI)。2026-08-15 实测:直连 github 超时,三个镜像均可用(206)。
 
 **本地落盘位置(`ExternalResourceLocations`)**:固定释放到 `C:\nwflash`(机器级、跨用户;`apk/`、`payload-dumper/`、`scrcpy/` 三子目录)。写 C:\ 根需管理员权限,应用默认非提权 → 无权限时自动回退 `%LOCALAPPDATA%\VivoKsu`(会话启动时探测一次)。「下次检测文件存在则复用」由各 provisioner 的 `File.Exists` 检查完成。
+
+**组件安装窗(2026-08-15)**:登录后 `ShowResourceDownloaderIfNeeded` 扫描 4 项外置资源就绪状态,有缺失即弹 `ResourceDownloadWindow` 液态玻璃模态窗(可勾选/全部安装/跳过,四项并行下载、每项独立进度)。`ResourceDownloadViewModel` 复用 `RemoteAssetDownloader` + 三个 provisioner(新增 `IsInstalled`/`IsManagerApkInstalled` 就绪判定与 `IProgress<DownloadProgress>` 进度参数,复用 `Models.DownloadProgress`);软件页「安装组件」按钮经 `SoftwareViewModel.OpenResourceDownloaderCommand` 重开。
 
 | 内置组件 | 随包/外置 | 来源 | 用途 |
 | --- | --- | --- | --- |

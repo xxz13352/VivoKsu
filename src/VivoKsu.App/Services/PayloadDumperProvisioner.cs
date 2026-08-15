@@ -1,6 +1,7 @@
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using VivoKsu.App.Models;
 
 namespace VivoKsu.App.Services;
 
@@ -40,7 +41,7 @@ public sealed class PayloadDumperProvisioner
     public bool IsAvailable => BundledExecutablePath is not null || File.Exists(CachedExecutablePath);
 
     /// <summary>确保 payload_dumper 就绪并返回其 runner:随包→直接用;缓存→复用;都没有→下载→解压→SHA-256 校验→落缓存。</summary>
-    public async Task<PayloadDumperRunner> EnsureInstalledAsync(CancellationToken cancellationToken)
+    public async Task<PayloadDumperRunner> EnsureInstalledAsync(CancellationToken cancellationToken, IProgress<DownloadProgress>? progress = null)
     {
         if (BundledExecutablePath is { } bundled)
         {
@@ -69,7 +70,7 @@ public sealed class PayloadDumperProvisioner
                 var spec = new RemoteAssetSpec(
                     "payload_dumper",
                     RemoteAssetCatalog.GitHubDownloadUrl(RemoteAssetCatalog.PayloadDumperAssetName));
-                await downloader.DownloadAsync(spec, zipPath, progress: null, cancellationToken);
+                await downloader.DownloadAsync(spec, zipPath, progress, cancellationToken);
 
                 ExtractArchiveSafely(zipPath, stagingRoot);
                 var extractedExecutable = Path.Combine(stagingRoot, RemoteAssetCatalog.PayloadDumperExecutableName);

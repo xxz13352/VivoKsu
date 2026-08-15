@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.IO;
 using System.Security.Cryptography;
+using VivoKsu.App.Models;
 
 namespace VivoKsu.App.Services;
 
@@ -88,13 +89,25 @@ public sealed class VivoRootResourceService
     /// <summary>管理器 APK 的文件名(远程资产名与随包文件名一致)。</summary>
     private static string ApkFileName(string key) => key == "KSU" ? "KSU.APK" : "KernelSU.apk";
 
+    /// <summary>管理器 APK 是否已就绪(随包或按需下载缓存中存在)。</summary>
+    public bool IsManagerApkInstalled(string key)
+    {
+        if (!ManagerCatalog.ContainsKey(key))
+        {
+            return false;
+        }
+
+        return File.Exists(ResolveManager(key).ApkPath);
+    }
+
     /// <summary>
     /// 确保管理器 APK 可用:随包/缓存已存在且通过完整性校验则直接返回;否则从远程
     /// 下载到缓存并做强校验(SHA-256 + APK 结构),失败抛异常由调用方按失败处理。
     /// </summary>
     public async Task<VivoRootManagerResource> EnsureManagerApkAsync(
         VivoRootManagerResource manager,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<DownloadProgress>? progress = null)
     {
         if (File.Exists(manager.ApkPath))
         {
@@ -119,7 +132,7 @@ public sealed class VivoRootResourceService
             $"{manager.Key} 管理器 APK",
             RemoteAssetCatalog.GitHubDownloadUrl(ApkFileName(manager.Key)),
             ExpectedSha256: ManagerApkSha256.GetValueOrDefault(manager.Key));
-        await downloader.DownloadAsync(spec, cachePath, progress: null, cancellationToken);
+        await downloader.DownloadAsync(spec, cachePath, progress, cancellationToken);
 
         var cached = manager with { ApkPath = cachePath };
         // 下载后的强校验:哈希不符 / 非有效 APK 都会抛。

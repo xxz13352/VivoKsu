@@ -1266,6 +1266,7 @@
             <TextBlock Text="奶蛙Flash 版本与依赖组件的就绪状态" Style="{StaticResource PageSubtitleStyle}"/>
           </StackPanel>
           <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+            <Button Content="安装组件" Style="{StaticResource ToolButtonStyle}" Command="{Binding Software.OpenResourceDownloaderCommand}" Padding="12,7" Margin="0,0,9,0"/>
             <Button Content="重新检测" Style="{StaticResource ToolButtonStyle}" Command="{Binding Software.RefreshCommand}" Padding="12,7" Margin="0"/>
           </StackPanel>
         </Grid>

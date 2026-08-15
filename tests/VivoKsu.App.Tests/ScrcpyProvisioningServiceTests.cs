@@ -23,7 +23,7 @@ public class ScrcpyProvisioningServiceTests
             var ensureInstalled = serviceType!.GetMethod("EnsureInstalledAsync");
             Assert.NotNull(ensureInstalled);
 
-            var task = Assert.IsAssignableFrom<Task<string>>(ensureInstalled!.Invoke(service, [CancellationToken.None]));
+            var task = Assert.IsAssignableFrom<Task<string>>(ensureInstalled!.Invoke(service, [CancellationToken.None, null]));
             var executable = await task;
 
             Assert.True(File.Exists(executable));

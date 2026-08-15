@@ -9,6 +9,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- AOT 编译优先体积(引导器只做下载/安装,不追求速度) -->
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
     <!-- 与主 App 的版本号保持一致,便于发版对照 -->
     <Version>1.0.0</Version>
   </PropertyGroup>

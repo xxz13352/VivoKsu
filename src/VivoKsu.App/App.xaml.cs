@@ -95,6 +95,8 @@ public partial class App : Application
             mainWindow.Show();
 
             // 驱动提醒:后台检测手机 USB 驱动,未安装则弹「安装/取消」窗(不阻塞主界面)。
+            // 先做「组件安装」检测(缺失资源才弹模态窗,可跳过),避免与驱动提醒双模态叠放。
+            ShowResourceDownloaderIfNeeded();
             CheckAndRemindDriverAsync();
         }
         catch (UpdateRequiredException update)
@@ -150,6 +152,33 @@ public partial class App : Application
     {
         var window = new UpdateRequiredWindow(latest, minVersion, downloadUrl);
         window.ShowDialog();
+    }
+
+    /// <summary>
+    /// 组件安装检测:登录后扫描外置资源(scrcpy / APK / payload_dumper)是否就绪,
+    /// 有缺失才弹「组件安装」模态窗(可选装/全装/跳过);全就绪静默跳过。
+    /// 检测/弹窗失败不打扰客户(资源仍是首次使用时按需下载)。
+    /// </summary>
+    private void ShowResourceDownloaderIfNeeded()
+    {
+        try
+        {
+            if (composition is null)
+            {
+                return;
+            }
+
+            var viewModel = composition.CreateResourceDownloadViewModel();
+            viewModel.Detect();
+            if (viewModel.HasMissing)
+            {
+                new ResourceDownloadWindow(viewModel).ShowDialog();
+            }
+        }
+        catch
+        {
+            // 忽略:资源缺失不影响登录后使用,首次操作时仍会自动下载。
+        }
     }
 
     /// <summary>

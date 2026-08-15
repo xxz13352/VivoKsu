@@ -38,7 +38,7 @@ Nwflash 是**商业付费工具**:
 - **CommunityToolkit.Mvvm** 8.4 —— `[ObservableProperty]` / `[RelayCommand]`
 - **HandyControl** 3.5.1 —— UI 控件库
 - **SharpCompress** 0.37.2、**ZstdSharp.Port** 0.8.1 —— 压缩 / zstd 解压
-- **xunit** + **FluentAssertions** —— 单元测试(当前 **374** 个应用用例全绿)
+- **xunit** + **FluentAssertions** —— 单元测试(当前 **384** 个应用用例全绿)
 
 ## 目录结构
 
@@ -184,6 +184,10 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 上传资源:装好 `gh` CLI 后运行 `./scripts/Upload-Resources.ps1`(或手动建 Release 上传);
 APK 的 SHA-256 已 pin 在 `VivoRootResourceService.ManagerApkSha256`,payload_dumper 的 pin 在
 `RemoteAssetCatalog.PayloadDumperSha256`。
+
+**组件安装窗(登录后检测)**:登录后扫描 4 项外置资源就绪状态,有缺失即弹「组件安装」液态玻璃
+模态窗——可勾选 / 全部安装 / 跳过(跳过不阻塞,资源仍是首次使用时按需下载);四项并行下载、
+每项独立进度;软件页「安装组件」按钮可随时重开补装。落盘固定 `C:\nwflash`(不可写回退用户目录)。
 
 ## 内置组件
 

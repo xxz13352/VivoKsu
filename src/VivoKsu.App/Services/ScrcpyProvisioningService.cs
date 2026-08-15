@@ -3,12 +3,13 @@ using System.IO;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
+using VivoKsu.App.Models;
 
 namespace VivoKsu.App.Services;
 
 public interface IScrcpyProvisioningService
 {
-    Task<string> EnsureInstalledAsync(CancellationToken cancellationToken);
+    Task<string> EnsureInstalledAsync(CancellationToken cancellationToken, IProgress<DownloadProgress>? progress = null);
 }
 
 public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
@@ -32,7 +33,10 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
 
     public string InstallationRoot { get; }
 
-    public async Task<string> EnsureInstalledAsync(CancellationToken cancellationToken)
+    /// <summary>scrcpy 是否已就绪(已下载并解压到缓存目录,排除残留 staging)。</summary>
+    public bool IsInstalled => FindInstalledExecutable() is not null;
+
+    public async Task<string> EnsureInstalledAsync(CancellationToken cancellationToken, IProgress<DownloadProgress>? progress = null)
     {
         // 清理上次崩溃/硬杀遗留的 .staging-* 目录(正常 finally 会删,硬杀会残留)。
         CleanupStaleStagingDirectories();
@@ -74,7 +78,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
                 await downloader.DownloadAsync(
                     new RemoteAssetSpec("scrcpy", assetUri.ToString()),
                     archivePath,
-                    progress: null,
+                    progress,
                     cancellationToken);
 
                 ExtractArchiveSafely(archivePath, payloadDirectory);

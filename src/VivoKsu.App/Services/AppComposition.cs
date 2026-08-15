@@ -11,6 +11,10 @@ public sealed class AppComposition
     private readonly MirrorService mirrorService;
     private readonly OtaApiClient otaClient;
     private readonly UsageLogUploader usageReporter;
+    private readonly RemoteAssetDownloader assetDownloader;
+    private readonly ScrcpyProvisioningService scrcpyProvisioner;
+    private readonly PayloadDumperProvisioner payloadDumperProvisioner;
+    private readonly VivoRootResourceService rootResources;
     private bool stopped;
 
     private AppComposition(
@@ -41,12 +45,15 @@ public sealed class AppComposition
         var toolPreferences = preferences ?? ToolPathPreferences.CreateDefault();
         var quickFlashService = new QuickFlashService(backend, cliRunner, LogService);
         // 发布瘦身:scrcpy/APK/payload_dumper 不再随包;统一走多镜像 failover 下载器按需获取。
-        var assetDownloader = new RemoteAssetDownloader();
-        var payloadDumperProvisioner = new PayloadDumperProvisioner(
+        // 下载器与三个 provisioner 提升为字段,供登录后「组件安装」窗与软件页重开使用。
+        assetDownloader = new RemoteAssetDownloader();
+        payloadDumperProvisioner = new PayloadDumperProvisioner(
             assetDownloader,
             bundledExecutablePath: Path.Combine(AppContext.BaseDirectory, "payload-tools", "payload_dumper.exe"));
         var payloadDumper = new PayloadDumperRunner(payloadDumperProvisioner.ExecutablePath);
-        mirrorService = new MirrorService(processRunner, LogService, provisioner: new ScrcpyProvisioningService(downloader: assetDownloader));
+        scrcpyProvisioner = new ScrcpyProvisioningService(downloader: assetDownloader);
+        mirrorService = new MirrorService(processRunner, LogService, provisioner: scrcpyProvisioner);
+        rootResources = new VivoRootResourceService(AppContext.BaseDirectory, assetDownloader);
         var quickFlash = new QuickFlashViewModel(Session, quickFlashService, LogService, Coordinator);
         var firmwareExtract = new FirmwareExtractViewModel(
             LogService, payloadDumper, new VivoFirmwareExtractor(), provisioner: payloadDumperProvisioner);
@@ -79,7 +86,7 @@ public sealed class AppComposition
             quickFlashService,
             LogService,
             backend,
-            new VivoRootResourceService(AppContext.BaseDirectory, assetDownloader),
+            rootResources,
             Coordinator);
         var overview = new OverviewViewModel(Session, backend, LogService, Coordinator);
         // 心跳与设备操作无关,独立于 OperationCoordinator 运行;强制退出回调处理「不打断刷写」。
@@ -118,7 +125,13 @@ public sealed class AppComposition
                 AppContext.BaseDirectory,
                 preferences: toolPreferences,
                 onReinstallDriver: () => new DriverReminderWindow(reinstallMode: true).ShowDialog(),
-                provisioner: payloadDumperProvisioner),
+                provisioner: payloadDumperProvisioner,
+                openResourceDownloader: () =>
+                {
+                    var viewModel = CreateResourceDownloadViewModel();
+                    viewModel.Detect();
+                    new ResourceDownloadWindow(viewModel).ShowDialog();
+                }),
             onLogout: OnLogoutAsync);
         Monitor.DeviceRefreshed += MainViewModel.OnDeviceRefreshedAsync;
 
@@ -182,6 +195,10 @@ public sealed class AppComposition
 
     /// <summary>登录后注入 API token,后续请求带 Authorization:Bearer。</summary>
     public void SetAuthToken(string token) => otaClient.Token = token;
+
+    /// <summary>构建「组件安装」窗 VM(登录后检测 + 软件页重开共用同一套 provisioners)。</summary>
+    public ResourceDownloadViewModel CreateResourceDownloadViewModel() =>
+        new(scrcpyProvisioner, payloadDumperProvisioner, rootResources);
 
     /// <summary>
     /// 登录成功后启动在线会话:设 token、生成会话 id、启动心跳与在线状态轮询。

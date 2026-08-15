@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
+using VivoKsu.App.Models;
 
 namespace VivoKsu.App.Services;
 
@@ -29,12 +30,12 @@ public interface IRemoteAssetDownloader
     /// 下载 <paramref name="spec"/> 到 <paramref name="destinationPath"/>。候选源顺序:
     /// 直连 → <see cref="RemoteAssetCatalog.Mirrors"/> 各镜像,成功即返回;全部失败抛
     /// <see cref="RemoteAssetDownloadException"/>。下载到 staging 后做长度/SHA-256 校验,
-    /// 通过才原子移动到目标路径。进度按已下载字节上报。
+    /// 通过才原子移动到目标路径。进度按 <see cref="DownloadProgress"/> 上报(字节 + 总字节)。
     /// </summary>
     Task DownloadAsync(
         RemoteAssetSpec spec,
         string destinationPath,
-        IProgress<long>? progress,
+        IProgress<DownloadProgress>? progress,
         CancellationToken cancellationToken);
 }
 
@@ -63,7 +64,7 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
     public async Task DownloadAsync(
         RemoteAssetSpec spec,
         string destinationPath,
-        IProgress<long>? progress,
+        IProgress<DownloadProgress>? progress,
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(destinationPath))!);
@@ -111,21 +112,35 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
     private async Task DownloadFromAsync(
         string url,
         string stagingPath,
-        IProgress<long>? progress,
+        IProgress<DownloadProgress>? progress,
         CancellationToken cancellationToken)
     {
         using var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
+        var totalBytes = response.Content.Headers.ContentLength;
         await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
         await using var output = File.Create(stagingPath);
         var buffer = new byte[81920];
         long read = 0L;
+        long lastBytes = 0L;
+        long lastTick = Environment.TickCount64;
+        double bytesPerSecond = 0;
         int count;
         while ((count = await input.ReadAsync(buffer, cancellationToken)) > 0)
         {
             await output.WriteAsync(buffer.AsMemory(0, count), cancellationToken);
             read += count;
-            progress?.Report(read);
+            // 速度按 ~250ms 采样一次,避免每次 ReadAsync 都算(高频无意义)。
+            var now = Environment.TickCount64;
+            var elapsed = now - lastTick;
+            if (elapsed >= 250)
+            {
+                bytesPerSecond = (read - lastBytes) * 1000.0 / elapsed;
+                lastBytes = read;
+                lastTick = now;
+            }
+
+            progress?.Report(new DownloadProgress(read, totalBytes, bytesPerSecond));
         }
     }
 
