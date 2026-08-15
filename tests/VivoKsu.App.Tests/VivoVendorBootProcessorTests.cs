@@ -57,7 +57,7 @@ public sealed class VivoVendorBootProcessorTests
             // (否则失败只剩「退出码 1,未返回诊断信息」,无法定位)。防止回归。
             var unpack = native.ShellCommands.Single(command => command.Contains("unpack vendor_boot.img", StringComparison.Ordinal));
             Assert.Contains("2>&1", unpack);
-            Assert.DoesNotContain("/dev/null", unpack);
+            Assert.DoesNotContain("unpack vendor_boot.img >/dev/null", unpack);
 
             var repack = native.ShellCommands.Single(command => command.Contains("repack vendor_boot.img", StringComparison.Ordinal));
             Assert.Contains("2>&1", repack);
@@ -147,7 +147,7 @@ public sealed class VivoVendorBootProcessorTests
         {
             ShellCommands.Add(command);
             if (command.Contains("ls /lib/modules/", StringComparison.Ordinal)) return ModuleListing;
-            if (command.Contains("unpack vendor_boot.img", StringComparison.Ordinal)) return "VENDOR_RAMDISK_READY";
+            if (command.Contains("unpack vendor_boot.img", StringComparison.Ordinal)) return "vendor_boot/vendor_ramdisk/ramdisk.cpio";
             if (command.Contains("extract ", StringComparison.Ordinal)) return "READY";
             if (command.Contains("repack vendor_boot.img", StringComparison.Ordinal)) return "REPACKED";
             if (command.Contains("test -d", StringComparison.Ordinal)) return "READY";

@@ -63,14 +63,17 @@ public sealed class VivoVendorBootProcessor
             await backend.PushAsync(serial, sourceSnapshot.Path, $"{remoteRoot}/vendor_boot.img", cancellationToken);
 
             context?.ReportStage("正在处理 vendor_boot 镜像");
-            // 2>&1:magiskboot 的错误输出并入 stdout 供 ShellAsync 捕获——失败时能拿到真实原因
-            // (此前 /dev/null 2>&1 把错误全吞,只剩「退出码 1,未返回诊断信息」)。
+            // 诊断式解包:magiskboot 失败不再提前中断(2>&1 已并入 stderr),把退出码 + 解出的
+            // *.cpio 位置一并回显,失败时日志能区分「解包失败」还是「ramdisk.cpio 路径不同」。
             var unpack = await backend.ShellAsync(
                 serial,
-                $"cd {remoteRoot} && chmod 755 magiskboot && ./magiskboot unpack vendor_boot.img " +
-                "2>&1 && test -f vendor_boot/vendor_ramdisk/ramdisk.cpio && echo VENDOR_RAMDISK_READY",
+                $"cd {remoteRoot} && chmod 755 magiskboot && ./magiskboot unpack vendor_boot.img 2>&1; " +
+                $"echo UNPACK_EXIT=$?; find vendor_boot -maxdepth 3 -name '*.cpio' 2>/dev/null",
                 cancellationToken);
-            EnsureOutput(unpack, "VENDOR_RAMDISK_READY", "vendor_boot 未找到可处理的 vendor_ramdisk/ramdisk.cpio");
+            if (!unpack.Contains("vendor_boot/vendor_ramdisk/ramdisk.cpio", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"vendor_boot 未找到 vendor_ramdisk/ramdisk.cpio。解包输出:\n{unpack}");
+            }
 
             var listing = await backend.ShellAsync(
                 serial,
