@@ -87,7 +87,8 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
             {
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 linked.CancelAfter(PerCandidateTimeout);
-                await DownloadFromAsync(candidate, stagingPath, progress, linked.Token);
+                // ConfigureAwait(false):下载管线绝不回 UI 线程(调用方可能是 WPF UI,防独占卡死)。
+                await DownloadFromAsync(candidate, stagingPath, progress, linked.Token).ConfigureAwait(false);
                 Verify(spec, stagingPath);
                 File.Move(stagingPath, destinationPath, overwrite: true);
                 return;
@@ -134,10 +135,10 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
             }
         }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4));
 
-        using var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, watchdogCts.Token);
+        using var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, watchdogCts.Token).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var totalBytes = response.Content.Headers.ContentLength;
-        await using var input = await response.Content.ReadAsStreamAsync(watchdogCts.Token);
+        await using var input = await response.Content.ReadAsStreamAsync(watchdogCts.Token).ConfigureAwait(false);
         await using var output = File.Create(stagingPath);
         var buffer = new byte[81920];
         long read = 0L;
@@ -145,9 +146,9 @@ public sealed class RemoteAssetDownloader : IRemoteAssetDownloader
         long lastTick = Environment.TickCount64;
         double bytesPerSecond = 0;
         int count;
-        while ((count = await input.ReadAsync(buffer, watchdogCts.Token)) > 0)
+        while ((count = await input.ReadAsync(buffer, watchdogCts.Token).ConfigureAwait(false)) > 0)
         {
-            await output.WriteAsync(buffer.AsMemory(0, count), watchdogCts.Token);
+            await output.WriteAsync(buffer.AsMemory(0, count), watchdogCts.Token).ConfigureAwait(false);
             read += count;
             lastProgressTick = Environment.TickCount64;
             // 速度按 ~250ms 采样一次,避免每次 ReadAsync 都算(高频无意义)。

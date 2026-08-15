@@ -132,7 +132,7 @@ public sealed class VivoRootResourceService
             $"{manager.Key} 管理器 APK",
             RemoteAssetCatalog.GitHubDownloadUrl(ApkFileName(manager.Key)),
             ExpectedSha256: ManagerApkSha256.GetValueOrDefault(manager.Key));
-        await downloader.DownloadAsync(spec, cachePath, progress, cancellationToken);
+        await downloader.DownloadAsync(spec, cachePath, progress, cancellationToken).ConfigureAwait(false);
 
         var cached = manager with { ApkPath = cachePath };
         // 下载后的强校验:哈希不符 / 非有效 APK 都会抛。

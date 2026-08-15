@@ -108,7 +108,10 @@ public sealed partial class ResourceDownloadViewModel : ObservableObject
         IsDownloading = true;
         downloadCts = new CancellationTokenSource();
         var token = downloadCts.Token;
-        currentBatch = Task.WhenAll(targets.Select(item => RunItemAsync(item, token)));
+        // 关键:批次跑在 Task.Run 线程池——否则 RunItemAsync 在 UI 线程启动并捕获 Dispatcher
+        // 上下文,整条下载管线(HTTP 续体/读循环)被投递回 UI 线程执行,快速下载独占 UI 线程,
+        // 表现为「进度条不动 + 页面卡死到下载完才恢复」。放线程池后 UI 线程只处理 Progress 回调。
+        currentBatch = Task.Run(() => Task.WhenAll(targets.Select(item => RunItemAsync(item, token))));
         try
         {
             await currentBatch;

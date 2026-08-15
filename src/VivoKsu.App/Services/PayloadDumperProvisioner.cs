@@ -53,7 +53,7 @@ public sealed class PayloadDumperProvisioner
             return new PayloadDumperRunner(CachedExecutablePath);
         }
 
-        await provisioningLock.WaitAsync(cancellationToken);
+        await provisioningLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (File.Exists(CachedExecutablePath))
@@ -70,7 +70,7 @@ public sealed class PayloadDumperProvisioner
                 var spec = new RemoteAssetSpec(
                     "payload_dumper",
                     RemoteAssetCatalog.GitHubDownloadUrl(RemoteAssetCatalog.PayloadDumperAssetName));
-                await downloader.DownloadAsync(spec, zipPath, progress, cancellationToken);
+                await downloader.DownloadAsync(spec, zipPath, progress, cancellationToken).ConfigureAwait(false);
 
                 ExtractArchiveSafely(zipPath, stagingRoot);
                 var extractedExecutable = Path.Combine(stagingRoot, RemoteAssetCatalog.PayloadDumperExecutableName);

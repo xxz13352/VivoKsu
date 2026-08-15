@@ -47,7 +47,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
             return existing;
         }
 
-        await provisioningLock.WaitAsync(cancellationToken);
+        await provisioningLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             existing = FindInstalledExecutable();
@@ -56,7 +56,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
                 return existing;
             }
 
-            var release = await GetLatestReleaseAsync(cancellationToken);
+            var release = await GetLatestReleaseAsync(cancellationToken).ConfigureAwait(false);
             var asset = release.Assets.FirstOrDefault(candidate =>
                 candidate.Name.StartsWith("scrcpy-win64-v", StringComparison.OrdinalIgnoreCase) &&
                 candidate.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
@@ -78,7 +78,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
                     new RemoteAssetSpec("scrcpy", assetUri.ToString()),
                     archivePath,
                     progress,
-                    cancellationToken);
+                    cancellationToken).ConfigureAwait(false);
 
                 ExtractArchiveSafely(archivePath, payloadDirectory);
                 var executable = FindExecutable(payloadDirectory)
@@ -116,7 +116,7 @@ public sealed class ScrcpyProvisioningService : IScrcpyProvisioningService
         {
             try
             {
-                var release = await httpClient.GetFromJsonAsync<GitHubRelease>(candidate, cancellationToken);
+                var release = await httpClient.GetFromJsonAsync<GitHubRelease>(candidate, cancellationToken).ConfigureAwait(false);
                 if (release is not null)
                 {
                     return release;
