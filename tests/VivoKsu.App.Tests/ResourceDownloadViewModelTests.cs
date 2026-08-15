@@ -143,6 +143,28 @@ public class ResourceDownloadViewModelTests
         Assert.Equal("下载所选 (1)", vm.InstallButtonText);
     }
 
+    [Fact]
+    public async Task Cancel_command_enables_only_while_downloading()
+    {
+        var vm = CreateVm();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        vm.AddItem("slow", "慢项", "1 MB", false, (ct, _) => gate.Task);
+
+        // 空闲:取消按钮禁用。
+        Assert.False(vm.CancelCommand.CanExecute(null));
+
+        var run = vm.InstallCoreForTestingAsync(vm.Items[0]);
+        await WaitUntilAsync(() => vm.Items[0].Status == ResourceDownloadStatus.Downloading);
+
+        // 下载中:取消按钮必须可用(CanExecute 依赖 IsDownloading,OnIsDownloadingChanged 已重评估)。
+        Assert.True(vm.IsDownloading);
+        Assert.True(vm.CancelCommand.CanExecute(null));
+
+        gate.SetResult();
+        await run;
+        Assert.False(vm.CancelCommand.CanExecute(null));
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 5000)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(timeoutMs);

@@ -74,6 +74,14 @@ public sealed partial class ResourceDownloadViewModel : ObservableObject
 
     private bool CanInstall() => !IsDownloading && Items.Any(item => item.IsSelected);
 
+    /// <summary>忙状态翻转时重评估命令(取消/安装按钮的 CanExecute 依赖 IsDownloading,须显式通知)。</summary>
+    partial void OnIsDownloadingChanged(bool value)
+    {
+        CancelCommand.NotifyCanExecuteChanged();
+        InstallAllCommand.NotifyCanExecuteChanged();
+        InstallSelectedCommand.NotifyCanExecuteChanged();
+    }
+
     /// <summary>检测 4 个资源就绪状态,构建列表;缺失项默认勾选。</summary>
     public void Detect()
     {
@@ -108,10 +116,9 @@ public sealed partial class ResourceDownloadViewModel : ObservableObject
         IsDownloading = true;
         downloadCts = new CancellationTokenSource();
         var token = downloadCts.Token;
-        // 关键:批次跑在 Task.Run 线程池——否则 RunItemAsync 在 UI 线程启动并捕获 Dispatcher
-        // 上下文,整条下载管线(HTTP 续体/读循环)被投递回 UI 线程执行,快速下载独占 UI 线程,
-        // 表现为「进度条不动 + 页面卡死到下载完才恢复」。放线程池后 UI 线程只处理 Progress 回调。
-        currentBatch = Task.Run(() => Task.WhenAll(targets.Select(item => RunItemAsync(item, token))));
+        // 下载 I/O 由下载管线内的 ConfigureAwait(false) 保证在线程池执行(RunItemAsync 留在 UI 线程,
+        // 状态/Progress 更新安全;下载本体不占 UI 线程 → 进度条实时渲染、页面不卡死)。
+        currentBatch = Task.WhenAll(targets.Select(item => RunItemAsync(item, token)));
         try
         {
             await currentBatch;
