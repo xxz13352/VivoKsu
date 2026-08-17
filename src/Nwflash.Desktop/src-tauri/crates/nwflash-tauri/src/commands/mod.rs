@@ -12,6 +12,7 @@ pub mod partitions;
 pub mod quick_flash;
 pub mod resources;
 pub mod root;
+pub mod root_ota;
 pub mod safe_flash;
 pub mod session;
 pub mod software;

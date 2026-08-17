@@ -287,7 +287,7 @@ fn cleanup_safe_flash_staging(
     }
 }
 
-fn session_token(state: &AppState) -> Result<String, String> {
+pub(crate) fn session_token(state: &AppState) -> Result<String, String> {
     state
         .session_token
         .read()
