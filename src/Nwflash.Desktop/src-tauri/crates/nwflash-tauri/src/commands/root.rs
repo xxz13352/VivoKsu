@@ -69,6 +69,8 @@ pub struct RootImageSelectionDto {
     pub id: String,
     pub kind: RootImageKind,
     pub file_name: String,
+    /// 实际刷写/修补的目标分区名（`init_boot`、`boot` 或 `vendor_boot`）。
+    pub partition_name: String,
     pub size_bytes: i64,
 }
 
@@ -226,19 +228,20 @@ impl RootImageRuntime {
     }
 
     /// 本地选择的便捷重载：目标分区名默认等于 kind 的 label（init_boot / vendor_boot）。
-    pub fn replace_default(&self, kind: RootImageKind, image: FlashImageInfo) -> RootImageSelectionDto {
+    pub fn replace_default(
+        &self,
+        kind: RootImageKind,
+        image: FlashImageInfo,
+    ) -> RootImageSelectionDto {
         self.replace(kind, image, kind.label().to_string())
     }
 
     pub fn get(&self, kind: RootImageKind, id: &str) -> Result<FlashImageInfo, String> {
-        self.get_selection(kind, id).map(|selection| selection.image)
+        self.get_selection(kind, id)
+            .map(|selection| selection.image)
     }
 
-    fn get_selection(
-        &self,
-        kind: RootImageKind,
-        id: &str,
-    ) -> Result<RootImageSelection, String> {
+    fn get_selection(&self, kind: RootImageKind, id: &str) -> Result<RootImageSelection, String> {
         let state = self
             .state
             .lock()
@@ -439,6 +442,7 @@ fn root_image_selection_dto(
         id: selection.id,
         kind,
         file_name,
+        partition_name: selection.target_partition_name,
         size_bytes: selection.image.size_bytes,
     }
 }
@@ -482,16 +486,18 @@ fn automatic_root_flash_source(
         .map(|artifact_id| runtime.get(artifact_id))
         .collect::<Result<Vec<_>, _>>()?;
     let mut partitions = Vec::with_capacity(artifacts.len());
-    for expected_partition in [
+    // 依规范顺序排列：boot 槽位（init_boot 或 boot 由工件真实分区名决定）在前，vendor_boot 在后。
+    for expected in [
         QuickFlashPartition::InitBoot,
+        QuickFlashPartition::Boot,
         QuickFlashPartition::VendorBoot,
     ] {
         if let Some(artifact) = artifacts
             .iter()
-            .find(|artifact| artifact.partition == expected_partition)
+            .find(|artifact| artifact.partition == expected)
         {
             partitions.push(SafeFlashPartitionSource {
-                partition_name: expected_partition.partition_name().to_string(),
+                partition_name: artifact.partition.partition_name().to_string(),
                 image_path: artifact.image.path.clone(),
                 has_slot: false,
             });
@@ -501,14 +507,14 @@ fn automatic_root_flash_source(
     if partitions.len() != artifacts.len()
         || partitions
             .first()
-            .is_none_or(|source| source.partition_name != "init_boot")
+            .is_none_or(|source| !matches!(source.partition_name.as_str(), "init_boot" | "boot"))
         || (manager == RootManager::OfficialKernelSu
             && partitions
                 .get(1)
                 .is_none_or(|source| source.partition_name != "vendor_boot"))
     {
         return Err(
-            "ROOT 自动流程必须从当前 init_boot 修补工件开始，且不能重复刷写分区。".to_string(),
+            "ROOT 自动流程必须从当前 boot/init_boot 修补工件开始，且不能重复刷写分区。".to_string(),
         );
     }
 
@@ -675,7 +681,10 @@ fn build_vivo_ksu_patch_commands(
     ])
 }
 
-fn build_vivo_ksu_patch_cleanup_command(serial: &str, partition: &str) -> Result<ProcessCommand, String> {
+fn build_vivo_ksu_patch_cleanup_command(
+    serial: &str,
+    partition: &str,
+) -> Result<ProcessCommand, String> {
     let remote_source = vivo_ksu_remote_source(partition);
     let remote_patched = vivo_ksu_remote_patched(partition);
     build_adb_manager_command(
@@ -1157,8 +1166,8 @@ async fn patch_vivo_ksu_core(
         .map_err(|_| DomainError::InvalidOperation("ROOT 修补产物无效。".to_string()))
     }
     .await;
-    let cleanup =
-        build_vivo_ksu_patch_cleanup_command(&serial, partition).map_err(DomainError::InvalidInput)?;
+    let cleanup = build_vivo_ksu_patch_cleanup_command(&serial, partition)
+        .map_err(DomainError::InvalidInput)?;
     let _ = execute_root_patch_command(cleanup, tokio_util::sync::CancellationToken::new()).await;
     let patched = match patch_result {
         Ok(patched) => patched,
@@ -1169,7 +1178,8 @@ async fn patch_vivo_ksu_core(
     };
     let flash_partition = quick_flash_partition_from_name(partition)
         .ok_or_else(|| DomainError::InvalidInput("不支持的 ROOT boot 分区名。".to_string()))?;
-    let artifact = artifacts.replace_owned(RootImageKind::InitBoot, patched, flash_partition, staging);
+    let artifact =
+        artifacts.replace_owned(RootImageKind::InitBoot, patched, flash_partition, staging);
     report_root_subprogress(context, progress_base, progress_span, 1.0);
     Ok(artifact)
 }
@@ -1608,7 +1618,10 @@ pub async fn root_run_automatic(
                         }
                         AutomaticRootStage::PatchInitBoot => {
                             context.report_stage_with_kind(
-                                format!("ROOT 自动流程: 正在修补 {}", selection.boot_partition_name),
+                                format!(
+                                    "ROOT 自动流程: 正在修补 {}",
+                                    selection.boot_partition_name
+                                ),
                                 OperationKind::Hashing,
                             );
                             let boot_partition_name = selection.boot_partition_name.clone();
@@ -1775,10 +1788,10 @@ mod tests {
         build_vendor_boot_repack_pull_commands, build_vendor_boot_setup_commands,
         build_vivo_ksu_patch_commands, finalize_vendor_boot_workflow, inspect_root_image,
         manager_resource_key, parse_kernel_release, quick_flash_partition_from_name,
-        root_preflight_from_runtime,
-        root_preflight_response, AutomaticRootStage, RootAutomaticOptionsDto, RootImageKind,
-        RootImageRuntime, RootOfficialVendorBootPatchOptionsDto, RootPatchedArtifactRuntime,
-        RootPreflightOptionsDto, RootVivoKsuPatchOptionsDto,
+        root_preflight_from_runtime, root_preflight_response, AutomaticRootStage,
+        RootAutomaticOptionsDto, RootImageKind, RootImageRuntime,
+        RootOfficialVendorBootPatchOptionsDto, RootPatchedArtifactRuntime, RootPreflightOptionsDto,
+        RootVivoKsuPatchOptionsDto,
     };
 
     #[test]
@@ -2194,6 +2207,47 @@ mod tests {
             &runtime,
             RootManager::VivoKsu,
             &["forged-artifact".to_string()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn automatic_root_flash_source_accepts_boot_fallback_for_vivo_ksu() {
+        let runtime = RootPatchedArtifactRuntime::new();
+        // 云端提取的 boot 槽位回退到 boot 分区（设备无 init_boot）。
+        let boot = runtime.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: r"C:\\private\\root-stage\\patched-boot.img".to_string(),
+                size_bytes: 2048,
+            },
+            QuickFlashPartition::Boot,
+        );
+
+        let source =
+            automatic_root_flash_source(&runtime, RootManager::VivoKsu, &[boot.artifact_id])
+                .expect("boot-fallback artifact should form an automatic Vivo KSU flash source");
+
+        assert_eq!(source.partitions.len(), 1);
+        assert_eq!(source.partitions[0].partition_name, "boot");
+    }
+
+    #[test]
+    fn automatic_root_flash_source_still_rejects_non_boot_first_slots() {
+        let runtime = RootPatchedArtifactRuntime::new();
+        // 造假一个既不是 init_boot 也不是 boot 的工件 -> 自动流程应拒绝。
+        let artifact = runtime.replace(
+            RootImageKind::VendorBoot,
+            FlashImageInfo {
+                path: r"C:\\private\\root-stage\\patched-vendor_boot.img".to_string(),
+                size_bytes: 4096,
+            },
+            QuickFlashPartition::VendorBoot,
+        );
+        assert!(automatic_root_flash_source(
+            &runtime,
+            RootManager::VivoKsu,
+            &[artifact.artifact_id],
         )
         .is_err());
     }

@@ -6,12 +6,12 @@
 ## 运行状态看板
 
 - [x] 探索 + 设计（brainstorming 完成，spec 已提交 `07e3f4d`）
-- [ ] 实现计划（writing-plans）
-- [ ] 功能实现（root_ota_check / root_ota_extract_images / RangeHttpReader / 分区名穿通 / 前端 UX）
-- [ ] 全量测试绿
-- [ ] 功能 BUG 审查 + 修复
-- [ ] 项目架构文档更新
-- [ ] 清理临时文件
+- [x] 实现计划（writing-plans）
+- [x] 功能实现（root_ota_check / root_ota_extract_images / RangeHttpReader / 分区名穿通 / 前端 UX）
+- [x] 全量测试绿（2026-08-18，再次验证后待提交）
+- [x] 功能 BUG 审查 + 修复（见本节最新复查）
+- [x] 项目架构文档更新
+- [x] 清理临时文件
 - [ ] Rust 代码漏洞/安全审查 + 修复 + 再审
 - [ ] taste-skill UI 优化 + 测试
 - [ ] 新功能提案文档（docs/superpowers/plans/ 或 docs/proposals/）
@@ -85,9 +85,37 @@ cd src/Nwflash.Desktop && npm run tauri -- build --no-bundle                    
 - `safe_flash::session_token` 改 `pub(crate)` 共享。命令 DTO 无 URL/serial/path。
 - AppState 加 `root_ota_runtime`；generate_handler 注册 2 命令。118 测试绿 + workspace 全绿。
 
+### Task 6 完成（前端 UX + vitest）
+- RootPage.tsx 加「OTA 来源」单选（本地/从服务器）+ 检测按钮；打开自动检测（root_ota_check）；勾选服务器 → root_ota_extract_images 灌槽位。
+- 本地选择按钮在服务器模式禁用；根因：refresh 新增 root_ota_check 调用需给每个测试 mock 链加一项（否则 Once 序列错位）。已用 OTA_CHECK_* 常量重写 RootPage.test.tsx。
+- 130 前端测试绿 + build 成功。
+
+### Task 7 完成（全量验证）
+- Rust workspace 全绿；e2e feature 编译通过 + C# 映射门禁绿；前端 130 绿；生产 build 成功。
+- 完整 WDIO 启动套件需桌面+显示，本环境headless 无法跑；以 e2e feature 编译 + 无设备门禁为准（符合验收约束）。
+
+### 后续待办（全局审查 + 文档 + 清理 + UI 优化 + 新功能提案）
+- [ ] 功能 BUG 自审（云提取跨格式边界/分区名穿通/取消/资源清理）
+- [x] 独立代码审查（root.rs Critical #1 / remote_firmware.rs Important #2 / 进度 Important #3）
+- [x] 修复 Critical #1：`automatic_root_flash_source` 硬编码 init_boot → 遍历 InitBoot/Boot/VendorBoot + boot 回退校验 + 回归测试（未提交）
+- [x] 修复 Important #2：取消误报 Archive → `io::ErrorKind::Interrupted → Cancelled` + 中途取消测试（未提交）
+- [x] 修复 Important #3：进度透传 `root_ota_extract_images` → `RootOtaService::extract` → `report_progress_monotonic`（payload 分支算总字节 fraction；直接镜像 zip 分支 list_zip_members 算 total + 跨成员累计）（未提交）
+- [ ] 提交审查修复 + 重跑全量测试
+- [x] 项目架构文档更新（`project-architecture.md` / `rust-tauri-architecture.md` 已补 ROOT 云提取边界）
+- [x] 清理临时文件（已删除 `%TEMP%\\probe_zip.py` 与 `%TEMP%\\zip_member.py`；不删除受校验 payload 缓存）
+- [ ] Rust 代码漏洞/安全审查与修复
+- [ ] taste-skill UI 优化
+- [ ] 新功能提案文档（docs/superpowers/plans/ 或 docs/proposals/）
+
 ### 关键技术落点（实现时对照）
 - infra `Cargo.toml` reqwest 需加 `blocking` feature（`RangeHttpReader` 用同步 client）。
 - `RangeHttpReader`：Read+Seek 走 HTTP Range，CHUNK=1MB 填充缓冲，seek 清缓冲；new 时 `Range: bytes=0-0` 要 206 + Content-Range 总长，非 206 → `RangeUnsupported`。取消检查在每次网络拉取前，返回 io::ErrorKind::Interrupted。
 - 探测：首 4 字节 `PK`→zip（再用 zip crate 查 payload.bin→PayloadZip/DirectImageZip）、`CrAU`→PayloadRaw、`1f 8b`→Unsupported。
 - 直接镜像 zip 提取：`ZipArchive::new(RangeHttpReader)` + 按基名匹配 wanted + 手动 buffer 循环注入进度 + CRC/大小校验。
 - 测试：写 `tests/common/mod.rs` 的 `spawn_range_server(data)->String`（std TcpListener，解析 Range 返回 206/Content-Range/切片）。
+
+### 最新复查（2026-08-18，待提交）
+
+- 修复直接镜像 ZIP 的进度传播：infra 回调改为 `FnMut`，application 按成员名计算增量并实时上报；新增 `direct_zip_reports_monotonic_fractional_progress_until_completion` 回归测试。
+- 修复直接镜像 ZIP 的不必要工具依赖：命令先在 Rust 阻塞线程探测 OTA；仅 `PayloadZip`/`PayloadRaw` 运行 `PayloadDumperProvisioner`，直接镜像 ZIP 不再因 payload 工具下载失败而无法提取。
+- 收紧 ROOT OTA 的错误投影：网络、归档、完整性和 URL 原始错误不再把 OTA URL 或 staging 路径传给 React；新增回归断言。

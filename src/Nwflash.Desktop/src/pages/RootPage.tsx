@@ -23,6 +23,7 @@ type RootImageSelection = {
   id: string;
   kind: 'initBoot' | 'vendorBoot';
   fileName: string;
+  partitionName: string;
   sizeBytes: number;
 };
 
@@ -392,11 +393,11 @@ export const RootPage: FC = () => {
         <article className="nw-root-image-preflight">
           <div>
             <h2>启动镜像预检</h2>
-            <p>init_boot 镜像　<strong>{initBoot ? initBoot.fileName : '未选择 init_boot 镜像'}</strong></p>
+            <p>{initBoot ? `${initBoot.partitionName} 镜像` : '未选择启动镜像'}　<strong>{initBoot ? initBoot.fileName : ''}</strong></p>
             <small>官版 KSU 全自动需另选 vendor_boot。</small>
           </div>
           <button type="button" className="nw-test-root-select-init" disabled={isBusy || sourceMode === 'server'} onClick={() => void selectRootImage('initBoot')}>
-            选择 init_boot 镜像
+            选择启动镜像
           </button>
         </article>
 

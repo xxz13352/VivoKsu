@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use nwflash_application::{result_to_domain_error, RootOtaExtractOptions, RootOtaService};
 use nwflash_domain::{DomainError, OperationKind};
-use nwflash_infrastructure::{PayloadDumperProvisioner, RemoteAssetDownloader};
+use nwflash_infrastructure::{
+    remote_firmware::{probe_remote_kind, RemoteFirmwareError, RemoteFirmwareKind},
+    PayloadDumperProvisioner, RemoteAssetDownloader,
+};
 use serde::Serialize;
 use tauri::State;
 use tokio::task;
@@ -109,6 +112,34 @@ async fn read_online_ota_identity(serial: &str) -> Result<(String, String), Stri
     crate::commands::device_identity::read_online_ota_identity(serial).await
 }
 
+fn needs_payload_dumper(kind: RemoteFirmwareKind) -> bool {
+    matches!(
+        kind,
+        RemoteFirmwareKind::PayloadZip | RemoteFirmwareKind::PayloadRaw
+    )
+}
+
+fn map_probe_error(error: RemoteFirmwareError) -> DomainError {
+    match error {
+        RemoteFirmwareError::Cancelled => {
+            DomainError::UserCancelled("ROOT 云提取已取消。".to_string())
+        }
+        RemoteFirmwareError::RangeUnsupported => {
+            DomainError::InvalidOperation("服务器 OTA 不支持 Range 请求。".to_string())
+        }
+        RemoteFirmwareError::UnsupportedFormat => {
+            DomainError::InvalidFormat("不支持的 OTA 格式，无法云提取 ROOT 分区。".to_string())
+        }
+        RemoteFirmwareError::InvalidUrl(_)
+        | RemoteFirmwareError::Transport(_)
+        | RemoteFirmwareError::Archive(_)
+        | RemoteFirmwareError::MissingPartition(_)
+        | RemoteFirmwareError::Integrity(_) => {
+            DomainError::InvalidOperation("无法读取服务器 OTA，请重新检测后再试。".to_string())
+        }
+    }
+}
+
 /// 检测服务器 OTA 并把链接缓存到 Rust 内存。无设备/未登录/查询失败 → 静默不可用。
 #[tauri::command]
 pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDto, String> {
@@ -121,11 +152,21 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
         .filter(|token| !token.is_empty())
     {
         Some(token) => token,
-        None => return Ok(RootOtaCheckDto { available: false, label: None }),
+        None => {
+            return Ok(RootOtaCheckDto {
+                available: false,
+                label: None,
+            })
+        }
     };
     let serial = match state.device_runtime.active_adb_serial() {
         Ok(serial) => serial,
-        Err(_) => return Ok(RootOtaCheckDto { available: false, label: None }),
+        Err(_) => {
+            return Ok(RootOtaCheckDto {
+                available: false,
+                label: None,
+            })
+        }
     };
     let client = state.client.clone();
     let runtime = state.root_ota_runtime.clone();
@@ -157,10 +198,9 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
                     serial,
                 };
                 runtime.store(resolved);
-                *result_for_operation
-                    .lock()
-                    .map_err(|_| DomainError::Internal("ROOT OTA 检测结果锁不可用。".to_string()))? =
-                    Some(());
+                *result_for_operation.lock().map_err(|_| {
+                    DomainError::Internal("ROOT OTA 检测结果锁不可用。".to_string())
+                })? = Some(());
                 Ok(())
             },
         )
@@ -173,7 +213,10 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
         .take()
         .is_some();
     if !found {
-        return Ok(RootOtaCheckDto { available: false, label: None });
+        return Ok(RootOtaCheckDto {
+            available: false,
+            label: None,
+        });
     }
     let label = match state
         .root_ota_runtime
@@ -223,18 +266,39 @@ pub async fn root_ota_extract_images(
                 let image_runtime = image_runtime.clone();
                 let result_for_operation = result_for_operation.clone();
                 async move {
-                    context.report_stage("正在准备 payload 提取工具");
-                    let provisioner = PayloadDumperProvisioner::new(
-                        RemoteAssetDownloader::default(),
-                        None,
-                        None,
-                    );
-                    let payload_dumper = provisioner
-                        .ensure_installed(&cancellation, None)
-                        .await
-                        .map_err(|error| {
-                            DomainError::ExternalTool(format!("payload 提取工具未就绪：{error}"))
-                        })?;
+                    context.report_stage("正在探测 OTA 格式");
+                    let probe_url = resolved.url.clone();
+                    let probe_cancellation = cancellation.clone();
+                    let remote_kind = task::spawn_blocking(move || {
+                        let mut is_canceled = || probe_cancellation.is_cancelled();
+                        probe_remote_kind(&probe_url, None, &mut is_canceled)
+                            .map_err(map_probe_error)
+                    })
+                    .await
+                    .map_err(|error| {
+                        DomainError::Internal(format!("ROOT OTA 格式探测调度失败：{error}"))
+                    })??;
+
+                    let payload_dumper = if needs_payload_dumper(remote_kind) {
+                        context.report_stage("正在准备 payload 提取工具");
+                        let provisioner = PayloadDumperProvisioner::new(
+                            RemoteAssetDownloader::default(),
+                            None,
+                            None,
+                        );
+                        Some(
+                            provisioner
+                                .ensure_installed(&cancellation, None)
+                                .await
+                                .map_err(|error| {
+                                    DomainError::ExternalTool(format!(
+                                        "payload 提取工具未就绪：{error}"
+                                    ))
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
                     if cancellation.is_cancelled() {
                         return Err(DomainError::UserCancelled(
                             "ROOT 云提取已取消。".to_string(),
@@ -244,16 +308,18 @@ pub async fn root_ota_extract_images(
                     let service = RootOtaService::new();
                     let resolved_url = resolved.url.clone();
                     let payload_dumper_path = payload_dumper.clone();
+                    // 进度/stage 从阻塞线程透传给 OperationCoordinator（单调进度，防回退）。
+                    let context_for_blocking = context.clone();
                     let images = task::spawn_blocking(move || {
                         service.extract(
                             RootOtaExtractOptions {
                                 url: &resolved_url,
-                                payload_dumper: Some(&payload_dumper_path),
+                                payload_dumper: payload_dumper_path.as_deref(),
                                 staging_root: &staging,
                             },
                             || cancellation.is_cancelled(),
-                            |_stage| {},
-                            |_progress| {},
+                            |stage| context_for_blocking.report_stage(stage),
+                            |progress| context_for_blocking.report_progress_monotonic(progress),
                         )
                     })
                     .await
@@ -315,6 +381,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn payload_dumper_is_required_only_for_payload_ota_kinds() {
+        assert!(needs_payload_dumper(
+            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::PayloadZip
+        ));
+        assert!(needs_payload_dumper(
+            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::PayloadRaw
+        ));
+        assert!(!needs_payload_dumper(
+            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::DirectImageZip
+        ));
+        assert!(!needs_payload_dumper(
+            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::Unsupported
+        ));
+    }
+
+    #[test]
     fn root_ota_dto_does_not_expose_url_serial_or_path() {
         let dto = RootOtaCheckDto {
             available: true,
@@ -347,8 +429,7 @@ mod tests {
         assert_eq!(resolved.url, "https://example.invalid/ota.zip");
 
         // staging 采用/清理。
-        let root =
-            std::env::temp_dir().join(format!("nwflash-root-ota-runtime-{nonce}"));
+        let root = std::env::temp_dir().join(format!("nwflash-root-ota-runtime-{nonce}"));
         std::fs::create_dir_all(&root).expect("staging should be created");
         runtime.adopt_staging(Some(root.clone()));
         assert!(root.exists());

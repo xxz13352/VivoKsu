@@ -1,15 +1,13 @@
 //! ROOT 云端 OTA 提取：从服务器解析出的 OTA 链接按需提取修补所需的启动分区镜像。
 
 use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nwflash_domain::{DomainError, FlashImageInfo};
 use nwflash_infrastructure::remote_firmware::{
-    extract_zip_members, probe_remote_kind, RemoteFirmwareError, RemoteFirmwareKind,
+    extract_zip_members, list_zip_members, probe_remote_kind, RemoteFirmwareError,
+    RemoteFirmwareKind,
 };
 
 use crate::FirmwareExtractService;
@@ -126,20 +124,18 @@ impl RootOtaService {
         url: &str,
         staging_root: &Path,
         is_canceled: &mut F,
-        _report_progress: &mut P,
+        report_progress: &mut P,
     ) -> Result<RootOtaExtractedImages, DomainError>
     where
         F: FnMut() -> bool,
         P: FnMut(f64),
     {
         let metadata_directory = staging_root.join("metadata");
-        let inspection = FirmwareExtractService::inspect_payload(
-            executable,
-            url,
-            &metadata_directory,
-            || is_canceled(),
-        )
-        .map_err(|error| map_firmware_extract_error(error, "读取 payload 分区信息失败。"))?;
+        let inspection =
+            FirmwareExtractService::inspect_payload(executable, url, &metadata_directory, || {
+                is_canceled()
+            })
+            .map_err(|error| map_firmware_extract_error(error, "读取 payload 分区信息失败。"))?;
         let _ = std::fs::remove_dir_all(&metadata_directory);
         if is_canceled() {
             return Err(RootOtaError::Cancelled.into_domain());
@@ -161,6 +157,10 @@ impl RootOtaService {
         if let Some(entry) = &vendor_boot_entry {
             selected.push(entry.clone());
         }
+        let total_bytes: u64 = selected
+            .iter()
+            .filter_map(|entry| u64::try_from(entry.size_bytes).ok())
+            .sum();
 
         let image_directory = staging_root.join("images");
         let images = FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
@@ -169,7 +169,11 @@ impl RootOtaService {
             &selected,
             &image_directory,
             || is_canceled(),
-            |_partition, _written| {},
+            |_partition, written| {
+                if total_bytes > 0 {
+                    report_progress((written as f64 / total_bytes as f64).clamp(0.0, 1.0));
+                }
+            },
         )
         .map_err(|error| map_firmware_extract_error(error, "提取 payload 分区失败。"))?;
 
@@ -206,32 +210,58 @@ impl RootOtaService {
         url: &str,
         staging_root: &Path,
         is_canceled: &mut F,
-        _report_progress: &mut P,
+        report_progress: &mut P,
     ) -> Result<RootOtaExtractedImages, DomainError>
     where
         F: FnMut() -> bool,
         P: FnMut(f64),
     {
         let image_directory = staging_root.join("images");
-        let progress: Arc<std::sync::Mutex<u64>> = Arc::new(std::sync::Mutex::new(0));
-        let progress_sink = progress.clone();
+        let wanted: [&str; 3] = ["init_boot", "boot", "vendor_boot"];
+
+        // 先列出远程 zip 成员，算出目标分区的总字节，用于计算进度百分比。
+        let members = list_zip_members(url, None, is_canceled)
+            .map_err(|error| map_remote_firmware_error(error, "读取直接镜像 zip 分区列表失败。"))?;
+        let total_bytes: u64 = members
+            .iter()
+            .filter(|member| wanted.contains(&member.name.as_str()))
+            .map(|member| member.size_bytes.max(0) as u64)
+            .sum();
+
+        // 跨成员累计已下载字节。基础设施回调按成员报告当前值，应用层按差值合并。
+        let mut completed_bytes = 0u64;
+        let mut current_member: Option<String> = None;
+        let mut current_member_bytes = 0u64;
+        let mut progress_sink = |name: &str, bytes: u64| {
+            if current_member.as_deref() != Some(name) {
+                current_member = Some(name.to_string());
+                current_member_bytes = 0;
+            }
+            let delta = bytes.saturating_sub(current_member_bytes);
+            current_member_bytes = bytes;
+            completed_bytes = completed_bytes.saturating_add(delta);
+            if total_bytes > 0 {
+                report_progress((completed_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0));
+            }
+        };
         let extracted = extract_zip_members(
             url,
             None,
-            &["init_boot", "boot", "vendor_boot"],
+            &wanted,
             &image_directory,
             is_canceled,
-            &move |_name, bytes| {
-                *progress_sink.lock().unwrap() = bytes;
-            },
+            &mut progress_sink,
         )
         .map_err(|error| map_remote_firmware_error(error, "提取直接镜像 zip 分区失败。"))?;
-        let _ = progress;
 
         let boot = extracted
             .iter()
             .find(|image| image.partition_name == "init_boot")
-            .or_else(|| extracted.iter().find(|image| image.partition_name == "boot"));
+            .or_else(|| {
+                extracted
+                    .iter()
+                    .find(|image| image.partition_name == "boot")
+            });
         let vendor_boot = extracted
             .iter()
             .find(|image| image.partition_name == "vendor_boot");
@@ -282,20 +312,22 @@ fn map_remote_firmware_error(error: RemoteFirmwareError, prefix: &str) -> Domain
             RootOtaError::InvalidFormat("不支持的 OTA 格式，无法云提取 ROOT 分区。".to_string())
                 .into_domain()
         }
-        RemoteFirmwareError::Archive(message) => {
-            RootOtaError::InvalidFormat(format!("{prefix}{message}")).into_domain()
+        RemoteFirmwareError::Archive(_) => {
+            RootOtaError::InvalidFormat(format!("{prefix}OTA 压缩包无法读取或已损坏。"))
+                .into_domain()
         }
-        RemoteFirmwareError::Integrity(message) => {
-            RootOtaError::InvalidFormat(format!("{prefix}{message}")).into_domain()
+        RemoteFirmwareError::Integrity(_) => {
+            RootOtaError::InvalidFormat(format!("{prefix}OTA 分区完整性校验失败。")).into_domain()
         }
-        RemoteFirmwareError::MissingPartition(message) => {
-            RootOtaError::MissingBoot(format!("{prefix}{message}")).into_domain()
+        RemoteFirmwareError::MissingPartition(_) => {
+            RootOtaError::MissingBoot(format!("{prefix}OTA 不含所需启动分区。")).into_domain()
         }
-        RemoteFirmwareError::Transport(message) => {
-            RootOtaError::Remote(format!("{prefix}{message}")).into_domain()
+        RemoteFirmwareError::Transport(_) => {
+            RootOtaError::Remote(format!("{prefix}无法读取服务器 OTA，请重新检测后再试。"))
+                .into_domain()
         }
-        RemoteFirmwareError::InvalidUrl(message) => {
-            RootOtaError::InvalidFormat(format!("{prefix}{message}")).into_domain()
+        RemoteFirmwareError::InvalidUrl(_) => {
+            RootOtaError::InvalidFormat(format!("{prefix}服务器 OTA 地址无效。")).into_domain()
         }
     }
 }
@@ -311,13 +343,15 @@ fn map_firmware_extract_error(
     }
 }
 
-fn pick_boot_entry(
-    entries: &[crate::FirmwareExtractEntry],
-) -> Option<crate::FirmwareExtractEntry> {
+fn pick_boot_entry(entries: &[crate::FirmwareExtractEntry]) -> Option<crate::FirmwareExtractEntry> {
     entries
         .iter()
         .find(|entry| entry.name.eq_ignore_ascii_case("init_boot"))
-        .or_else(|| entries.iter().find(|entry| entry.name.eq_ignore_ascii_case("boot")))
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|entry| entry.name.eq_ignore_ascii_case("boot"))
+        })
         .cloned()
 }
 
@@ -328,4 +362,23 @@ fn pick_vendor_boot_entry(
         .iter()
         .find(|entry| entry.name.eq_ignore_ascii_case("vendor_boot"))
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_errors_do_not_expose_ota_url_or_staging_path() {
+        let error = map_remote_firmware_error(
+            RemoteFirmwareError::Transport(
+                "request https://example.invalid/private/ota.zip wrote C:\\secret\\staging"
+                    .to_string(),
+            ),
+            "提取直接镜像 zip 分区失败。",
+        );
+        let message = error.to_string();
+        assert!(!message.contains("https://"));
+        assert!(!message.contains("C:\\secret"));
+    }
 }

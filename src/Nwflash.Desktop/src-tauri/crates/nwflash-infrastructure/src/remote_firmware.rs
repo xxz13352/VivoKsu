@@ -166,25 +166,25 @@ fn strip_extension(name: &str) -> String {
 }
 
 /// 定向解压远程 zip 中目标分区成员到 `output_dir`。仅下载所需的成员字节。
-pub fn extract_zip_members<F>(
+pub fn extract_zip_members<F, P>(
     url: &str,
     client: Option<&Client>,
     wanted: &[&str],
     output_dir: &Path,
     is_canceled: &mut F,
-    report_progress: &dyn Fn(&str, u64),
+    report_progress: &mut P,
 ) -> Result<Vec<ExtractedZipImage>, RemoteFirmwareError>
 where
     F: FnMut() -> bool,
+    P: FnMut(&str, u64),
 {
     validate_url(url)?;
     let reader = RangeHttpReader::new(url, client, is_canceled)?;
-    let mut archive = ZipArchive::new(reader)
-        .map_err(|error| RemoteFirmwareError::Archive(error.to_string()))?;
+    let mut archive =
+        ZipArchive::new(reader).map_err(|error| RemoteFirmwareError::Archive(error.to_string()))?;
 
-    std::fs::create_dir_all(output_dir).map_err(|error| {
-        RemoteFirmwareError::Transport(format!("创建提取目录失败：{error}"))
-    })?;
+    std::fs::create_dir_all(output_dir)
+        .map_err(|error| RemoteFirmwareError::Transport(format!("创建提取目录失败：{error}")))?;
 
     let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
@@ -229,13 +229,21 @@ where
             loop {
                 // 取消检查由 reader 的每次网络读取触发（每块最多 CHUNK_BYTES）。
                 let count = entry.read(&mut buffer).map_err(|error| {
-                    RemoteFirmwareError::Archive(format!("解压分区 {partition_name} 失败：{error}"))
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        RemoteFirmwareError::Cancelled
+                    } else {
+                        RemoteFirmwareError::Archive(format!(
+                            "解压分区 {partition_name} 失败：{error}"
+                        ))
+                    }
                 })?;
                 if count == 0 {
                     break;
                 }
                 output.write_all(&buffer[..count]).map_err(|error| {
-                    RemoteFirmwareError::Transport(format!("写入分区 {partition_name} 失败：{error}"))
+                    RemoteFirmwareError::Transport(format!(
+                        "写入分区 {partition_name} 失败：{error}"
+                    ))
                 })?;
                 written = written.saturating_add(count as u64);
                 report_progress(&partition_name, written);
@@ -250,9 +258,7 @@ where
             return Err(error);
         }
         let actual_size = std::fs::metadata(&partial)
-            .map_err(|error| {
-                RemoteFirmwareError::Transport(format!("读取提取镜像失败：{error}"))
-            })?
+            .map_err(|error| RemoteFirmwareError::Transport(format!("读取提取镜像失败：{error}")))?
             .len();
         if actual_size != expected_size {
             let _ = std::fs::remove_file(&partial);

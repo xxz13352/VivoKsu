@@ -5,21 +5,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use nwflash_application::{RootOtaExtractOptions, RootOtaService};
 use zip4::write::SimpleFileOptions;
 use zip4::{CompressionMethod, ZipWriter};
-
-fn scratch_dir(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-root-ota-test-{label}-{nonce}"));
-    fs::create_dir_all(&root).expect("scratch dir should be created");
-    root
-}
 
 /// 起一个 Range mock server，返回 `http://127.0.0.1:<port>/`。
 fn range_server(data: Vec<u8>) -> String {
@@ -59,13 +48,19 @@ fn serve(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
         .lines()
         .find_map(|l| {
             let lower = l.to_ascii_lowercase();
-            lower.trim().strip_prefix("range:").map(|v| v.trim().to_string())
+            lower
+                .trim()
+                .strip_prefix("range:")
+                .map(|v| v.trim().to_string())
         })
         .and_then(|v| v.strip_prefix("bytes=").map(|s| s.to_string()));
     let total = data.len() as u64;
     match range {
         None => {
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n")?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+            )?;
             stream.write_all(data)?;
         }
         Some(spec) => {
@@ -98,7 +93,10 @@ fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, data) in entries {
         writer
-            .start_file(*name, SimpleFileOptions::default().compression_method(CompressionMethod::Stored))
+            .start_file(
+                *name,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
             .expect("start file");
         std::io::Write::write_all(&mut writer, data).expect("write entry");
     }
@@ -191,6 +189,39 @@ fn direct_zip_prefers_init_boot_over_boot() {
         images.boot_image.expect("boot image").size_bytes,
         init_boot.len() as i64
     );
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn direct_zip_reports_monotonic_fractional_progress_until_completion() {
+    let boot = vec![1u8; 2 * 1024 * 1024];
+    let vendor_boot = vec![2u8; 2 * 1024 * 1024];
+    let zip = build_zip(&[("boot.img", &boot), ("vendor_boot.img", &vendor_boot)]);
+    let url = range_server(zip);
+    let root = staging();
+    let canceled = false;
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
+    let sink = progress.clone();
+    RootOtaService::new()
+        .extract(
+            RootOtaExtractOptions {
+                url: &url,
+                payload_dumper: None,
+                staging_root: &root,
+            },
+            || canceled,
+            |_| {},
+            move |value| sink.lock().unwrap().push(value),
+        )
+        .expect("direct zip should extract");
+
+    let values = progress.lock().unwrap();
+    assert!(
+        values.len() > 1,
+        "progress should be reported during extraction"
+    );
+    assert!(values.windows(2).all(|pair| pair[1] >= pair[0]));
+    assert_eq!(values.last().copied(), Some(1.0));
     fs::remove_dir_all(&root).ok();
 }
 

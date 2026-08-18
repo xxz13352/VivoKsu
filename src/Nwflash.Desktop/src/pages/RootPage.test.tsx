@@ -192,7 +192,8 @@ describe('RootPage', () => {
       .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
       .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
       .mockResolvedValueOnce(OTA_CHECK_OFF)
-      .mockResolvedValueOnce({ id: 'root-image-init_boot-2', kind: 'initBoot', fileName: 'init_boot.img', sizeBytes: 1024 })
+      .mockResolvedValueOnce({ id: 'root-image-init_boot-2', kind: 'initBoot', fileName: 'init_boot.img',
+        partitionName: 'init_boot', sizeBytes: 1024 })
       .mockResolvedValueOnce({ managerLabel: 'Vivo KSU', effectiveKmi: 'android14-6.1', canPatch: true, canRunAutomatic: true, summary: '已就绪：将修补 init_boot。' });
 
     renderRoot();
@@ -248,7 +249,8 @@ describe('RootPage', () => {
       .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
       .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
       .mockResolvedValueOnce(OTA_CHECK_OFF)
-      .mockResolvedValueOnce({ id: 'root-image-init_boot-9', kind: 'initBoot', fileName: 'init_boot.img', sizeBytes: 1024 })
+      .mockResolvedValueOnce({ id: 'root-image-init_boot-9', kind: 'initBoot', fileName: 'init_boot.img',
+        partitionName: 'init_boot', sizeBytes: 1024 })
       .mockResolvedValueOnce({ artifactId: 'root-patch-init_boot-9', partition: 'init_boot', fileName: 'patched_init_boot.img', sizeBytes: 1028 })
       .mockResolvedValueOnce({ partition: 'init_boot', taskCount: 1 })
       .mockResolvedValueOnce({ commandCount: 1, executedCount: 1 });
@@ -289,7 +291,8 @@ describe('RootPage', () => {
       .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
       .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
       .mockResolvedValueOnce(OTA_CHECK_OFF)
-      .mockResolvedValueOnce({ id: 'root-image-init_boot-auto', kind: 'initBoot', fileName: 'init_boot.img', sizeBytes: 1024 })
+      .mockResolvedValueOnce({ id: 'root-image-init_boot-auto', kind: 'initBoot', fileName: 'init_boot.img',
+        partitionName: 'init_boot', sizeBytes: 1024 })
       .mockResolvedValueOnce({ managerLabel: 'Vivo KSU', effectiveKmi: 'android14-6.1', canPatch: true, canRunAutomatic: true, summary: 'ROOT 前置条件已就绪' })
       .mockResolvedValueOnce({ flashedPartitionCount: 1, commandCount: 2, status: 'ROOT 全自动流程已完成。' });
 
@@ -326,7 +329,8 @@ describe('RootPage', () => {
       .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
       .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
       .mockResolvedValueOnce(OTA_CHECK_OFF)
-      .mockResolvedValueOnce({ id: 'root-image-vendor_boot-9', kind: 'vendorBoot', fileName: 'vendor_boot.img', sizeBytes: 2048 })
+      .mockResolvedValueOnce({ id: 'root-image-vendor_boot-9', kind: 'vendorBoot', fileName: 'vendor_boot.img',
+        partitionName: 'vendor_boot', sizeBytes: 2048 })
       .mockResolvedValueOnce({ artifactId: 'root-patch-vendor_boot-9', partition: 'vendor_boot', fileName: 'patched_vendor_boot.img', sizeBytes: 2052 });
 
     renderRoot();
@@ -350,8 +354,10 @@ describe('RootPage', () => {
       .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
       .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
       .mockResolvedValueOnce(OTA_CHECK_OFF)
-      .mockResolvedValueOnce({ id: 'root-image-init_boot-official', kind: 'initBoot', fileName: 'init_boot.img', sizeBytes: 1024 })
-      .mockResolvedValueOnce({ id: 'root-image-vendor_boot-official', kind: 'vendorBoot', fileName: 'vendor_boot.img', sizeBytes: 2048 })
+      .mockResolvedValueOnce({ id: 'root-image-init_boot-official', kind: 'initBoot', fileName: 'init_boot.img',
+        partitionName: 'init_boot', sizeBytes: 1024 })
+      .mockResolvedValueOnce({ id: 'root-image-vendor_boot-official', kind: 'vendorBoot', fileName: 'vendor_boot.img',
+        partitionName: 'vendor_boot', sizeBytes: 2048 })
       .mockResolvedValueOnce({ managerLabel: '官方 KernelSU', effectiveKmi: 'android14-6.1', canPatch: true, canRunAutomatic: true, summary: 'ROOT 前置条件已就绪' })
       .mockResolvedValueOnce({ flashedPartitionCount: 2, commandCount: 3, status: 'ROOT 全自动流程已完成。' });
 
@@ -392,7 +398,8 @@ describe('RootPage', () => {
       .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
       .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
       .mockResolvedValueOnce(OTA_CHECK_OFF)
-      .mockResolvedValueOnce({ id: 'root-image-init_boot-busy', kind: 'initBoot', fileName: 'init_boot.img', sizeBytes: 1024 })
+      .mockResolvedValueOnce({ id: 'root-image-init_boot-busy', kind: 'initBoot', fileName: 'init_boot.img',
+        partitionName: 'init_boot', sizeBytes: 1024 })
       .mockImplementationOnce(() => new Promise((resolve) => {
         resolveRootPatch = resolve;
       }));
@@ -454,7 +461,8 @@ describe('RootPage', () => {
       .mockResolvedValueOnce(OTA_CHECK_ON)
       .mockResolvedValueOnce({
         sourceLabel: '已从 PD2417 OTA 提取',
-        initBoot: { id: 'root-image-init_boot-50', kind: 'initBoot', fileName: 'init_boot.img', sizeBytes: 8388608 },
+        initBoot: { id: 'root-image-init_boot-50', kind: 'initBoot', fileName: 'init_boot.img',
+        partitionName: 'init_boot', sizeBytes: 8388608 },
         vendorBoot: null,
       });
 

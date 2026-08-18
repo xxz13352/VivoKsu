@@ -143,7 +143,11 @@ fn probe_distinguishes_payload_zip_from_direct_image_zip() {
         RemoteFirmwareKind::PayloadZip
     );
 
-    let direct = build_zip_bytes(&[("boot.img", b"boot"), ("vendor_boot.img", b"vb")], false, false);
+    let direct = build_zip_bytes(
+        &[("boot.img", b"boot"), ("vendor_boot.img", b"vb")],
+        false,
+        false,
+    );
     let url2 = common::spawn_range_server(direct);
     assert_eq!(
         probe_remote_kind(&url2, None, &mut || canceled).expect("direct zip"),
@@ -154,7 +158,11 @@ fn probe_distinguishes_payload_zip_from_direct_image_zip() {
 #[test]
 fn list_zip_members_reports_entries_without_directories() {
     let zip = build_zip_bytes(
-        &[("boot.img", b"boot"), ("dir/vendor_boot.img", b"vb"), ("payload.bin", b"CrAU")],
+        &[
+            ("boot.img", b"boot"),
+            ("dir/vendor_boot.img", b"vb"),
+            ("payload.bin", b"CrAU"),
+        ],
         false,
         false,
     );
@@ -191,7 +199,7 @@ fn extract_direct_zip_fetches_only_wanted_members() {
         &["init_boot", "boot", "vendor_boot"],
         &out,
         &mut || canceled,
-        &|_, _| {},
+        &mut |_, _| {},
     )
     .expect("extract");
 
@@ -222,7 +230,7 @@ fn no_wanted_partition_returns_empty_result_and_app_layer_decides() {
         &["boot", "vendor_boot"],
         &out,
         &mut || canceled,
-        &|_, _| {},
+        &mut |_, _| {},
     )
     .expect("no wanted members is not an extract error");
     // 无任何命中：返回空结果，由上层（root_ota）判定无 boot 分区并给出引导。
@@ -246,7 +254,7 @@ fn extract_reports_progress_monotonically() {
         &["boot"],
         &out,
         &mut || canceled,
-        &move |name, bytes| sink.lock().unwrap().push((name.to_string(), bytes)),
+        &mut move |name, bytes| sink.lock().unwrap().push((name.to_string(), bytes)),
     )
     .expect("extract");
 
@@ -276,9 +284,35 @@ fn cancellation_aborts_extraction_with_interrupted_read() {
         &["boot"],
         &out,
         &mut || canceled,
-        &|_, _| {},
+        &mut |_, _| {},
     );
     // 前置取消在 reader 初始化时即返回 Cancelled。
+    assert!(matches!(result, Err(RemoteFirmwareError::Cancelled)));
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn mid_extraction_cancellation_reports_cancelled_not_archive_error() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let boot = vec![9u8; 2 * 1024 * 1024];
+    let zip = build_zip_bytes(&[("boot.img", &boot)], false, false);
+    let url = common::spawn_range_server(zip);
+    let out = scratch_dir("midcancel");
+    let canceled = Arc::new(AtomicBool::new(false));
+    let canceled_for_progress = canceled.clone();
+    let result = extract_zip_members(
+        &url,
+        None,
+        &["boot"],
+        &out,
+        &mut move || canceled.load(Ordering::Acquire),
+        &mut move |_name, _bytes| {
+            // 首次进度回调后触发取消，模拟提取中途用户停止。
+            canceled_for_progress.store(true, Ordering::Release);
+        },
+    );
+    // 中途取消必须被识别为 Cancelled，而非 Archive/InvalidFormat。
     assert!(matches!(result, Err(RemoteFirmwareError::Cancelled)));
     fs::remove_dir_all(&out).ok();
 }
@@ -298,11 +332,14 @@ fn zip64_archive_is_supported() {
         &["boot", "vendor_boot"],
         &out,
         &mut || canceled,
-        &|_, _| {},
+        &mut |_, _| {},
     )
     .expect("zip64 extract should work");
     assert_eq!(extracted.len(), 2);
-    let names: Vec<_> = extracted.iter().map(|i| i.partition_name.as_str()).collect();
+    let names: Vec<_> = extracted
+        .iter()
+        .map(|i| i.partition_name.as_str())
+        .collect();
     assert!(names.contains(&"boot"));
     assert!(names.contains(&"vendor_boot"));
     for image in extracted {
