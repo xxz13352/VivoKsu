@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "resources": [
+    {
+      "source": "src/VivoKsu.App/platform-tools/adb.exe",
+      "destination": "platform-tools/adb.exe",
+      "sha256": "2e8a440a90ff1b15c8cf93eaf47fbb8f95fc0d14e9fa665dd9f4a2596387bbbf"
+    },
+    {
+      "source": "src/VivoKsu.App/platform-tools/AdbWinApi.dll",
+      "destination": "platform-tools/AdbWinApi.dll",
+      "sha256": "9a56e72fe1372cb722a80c00b79dcecf2b37165884e470ed05f00c668c0043b0"
+    },
+    {
+      "source": "src/VivoKsu.App/platform-tools/AdbWinUsbApi.dll",
+      "destination": "platform-tools/AdbWinUsbApi.dll",
+      "sha256": "5e77ccb2f25cd3a97553745adf1cd28a5fe8137cf64613b7fef9c6f92ff91f37"
+    },
+    {
+      "source": "src/VivoKsu.App/platform-tools/fastboot.exe",
+      "destination": "platform-tools/fastboot.exe",
+      "sha256": "77d44117bf98b9716e2bd28fbd148ee34ab22e560fbb9c146fe39e4381bccea4"
+    },
+    {
+      "source": "src/VivoKsu.App/platform-tools/PLATFORM_TOOLS.SHA256",
+      "destination": "platform-tools/PLATFORM_TOOLS.SHA256",
+      "sha256": "ba3ba3c3105d4f6a86b627839b48e00ca2ffef23c3bd41d5ae925931d9e40d11"
+    },
+    {
+      "source": "src/VivoKsu.App/drivers/vivo-usb-driver.7z",
+      "destination": "drivers/vivo-usb-driver.7z",
+      "sha256": "22fa20b21004a7ae76668716ef51e22fd9e8e9eeea226a035ad23157441b60ea"
+    },
+    {
+      "source": "src/VivoKsu.App/root-tools/magiskboot.so",
+      "destination": "root-tools/magiskboot.so",
+      "sha256": "d7440e2cd89899426e809554bf793baef9804ccbe5a52ce34a8b6242725d3c77"
+    }
+  ]
+}

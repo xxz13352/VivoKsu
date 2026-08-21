@@ -1,0 +1,9 @@
+# VMProtect project policy
+#
+# This repository intentionally stores no vendor project export because those exports
+# bind to a local binary path and can contain vendor-specific protected-function IDs.
+# The release environment supplies its project arguments through NWFLASH_VMP_ARGUMENTS.
+# Only small Rust build identity, integrity, authorization-response binding, and local
+# policy-dispatch functions may be selected. Tauri entry points, WebView, Tokio, event
+# bridges, process control, downloads, extraction loops, and third-party code are excluded.
+# Do not enable virtual-machine detection or a virtual-machine execution denial policy.
