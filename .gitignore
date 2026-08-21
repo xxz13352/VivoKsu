@@ -11,6 +11,11 @@ cloudflare/node_modules/
 cloudflare/.wrangler/
 cloudflare/.dev.vars
 
+# ---- Node / Tauri generated output ----
+**/node_modules/
+src/Nwflash.Desktop/dist/
+src/Nwflash.Desktop/src-tauri/gen/
+
 # ---- Rust (fastboot-rs) ----
 target/
 
