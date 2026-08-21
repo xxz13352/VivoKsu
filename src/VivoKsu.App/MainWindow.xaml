@@ -35,7 +35,7 @@
             <Border.Clip>
               <RectangleGeometry Rect="0,0,36,36" RadiusX="7" RadiusY="7"/>
             </Border.Clip>
-            <Image Source="pack://application:,,,/Assets/logo.jpg" Stretch="UniformToFill"/>
+            <Image Source="pack://application:,,,/VivoKsu.App;component/Assets/logo.jpg" Stretch="UniformToFill"/>
           </Border>
           <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="奶蛙Flash" FontSize="18" FontWeight="Bold"/>
