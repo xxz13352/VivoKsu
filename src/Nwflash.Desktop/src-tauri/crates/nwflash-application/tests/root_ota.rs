@@ -3,12 +3,34 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use nwflash_application::{RootOtaExtractOptions, RootOtaService};
+use nwflash_infrastructure::OtaDiskSpaceProvider;
 use zip4::write::SimpleFileOptions;
 use zip4::{CompressionMethod, ZipWriter};
+
+#[derive(Clone)]
+struct FixedDiskSpace(u64);
+
+impl OtaDiskSpaceProvider for FixedDiskSpace {
+    fn available_bytes(&self, _destination: &Path) -> Result<u64, String> {
+        Ok(self.0)
+    }
+}
+
+struct RecordingDiskSpace {
+    queries: Arc<AtomicUsize>,
+}
+
+impl OtaDiskSpaceProvider for RecordingDiskSpace {
+    fn available_bytes(&self, _destination: &Path) -> Result<u64, String> {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        Ok(1)
+    }
+}
 
 /// 起一个 Range mock server，返回 `http://127.0.0.1:<port>/`。
 fn range_server(data: Vec<u8>) -> String {
@@ -107,6 +129,19 @@ fn staging() -> PathBuf {
     RootOtaService::create_staging_root().expect("staging root")
 }
 
+fn write_recording_payload_dumper(root: &std::path::Path, record: &std::path::Path) -> PathBuf {
+    let executable = root.join("payload_dumper.cmd");
+    fs::write(
+        &executable,
+        format!(
+            "@echo off\r\n>\"{}\" echo %~1\r\nif \"%~2\"==\"--metadata\" goto metadata\r\nset output=\r\nset partitions=\r\n:next\r\nif \"%~1\"==\"\" goto extract\r\nif \"%~1\"==\"-i\" set partitions=%~2\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:extract\r\nfor %%p in (%partitions:,= %) do >\"%output%\\%%p.img\" echo payload\r\nexit /b 0\r\n:metadata\r\n>\"%~4\\metadata.json\" echo {{\"partitions\":[{{\"partition_name\":\"boot\",\"size_in_bytes\":9,\"compression_type\":\"none\"}},{{\"partition_name\":\"vendor_boot\",\"size_in_bytes\":9,\"compression_type\":\"none\"}}]}}\r\nexit /b 0\r\n",
+            record.display()
+        ),
+    )
+    .expect("recording payload tool should be written");
+    executable
+}
+
 #[test]
 fn payload_kind_requires_payload_dumper() {
     let zip = build_zip(&[("payload.bin", b"CrAU\x01"), ("care_map.pb", b"map")]);
@@ -130,6 +165,39 @@ fn payload_kind_requires_payload_dumper() {
 }
 
 #[test]
+fn payload_root_extraction_passes_the_remote_url_directly_to_payload_dumper() {
+    let url = range_server(b"CrAU\x01remote-payload".to_vec());
+    let root = staging();
+    let record = root.join("payload-source.txt");
+    let executable = write_recording_payload_dumper(&root, &record);
+    let canceled = false;
+
+    let images = RootOtaService::new()
+        .extract(
+            RootOtaExtractOptions {
+                url: &url,
+                payload_dumper: Some(&executable),
+                staging_root: &root,
+            },
+            || canceled,
+            |_| {},
+            |_| {},
+        )
+        .expect("payload root extraction should use the remote URL directly");
+
+    assert_eq!(
+        fs::read_to_string(&record)
+            .expect("payload source should be recorded")
+            .trim(),
+        url
+    );
+    assert_eq!(images.boot_partition_name, "boot");
+    assert!(images.boot_image.is_some());
+    assert!(images.vendor_boot.is_some());
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn direct_zip_extracts_boot_and_vendor_boot() {
     let boot = vec![42u8; 300 * 1024];
     let vb = vec![7u8; 200 * 1024];
@@ -137,7 +205,9 @@ fn direct_zip_extracts_boot_and_vendor_boot() {
     let url = range_server(zip);
     let root = staging();
     let canceled = false;
-    let images = RootOtaService::new()
+    let images = RootOtaService::with_disk_space(Arc::new(FixedDiskSpace(
+        (boot.len() + vb.len()) as u64,
+    )))
         .extract(
             RootOtaExtractOptions {
                 url: &url,
@@ -156,6 +226,67 @@ fn direct_zip_extracts_boot_and_vendor_boot() {
     let vb_image = images.vendor_boot.expect("vendor_boot image");
     assert_eq!(vb_image.size_bytes, vb.len() as i64);
     assert_eq!(fs::read(&vb_image.path).expect("read vb img"), vb);
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn direct_zip_rejects_insufficient_extraction_capacity_before_creating_images() {
+    let boot = vec![42u8; 300 * 1024];
+    let vendor_boot = vec![7u8; 200 * 1024];
+    let zip = build_zip(&[("boot.img", &boot), ("vendor_boot.img", &vendor_boot)]);
+    let url = range_server(zip);
+    let root = staging();
+    let service = RootOtaService::with_disk_space(Arc::new(FixedDiskSpace(1)));
+
+    let error = service
+        .extract(
+            RootOtaExtractOptions {
+                url: &url,
+                payload_dumper: None,
+                staging_root: &root,
+            },
+            || false,
+            |_| {},
+            |_| {},
+        )
+        .expect_err("direct zip must reserve extraction capacity before writing");
+
+    assert!(error.to_string().contains("磁盘空间不足"));
+    assert!(!root.join("images").exists());
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn direct_zip_cancellation_after_member_listing_precedes_capacity_preflight() {
+    let zip = build_zip(&[("boot.img", b"boot"), ("vendor_boot.img", b"vendor_boot")]);
+    let url = range_server(zip);
+    let root = staging();
+    let capacity_queries = Arc::new(AtomicUsize::new(0));
+    let service = RootOtaService::with_disk_space(Arc::new(RecordingDiskSpace {
+        queries: Arc::clone(&capacity_queries),
+    }));
+    let cancellation_checks = Arc::new(AtomicUsize::new(0));
+    let cancellation_checks_for_extract = Arc::clone(&cancellation_checks);
+
+    let error = service
+        .extract(
+            RootOtaExtractOptions {
+                url: &url,
+                payload_dumper: None,
+                staging_root: &root,
+            },
+            move || {
+                cancellation_checks_for_extract.fetch_add(1, Ordering::SeqCst) >= 17
+            },
+            |_| {},
+            |_| {},
+        )
+        .expect_err("cancellation after listing must win over capacity validation");
+
+    assert!(error.to_string().contains("取消"));
+    assert_eq!(cancellation_checks.load(Ordering::SeqCst), 18);
+    assert_eq!(capacity_queries.load(Ordering::SeqCst), 0);
+    assert!(!root.join("images").exists());
     fs::remove_dir_all(&root).ok();
 }
 

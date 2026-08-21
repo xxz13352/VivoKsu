@@ -1,18 +1,44 @@
 mod common;
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nwflash_infrastructure::remote_firmware::{
-    extract_zip_members, list_zip_members, probe_remote_kind, RangeHttpReader, RemoteFirmwareError,
-    RemoteFirmwareKind,
+    extract_zip_members, list_zip_members, probe_remote_kind, validate_http_url, RangeHttpReader,
+    RemoteFirmwareError, RemoteFirmwareKind,
 };
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 static DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn http_url_validation_accepts_http_and_https_and_rejects_other_inputs_without_echoing_url() {
+    let signed = "https://firmware.example.test/ota.zip?token=secret#fragment";
+    assert!(validate_http_url(signed).is_ok());
+    assert!(validate_http_url("http://firmware.example.test/ota.zip").is_ok());
+
+    for invalid in [
+        "",
+        "   ",
+        "not a URL",
+        "https://",
+        "ftp://firmware.example.test/ota.zip",
+    ] {
+        let error = validate_http_url(invalid).expect_err("invalid URL should be rejected");
+        assert!(matches!(error, RemoteFirmwareError::InvalidUrl(_)));
+        if !invalid.trim().is_empty() {
+            assert!(
+                !error.to_string().contains(invalid.trim()),
+                "validation error must not echo the complete URL"
+            );
+        }
+    }
+}
 
 fn scratch_dir(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -104,6 +130,71 @@ fn range_reader_rejects_a_server_that_ignores_range() {
         Ok(_) => panic!("non-range server must be rejected"),
         Err(err) => assert!(matches!(err, RemoteFirmwareError::RangeUnsupported)),
     }
+}
+
+#[test]
+fn probe_rejects_an_oversized_partial_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("malformed range server should bind");
+    let address = listener
+        .local_addr()
+        .expect("malformed range server address should be available");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let body = b"CrAU-this-body-is-not-the-requested-four-byte-range";
+                let header = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4096\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body);
+            });
+        }
+    });
+
+    let error = probe_remote_kind(&format!("http://{address}/"), None, &mut || false)
+        .expect_err("a Range response larger than the requested interval must be rejected");
+
+    assert!(matches!(error, RemoteFirmwareError::RangeUnsupported));
+}
+
+#[test]
+fn range_reader_rejects_an_oversized_partial_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("malformed range server should bind");
+    let address = listener
+        .local_addr()
+        .expect("malformed range server address should be available");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]);
+                if request.to_ascii_lowercase().contains("range: bytes=0-0") {
+                    let header = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/4096\r\nContent-Length: 1\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(b"P");
+                } else {
+                    let body = vec![b'Z'; 4097];
+                    let header = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4095/4096\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{address}/");
+    let mut is_canceled = || false;
+    let mut reader = RangeHttpReader::new(&url, None, &mut is_canceled)
+        .expect("initial one-byte Range response should open the reader");
+    let mut byte = [0u8; 1];
+    let error = reader
+        .read(&mut byte)
+        .expect_err("a Range reader must reject a body larger than the requested interval");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
 }
 
 #[test]

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0.json",
+  "productName": "奶蛙Flash",
+  "version": "1.0.1",
+  "identifier": "cc.cd.nwflash.desktop",
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "奶蛙Flash",
+        "label": "main",
+        "width": 400,
+        "height": 564,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": [
+      "resources/platform-tools/adb.exe",
+      "resources/platform-tools/AdbWinApi.dll",
+      "resources/platform-tools/AdbWinUsbApi.dll",
+      "resources/platform-tools/fastboot.exe",
+      "resources/platform-tools/PLATFORM_TOOLS.SHA256",
+      "resources/drivers/vivo-usb-driver.7z",
+      "resources/root-tools/magiskboot.so"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": true
+      }
+    }
+  },
+  "plugins": {}
+}

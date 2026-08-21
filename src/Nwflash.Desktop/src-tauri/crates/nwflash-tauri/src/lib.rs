@@ -4,8 +4,8 @@ use std::{
 };
 
 use nwflash_application::{
-    OperationAuthorization, OperationCoordinator, OperationLogger, OperationPermissionGate,
-    SessionLifecycle,
+    OperationAuthorization, OperationCoordinator, OperationCoordinatorError, OperationIdleLease,
+    OperationLogger, OperationPermissionGate, SessionLifecycle,
 };
 use nwflash_domain::{DomainError, OperationKind};
 use nwflash_infrastructure::api_client::{CloudflareError, HeartbeatResult};
@@ -19,6 +19,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::time::sleep;
 
 mod commands;
+#[allow(dead_code)]
+mod session_capabilities;
 
 #[doc(hidden)]
 pub use commands::mirror::{start_plan, MirrorRuntime};
@@ -28,6 +30,12 @@ pub const APP_LABEL: &str = "奶蛙Flash";
 const SESSION_FORCE_EXIT_EVENT: &str = "session:force-exit";
 const SESSION_UPDATE_REQUIRED_EVENT: &str = "session:update-required";
 const SESSION_SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+
+/// Mirrors `ServerOperationGate.AuthorizeTimeout` in the WPF build.  Server
+/// authorization is advisory: a ban answers "denied", but an unreachable or slow
+/// server must not block device work, and must never pin the single-permit
+/// operation gate while a request hangs.
+const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 enum SessionLifecycleEvent {
@@ -47,11 +55,13 @@ pub struct AppState {
     pub firmware_artifacts: commands::firmware::FirmwareArtifactRuntime,
     pub firmware_extraction: commands::firmware::FirmwareExtractionRuntime,
     pub payload_inspection: commands::firmware::PayloadInspectionRuntime,
+    pub remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime,
     pub(crate) firmware_progress: commands::firmware::FirmwareProgressRuntime,
     pub prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
     pub prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
     pub partition_workspace: commands::partitions::PartitionWorkspaceRuntime,
     pub mirror_runtime: commands::mirror::MirrorRuntime,
+    pub(crate) session_capabilities: Arc<session_capabilities::SessionCapabilityScope>,
     pub root_image_runtime: commands::root::RootImageRuntime,
     pub root_patched_artifacts: commands::root::RootPatchedArtifactRuntime,
     pub root_ota_runtime: commands::root_ota::RootOtaRuntime,
@@ -75,6 +85,21 @@ impl CloudflareOperationPermissionGate {
     }
 }
 
+/// Maps an authorization request failure onto a permission decision.
+///
+/// Server authorization is advisory (`ServerOperationGate` in the WPF build):
+/// only an explicit 401 (session revoked) or 426 (client too old) blocks the
+/// user.  Network faults and 5xx default to allow, because an unreachable
+/// server must not stop someone from flashing a phone that is already in hand;
+/// a banned account is still force-exited by the heartbeat within seconds.
+fn authorization_for_error(error: &CloudflareError) -> OperationAuthorization {
+    match error.status_code() {
+        Some(401) => OperationAuthorization::deny("登录已失效，请联系管理员。"),
+        Some(426) => OperationAuthorization::deny(format!("需要更新 {APP_LABEL} 后才能继续使用。")),
+        _ => OperationAuthorization::allow(),
+    }
+}
+
 impl OperationPermissionGate for CloudflareOperationPermissionGate {
     fn authorize(
         &self,
@@ -92,14 +117,20 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
                 .ok_or_else(|| {
                     DomainError::AuthorizationDenied("未登录，无法执行受控操作。".to_string())
                 })?;
-            let authorization = client
-                .authorize_operation(&token, &format!("{operation:?}"), &title)
-                .await
-                .map_err(|error| DomainError::RemoteApi(error.to_string()))?;
-            Ok(OperationAuthorization {
-                allowed: authorization.allowed,
-                reason: authorization.reason,
-            })
+
+            let operation_label = format!("{operation:?}");
+            let request = client.authorize_operation(&token, &operation_label, &title);
+            match tokio::time::timeout(AUTHORIZE_TIMEOUT, request).await {
+                Ok(Ok(authorization)) => Ok(OperationAuthorization {
+                    allowed: authorization.allowed,
+                    reason: authorization.reason,
+                }),
+                // Only an explicit "this account may not do this" answer blocks the
+                // user; everything else defaults to allow.
+                Ok(Err(error)) => Ok(authorization_for_error(&error)),
+                // Black-holed request: never hold the global operation gate for it.
+                Err(_) => Ok(OperationAuthorization::allow()),
+            }
         })
     }
 }
@@ -118,8 +149,6 @@ impl AppState {
             let heartbeat_client = client.clone();
             std::sync::Arc::new(move |token: String, session_id: String, active: bool| {
                 let heartbeat_client = heartbeat_client.clone();
-                let token = token;
-                let session_id = session_id;
                 let future: futures::future::BoxFuture<
                     'static,
                     Result<HeartbeatResult, CloudflareError>,
@@ -142,11 +171,13 @@ impl AppState {
         });
 
         let operation_log_store = Arc::new(OperationLogStore::with_default_path(500));
+        operation_log_store.start_new_session();
         let operation_log_buffer = Arc::new(OperationLogBuffer {
             entries: operation_log_store.clone(),
         });
         let usage_reporter =
             usage_reporter::UsageLogReporter::new(client.clone(), session_token.clone());
+        let session_capabilities = Arc::new(session_capabilities::SessionCapabilityScope::new());
 
         Self {
             client: client.clone(),
@@ -167,16 +198,30 @@ impl AppState {
             firmware_artifacts: commands::firmware::FirmwareArtifactRuntime::new(),
             firmware_extraction: commands::firmware::FirmwareExtractionRuntime::new(),
             payload_inspection: commands::firmware::PayloadInspectionRuntime::new(),
+            remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime::new(),
             firmware_progress: commands::firmware::FirmwareProgressRuntime::new(),
-            prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime::new(
+            prepared_firmware_artifact:
+                commands::quick_flash::PreparedFirmwareArtifactRuntime::with_scope(
+                    session_capabilities.clone(),
+                ),
+            prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime::with_scope(
+                session_capabilities.clone(),
             ),
-            prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime::new(),
             partition_workspace: commands::partitions::PartitionWorkspaceRuntime::new(),
             mirror_runtime: commands::mirror::MirrorRuntime::new(),
-            root_image_runtime: commands::root::RootImageRuntime::new(),
-            root_patched_artifacts: commands::root::RootPatchedArtifactRuntime::new(),
-            root_ota_runtime: commands::root_ota::RootOtaRuntime::new(),
-            safe_flash_runtime: commands::safe_flash::SafeFlashRuntime::new(),
+            session_capabilities: session_capabilities.clone(),
+            root_image_runtime: commands::root::RootImageRuntime::with_scope(
+                session_capabilities.clone(),
+            ),
+            root_patched_artifacts: commands::root::RootPatchedArtifactRuntime::with_scope(
+                session_capabilities.clone(),
+            ),
+            root_ota_runtime: commands::root_ota::RootOtaRuntime::with_scope(
+                session_capabilities.clone(),
+            ),
+            safe_flash_runtime: commands::safe_flash::SafeFlashRuntime::with_scope(
+                session_capabilities,
+            ),
             session_events_rx: Mutex::new(Some(session_events_rx)),
             operation_log_store,
             session_lifecycle: SessionLifecycle::new(
@@ -253,19 +298,24 @@ impl AppState {
             guard.take()
         };
 
-        let coordinator = self.operation_coordinator.clone();
         if let Some(mut receiver) = receiver.take() {
             spawn(async move {
                 while let Some(event) = receiver.recv().await {
                     match event {
                         SessionLifecycleEvent::ForceExit(reason) => {
-                            finalize_operation_before_exit(&coordinator).await;
+                            let state = app_handle.state::<AppState>();
+                            if !finalize_operation_before_exit(&state).await {
+                                continue;
+                            }
                             let _ = app_handle
                                 .emit(SESSION_FORCE_EXIT_EVENT, SessionForceExitPayload { reason });
                             app_handle.exit(0);
                         }
                         SessionLifecycleEvent::UpdateRequired(update) => {
-                            finalize_operation_before_exit(&coordinator).await;
+                            let state = app_handle.state::<AppState>();
+                            if !finalize_operation_before_exit(&state).await {
+                                continue;
+                            }
                             let _ = app_handle.emit(
                                 SESSION_UPDATE_REQUIRED_EVENT,
                                 SessionUpdateRequiredPayload::from(update),
@@ -299,15 +349,51 @@ impl AppState {
             }
         });
     }
+
+    pub(crate) fn revoke_root_capabilities(&self, _idle_lease: &OperationIdleLease) {
+        let owned_roots = self.session_capabilities.invalidate(|| {
+            let mut owned_roots = self.root_image_runtime.clear_owned();
+            owned_roots.extend(self.root_patched_artifacts.clear_owned());
+            owned_roots.extend(self.root_ota_runtime.clear_owned());
+            owned_roots.extend(self.safe_flash_runtime.clear_owned());
+            owned_roots.extend(self.firmware_artifacts.clear_owned());
+            self.prepared_firmware_artifact.clear();
+            self.prepared_dual_slot.clear();
+            owned_roots
+        });
+
+        for owned_root in owned_roots {
+            let _ = std::fs::remove_dir_all(owned_root);
+        }
+    }
 }
 
-async fn finalize_operation_before_exit(coordinator: &OperationCoordinator) {
-    coordinator.cancel_current().await;
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+async fn finalize_operation_before_exit(state: &AppState) -> bool {
+    state.operation_coordinator.cancel_current().await;
 
     let mut waited = Duration::from_millis(0);
-    while coordinator.is_busy() && waited < SESSION_SHUTDOWN_WAIT {
-        sleep(Duration::from_millis(50)).await;
-        waited += Duration::from_millis(50);
+    loop {
+        match state.operation_coordinator.try_acquire_idle() {
+            Ok(idle_lease) => {
+                state.revoke_root_capabilities(&idle_lease);
+                return true;
+            }
+            Err(OperationCoordinatorError::InProgress) => {
+                sleep(Duration::from_millis(50)).await;
+                waited += Duration::from_millis(50);
+                if waited >= SESSION_SHUTDOWN_WAIT {
+                    state.operation_coordinator.cancel_current().await;
+                    waited = Duration::from_millis(0);
+                }
+            }
+            Err(_) => return false,
+        }
     }
 }
 
@@ -381,6 +467,53 @@ struct OperationLogBuffer {
     entries: Arc<OperationLogStore>,
 }
 
+fn normalize_operation_log_message(
+    level: nwflash_domain::OperationLogLevel,
+    message: String,
+) -> Option<String> {
+    let message = message.trim().to_string();
+    if message.is_empty() || message.starts_with("准备 VIVO 线刷") {
+        return None;
+    }
+
+    if level == nwflash_domain::OperationLogLevel::Info
+        && matches!(
+            message.as_str(),
+            "连接服务器"
+                | "正在连接服务器"
+                | "连接服务端"
+                | "正在连接服务端"
+                | "请求服务"
+                | "正在请求服务"
+                | "请求服务器"
+                | "正在请求服务器"
+                | "检测服务器"
+                | "正在检测服务器"
+                | "检测服务器 OTA"
+                | "检测服务器 OTA完成。"
+                | "检测服务器 OTA已取消。"
+                | "正在解析服务器 OTA"
+                | "正在获取在线 OTA 信息"
+                | "正在请求 OTA 服务器"
+                | "正在请求 OTA 服务端"
+        )
+    {
+        return None;
+    }
+
+    Some(match message.as_str() {
+        "正在解析服务器 OTA"
+        | "正在获取在线 OTA 信息"
+        | "正在请求 OTA 服务器"
+        | "正在请求 OTA 服务端" => "正在请求服务器".to_string(),
+        "检测服务器 OTA" => "请求服务器".to_string(),
+        "正在下载在线 OTA" => "正在下载在线固件".to_string(),
+        "提取服务器 OTA 分区" => "提取服务器固件分区".to_string(),
+        "正在探测 OTA 格式" => "正在探测固件格式".to_string(),
+        _ => message.replace("OTA", "固件"),
+    })
+}
+
 impl OperationLogger for OperationLogBuffer {
     fn write(
         &self,
@@ -388,20 +521,68 @@ impl OperationLogger for OperationLogBuffer {
         message: String,
         operation_id: Option<String>,
     ) {
-        self.entries.write(level, message, operation_id);
+        if let Some(message) = normalize_operation_log_message(level, message) {
+            self.entries.write(level, message, operation_id);
+        }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod device_monitor_tests {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+    use std::{
+        fs,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::{SystemTime, UNIX_EPOCH},
     };
 
-    use nwflash_domain::OperationKind;
+    use futures::future::BoxFuture;
+    use nwflash_application::{
+        OperationAuthorization, OperationCoordinator, OperationLogger, OperationPermissionGate,
+    };
+    use nwflash_domain::{DomainError, OperationKind, OperationLogLevel};
+    use tokio::sync::Notify;
 
-    use super::{should_compensate_device_refresh, AppState};
+    use super::{
+        finalize_operation_before_exit, should_compensate_device_refresh, AppState,
+        OperationLogBuffer,
+    };
+
+    struct DenyAllOperations;
+
+    struct BlockingAuthorization {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl OperationPermissionGate for DenyAllOperations {
+        fn authorize(
+            &self,
+            _operation: OperationKind,
+            _title: String,
+        ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+            Box::pin(async { Ok(OperationAuthorization::deny("测试授权拒绝")) })
+        }
+    }
+
+    impl OperationPermissionGate for BlockingAuthorization {
+        fn authorize(
+            &self,
+            _operation: OperationKind,
+            _title: String,
+        ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(OperationAuthorization::allow())
+            })
+        }
+    }
 
     #[test]
     fn operation_completion_requests_one_compensating_device_refresh() {
@@ -420,17 +601,161 @@ mod device_monitor_tests {
             .is_err());
     }
 
-    #[tokio::test]
-    async fn app_state_rejects_flashing_without_cloudflare_operation_authorization() {
+    #[test]
+    fn app_state_revocation_revokes_firmware_artifacts_and_removes_only_owned_staging() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be available")
+            .as_nanos();
+        let external_root = std::env::temp_dir().join(format!("nwflash-external-artifact-{nonce}"));
+        let owned_root = std::env::temp_dir().join(format!("nwflash-owned-artifact-{nonce}"));
+        fs::create_dir_all(&external_root).expect("external fixture root should be created");
+        fs::create_dir_all(&owned_root).expect("owned staging root should be created");
+        fs::write(external_root.join("external.img"), [1, 2, 3])
+            .expect("external fixture image should be written");
+        fs::write(owned_root.join("boot.img"), [1, 2, 3])
+            .expect("owned staging image should be written");
+
         let state = AppState::new();
+        state.session_capabilities.activate();
+        state.firmware_artifacts.replace(
+            nwflash_domain::QuickFlashPartition::Boot,
+            nwflash_domain::FlashImageInfo {
+                path: external_root
+                    .join("external.img")
+                    .to_string_lossy()
+                    .into_owned(),
+                size_bytes: 3,
+            },
+            external_root.clone(),
+        );
+        let artifact_id = crate::commands::firmware::register_owned_firmware_artifact_for_test(
+            &state.firmware_artifacts,
+            nwflash_domain::QuickFlashPartition::Boot,
+            nwflash_domain::FlashImageInfo {
+                path: owned_root.join("boot.img").to_string_lossy().into_owned(),
+                size_bytes: 3,
+            },
+            owned_root.clone(),
+        );
+        let idle_lease = state
+            .operation_coordinator
+            .try_acquire_idle()
+            .expect("idle state should permit session revocation");
+
+        state.revoke_root_capabilities(&idle_lease);
+
+        let artifact_revoked = state.firmware_artifacts.get(&artifact_id).is_err();
+        let owned_root_removed = !owned_root.exists();
+        let external_root_preserved = external_root.is_dir();
+        let _ = fs::remove_dir_all(&owned_root);
+        let _ = fs::remove_dir_all(&external_root);
+
+        assert!(artifact_revoked);
+        assert!(owned_root_removed);
+        assert!(external_root_preserved);
+    }
+
+    #[test]
+    fn app_state_revocation_revokes_a_current_external_firmware_artifact_without_deleting_it() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be available")
+            .as_nanos();
+        let external_root =
+            std::env::temp_dir().join(format!("nwflash-current-external-artifact-{nonce}"));
+        let image_path = external_root.join("boot.img");
+        fs::create_dir_all(&external_root).expect("external fixture root should be created");
+        fs::write(&image_path, [1, 2, 3]).expect("external fixture image should be written");
+
+        let state = AppState::new();
+        state.session_capabilities.activate();
+        let artifact_id = state.firmware_artifacts.replace(
+            nwflash_domain::QuickFlashPartition::Boot,
+            nwflash_domain::FlashImageInfo {
+                path: image_path.to_string_lossy().into_owned(),
+                size_bytes: 3,
+            },
+            external_root.clone(),
+        );
+        let idle_lease = state
+            .operation_coordinator
+            .try_acquire_idle()
+            .expect("idle state should permit session revocation");
+
+        state.revoke_root_capabilities(&idle_lease);
+
+        let artifact_revoked = state.firmware_artifacts.get(&artifact_id).is_err();
+        let external_root_preserved = external_root.is_dir();
+        let _ = fs::remove_dir_all(&external_root);
+
+        assert!(artifact_revoked);
+        assert!(external_root_preserved);
+    }
+
+    #[test]
+    fn operation_log_omits_routine_server_probe_messages() {
+        let entries = Arc::new(nwflash_infrastructure::OperationLogStore::new(None, 10));
+        let buffer = OperationLogBuffer {
+            entries: entries.clone(),
+        };
+
+        for message in [
+            "连接服务器",
+            "正在连接服务器",
+            "请求服务",
+            "正在请求服务器",
+            "检测服务器 OTA",
+            "正在解析服务器 OTA",
+        ] {
+            buffer.write(OperationLogLevel::Info, message.to_string(), None);
+        }
+        buffer.write(
+            OperationLogLevel::Info,
+            "正在下载在线 OTA".to_string(),
+            None,
+        );
+
+        let messages = entries
+            .snapshot()
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        assert_eq!(messages, ["正在下载在线固件"]);
+        assert!(messages.iter().all(|message| !message.contains("OTA")));
+    }
+
+    #[test]
+    fn operation_log_omits_empty_messages_and_vivo_flash_prepare_titles() {
+        let entries = Arc::new(nwflash_infrastructure::OperationLogStore::new(None, 10));
+        let buffer = OperationLogBuffer {
+            entries: entries.clone(),
+        };
+
+        for message in [
+            "",
+            "   ",
+            "准备 VIVO 线刷",
+            "准备 VIVO 线刷完成。",
+            "准备 VIVO 线刷已取消。",
+        ] {
+            buffer.write(OperationLogLevel::Info, message.to_string(), None);
+        }
+
+        assert!(entries.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn operation_coordinator_rejects_flashing_without_authorization() {
         let operation_started = Arc::new(AtomicBool::new(false));
         let operation_started_for_run = operation_started.clone();
+        let coordinator =
+            OperationCoordinator::new(None, Some(Arc::new(DenyAllOperations)), None, None, None);
 
-        let result = state
-            .operation_coordinator
+        let result = coordinator
             .run_async(
                 OperationKind::Flashing,
-                "线刷测试",
+                "授权门禁测试",
                 move |_, _| async move {
                     operation_started_for_run.store(true, Ordering::Release);
                     Ok(())
@@ -441,11 +766,54 @@ mod device_monitor_tests {
         assert!(result.is_err());
         assert!(!operation_started.load(Ordering::Acquire));
     }
+
+    #[tokio::test]
+    async fn force_exit_finalization_waits_for_pending_authorization_before_revocation() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut state = AppState::new();
+        state.operation_coordinator = OperationCoordinator::new(
+            None,
+            Some(Arc::new(BlockingAuthorization {
+                entered: entered.clone(),
+                release: release.clone(),
+            })),
+            None,
+            None,
+            None,
+        );
+        state.session_capabilities.activate();
+        let state = Arc::new(state);
+        let operation = tokio::spawn({
+            let coordinator = state.operation_coordinator.clone();
+            async move {
+                coordinator
+                    .run_async(
+                        OperationKind::Flashing,
+                        "pending authorization",
+                        |_, _| async { Ok(()) },
+                    )
+                    .await
+            }
+        });
+        entered.notified().await;
+
+        let finalizer = tokio::spawn({
+            let state = state.clone();
+            async move { finalize_operation_before_exit(&state).await }
+        });
+        tokio::task::yield_now().await;
+        release.notify_one();
+        let _ = operation.await.expect("operation task should join");
+        finalizer.await.expect("exit finalizer should join");
+
+        assert!(state.session_capabilities.capture().is_err());
+    }
 }
 
 pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
-    let app_builder: tauri::Builder<Wry> = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init());
+    let app_builder: tauri::Builder<Wry> =
+        tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     #[cfg(feature = "e2e")]
     let app_builder = app_builder.plugin(tauri_plugin_wdio::init());
     #[cfg(feature = "e2e")]
@@ -468,10 +836,12 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
             commands::auth::auth_logout,
             commands::auth::auth_validate_token,
             commands::firmware::firmware_inspect_local,
+            commands::firmware::firmware_inspect_remote,
             commands::firmware::firmware_inspect_payload_local,
             commands::firmware::firmware_extract_payload_local,
             commands::firmware::firmware_inspect_line_flash_package,
             commands::firmware::firmware_extract_vivo_local,
+            commands::firmware::firmware_extract_remote,
             commands::firmware::firmware_prepare_line_flash_artifact,
             commands::firmware::firmware_prepare_extracted_artifact,
             commands::version::version_check,
@@ -482,6 +852,7 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
             commands::quick_flash::quick_flash_prepare_dual_slot_preset_image,
             commands::quick_flash::quick_flash_execute_boot_image,
             commands::quick_flash::quick_flash_execute_preset_image,
+            commands::quick_flash::quick_flash_execute_preset_images,
             commands::quick_flash::quick_flash_execute_firmware_artifact,
             commands::quick_flash::quick_flash_execute_prepared_dual_slot_preset,
             commands::root::root_preflight,
@@ -514,6 +885,7 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
             commands::operation_log::operation_logs_snapshot,
             commands::operation_log::operation_logs_clear,
             commands::operation::operation_cancel,
+            commands::partitions::partitions_cached_snapshot,
             commands::partitions::partitions_refresh,
             commands::partitions::partitions_prepare_erase,
             commands::partitions::partitions_execute_erase,

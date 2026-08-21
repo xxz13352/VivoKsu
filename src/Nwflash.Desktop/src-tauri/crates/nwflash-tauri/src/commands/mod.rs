@@ -1,6 +1,6 @@
 pub mod auth;
-pub mod device_identity;
 pub mod device;
+pub mod device_identity;
 pub mod drivers;
 pub mod files;
 pub mod firmware;

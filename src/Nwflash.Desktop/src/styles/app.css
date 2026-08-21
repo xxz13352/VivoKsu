@@ -1,0 +1,12 @@
+@import './reset.css';
+@import './tokens.css';
+@import './components.css';
+@import './shell.css';
+
+.nw-page-content {
+  margin-top: 12px;
+}
+
+.nw-page-content-flush-top {
+  margin-top: 0;
+}

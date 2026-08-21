@@ -15,6 +15,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
 use thiserror::Error;
+use url::Url;
 use zip::ZipArchive;
 
 /// 每次网络拉取的填充块上限（字节）。非 0 保证取消检查按块触发。
@@ -82,11 +83,20 @@ fn is_canceled_or<F: FnMut() -> bool>(is_canceled: &mut F) -> Result<(), RemoteF
     }
 }
 
-fn validate_url(url: &str) -> Result<(), RemoteFirmwareError> {
-    if url.trim().is_empty() {
-        return Err(RemoteFirmwareError::InvalidUrl(url.to_string()));
+pub fn validate_http_url(url: &str) -> Result<(), RemoteFirmwareError> {
+    let parsed = Url::parse(url.trim()).map_err(|_| {
+        RemoteFirmwareError::InvalidUrl("固件地址必须是有效的 HTTP 或 HTTPS URL。".to_string())
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(RemoteFirmwareError::InvalidUrl(
+            "固件地址必须使用 HTTP 或 HTTPS。".to_string(),
+        ));
     }
     Ok(())
+}
+
+fn validate_url(url: &str) -> Result<(), RemoteFirmwareError> {
+    validate_http_url(url)
 }
 
 /// 探测远程 OTA 的格式（按需 Range 读取首字节）。
@@ -297,13 +307,80 @@ fn fetch_range(
         .header(RANGE, format!("bytes={start}-{end}"))
         .send()
         .map_err(|error| RemoteFirmwareError::Transport(error.to_string()))?;
+    let range = validate_range_response(&response, start, end, None)
+        .ok_or(RemoteFirmwareError::RangeUnsupported)?;
+    read_range_response_body(response, range)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValidatedRangeResponse {
+    total_len: u64,
+    body_len: u64,
+}
+
+fn validate_range_response(
+    response: &reqwest::blocking::Response,
+    requested_start: u64,
+    requested_end: u64,
+    expected_total_len: Option<u64>,
+) -> Option<ValidatedRangeResponse> {
     if response.status() != StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())?;
+    let (start, end, total_len) = parse_content_range(content_range)?;
+    if start != requested_start
+        || end > requested_end
+        || (end < requested_end && end.checked_add(1) != Some(total_len))
+        || expected_total_len.is_some_and(|expected| expected != total_len)
+    {
+        return None;
+    }
+    let body_len = end.checked_sub(start)?.checked_add(1)?;
+    if response
+        .content_length()
+        .is_some_and(|content_length| content_length != body_len)
+    {
+        return None;
+    }
+    Some(ValidatedRangeResponse {
+        total_len,
+        body_len,
+    })
+}
+
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let value = value.trim().strip_prefix("bytes ")?;
+    let (range, total_len) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.trim().parse::<u64>().ok()?;
+    let end = end.trim().parse::<u64>().ok()?;
+    let total_len = total_len.trim().parse::<u64>().ok()?;
+    if start > end || total_len == 0 || end >= total_len {
+        return None;
+    }
+    Some((start, end, total_len))
+}
+
+fn read_range_response_body(
+    response: reqwest::blocking::Response,
+    range: ValidatedRangeResponse,
+) -> Result<Vec<u8>, RemoteFirmwareError> {
+    let limit = range
+        .body_len
+        .checked_add(1)
+        .ok_or(RemoteFirmwareError::RangeUnsupported)?;
+    let mut body = response.take(limit);
+    let mut bytes = Vec::new();
+    body.read_to_end(&mut bytes)
+        .map_err(|error| RemoteFirmwareError::Transport(error.to_string()))?;
+    if u64::try_from(bytes.len()).ok() != Some(range.body_len) {
         return Err(RemoteFirmwareError::RangeUnsupported);
     }
-    response
-        .bytes()
-        .map(|bytes| bytes.to_vec())
-        .map_err(|error| RemoteFirmwareError::Transport(error.to_string()))
+    Ok(bytes)
 }
 
 /// 基于 HTTP Range 的只读 + 定位 reader，供 `zip` crate 读取远程 zip。
@@ -339,19 +416,9 @@ where
             .header(RANGE, "bytes=0-0")
             .send()
             .map_err(|error| RemoteFirmwareError::Transport(error.to_string()))?;
-        if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(RemoteFirmwareError::RangeUnsupported);
-        }
-        let content_range = response
-            .headers()
-            .get(CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(RemoteFirmwareError::RangeUnsupported)?;
-        let total_len = content_range
-            .rsplit_once('/')
-            .and_then(|(_, total)| total.trim().parse::<u64>().ok())
-            .filter(|len| *len > 0)
-            .ok_or(RemoteFirmwareError::RangeUnsupported)?;
+        let total_len = validate_range_response(&response, 0, 0, None)
+            .ok_or(RemoteFirmwareError::RangeUnsupported)?
+            .total_len;
         Ok(Self {
             client,
             url: url.to_string(),
@@ -383,16 +450,10 @@ where
             .header(RANGE, format!("bytes={offset}-{end}"))
             .send()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "远程 OTA 服务器不支持 Range 请求。",
-            ));
-        }
-        let bytes = response
-            .bytes()
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        self.fill = bytes.to_vec();
+        let range = validate_range_response(&response, offset, end, Some(self.total_len))
+            .ok_or_else(|| io::Error::other("远程 OTA 服务器不支持有效的 Range 请求。"))?;
+        self.fill = read_range_response_body(response, range)
+            .map_err(|_| io::Error::other("远程 OTA 服务器不支持有效的 Range 请求。"))?;
         self.fill_pos = 0;
         Ok(())
     }

@@ -1,4 +1,5 @@
-import { FC, useEffect, useState } from 'react';
+import { errorMessage } from '../app/error';
+import { FC, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ModalLayer } from '../components/ModalLayer';
 
@@ -116,7 +117,7 @@ export const RootPage: FC = () => {
   const [loading, setLoading] = useState(true);
   const [manager, setManager] = useState<'vivoKsu' | 'officialKernelSu'>('vivoKsu');
   const [kmi, setKmi] = useState('android14-6.1');
-  const [useAutomaticKmi, setUseAutomaticKmi] = useState(false);
+  const [useAutomaticKmi, setUseAutomaticKmi] = useState(true);
   const [initBoot, setInitBoot] = useState<RootImageSelection | null>(null);
   const [vendorBoot, setVendorBoot] = useState<RootImageSelection | null>(null);
   const [readiness, setReadiness] = useState<RootReadiness | null>(null);
@@ -129,9 +130,14 @@ export const RootPage: FC = () => {
   const [sourceMode, setSourceMode] = useState<RootSourceMode>('local');
   const [otaAvailable, setOtaAvailable] = useState(false);
   const [otaLabel, setOtaLabel] = useState<string | null>(null);
+  const [otaChecking, setOtaChecking] = useState(false);
+  const otaCheckInFlight = useRef(false);
   const [sourceLabel, setSourceLabel] = useState('');
 
   const runOtaCheck = async () => {
+    if (otaCheckInFlight.current) return;
+    otaCheckInFlight.current = true;
+    setOtaChecking(true);
     try {
       const check = await invoke<RootOtaCheck>('root_ota_check');
       setOtaAvailable(check.available);
@@ -140,6 +146,9 @@ export const RootPage: FC = () => {
       // 静默：检测服务器 OTA 失败不打断页面。
       setOtaAvailable(false);
       setOtaLabel(null);
+    } finally {
+      otaCheckInFlight.current = false;
+      setOtaChecking(false);
     }
   };
 
@@ -156,7 +165,7 @@ export const RootPage: FC = () => {
       setPatchConfirmation(null);
       setPatchStatus('');
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : '服务器 OTA 提取失败');
+      setErrorText(errorMessage(error, '服务器 OTA 提取失败'));
       setSourceMode('local');
     } finally {
       setRootBusy(false);
@@ -176,7 +185,7 @@ export const RootPage: FC = () => {
       setSessionState(normalizeSession(sessionResponse));
       void runOtaCheck();
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'Root 页面状态读取失败');
+      setErrorText(errorMessage(error, 'Root 页面状态读取失败'));
       setVersionState(null);
       setSessionState(null);
     } finally {
@@ -203,7 +212,7 @@ export const RootPage: FC = () => {
       setPatchConfirmation(null);
       setPatchStatus('');
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'ROOT 镜像选择失败');
+      setErrorText(errorMessage(error, 'ROOT 镜像选择失败'));
     } finally {
       setRootBusy(false);
     }
@@ -225,7 +234,7 @@ export const RootPage: FC = () => {
       setReadiness(response);
     } catch (error) {
       setReadiness(null);
-      setErrorText(error instanceof Error ? error.message : 'ROOT 预检失败');
+      setErrorText(errorMessage(error, 'ROOT 预检失败'));
     } finally {
       setRootBusy(false);
     }
@@ -239,7 +248,7 @@ export const RootPage: FC = () => {
       await invoke<string[]>('resource_install', { keys: [key] });
       setManagerResourceReady(true);
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'ROOT 管理器资源安装失败');
+      setErrorText(errorMessage(error, 'ROOT 管理器资源安装失败'));
     } finally {
       setRootBusy(false);
     }
@@ -253,7 +262,7 @@ export const RootPage: FC = () => {
       setManagerInstallation(result);
     } catch (error) {
       setManagerInstallation(null);
-      setErrorText(error instanceof Error ? error.message : 'ROOT 管理器设备安装失败');
+      setErrorText(errorMessage(error, 'ROOT 管理器设备安装失败'));
     } finally {
       setRootBusy(false);
     }
@@ -285,7 +294,7 @@ export const RootPage: FC = () => {
       setPatchedArtifact(artifact);
     } catch (error) {
       setPatchedArtifact(null);
-      setErrorText(error instanceof Error ? error.message : 'ROOT 镜像修补失败');
+      setErrorText(errorMessage(error, 'ROOT 镜像修补失败'));
     } finally {
       setRootBusy(false);
     }
@@ -304,7 +313,7 @@ export const RootPage: FC = () => {
       setPatchConfirmation(confirmation);
     } catch (error) {
       setPatchConfirmation(null);
-      setErrorText(error instanceof Error ? error.message : 'ROOT 修补镜像刷写预检失败');
+      setErrorText(errorMessage(error, 'ROOT 修补镜像刷写预检失败'));
     } finally {
       setRootBusy(false);
     }
@@ -322,7 +331,7 @@ export const RootPage: FC = () => {
       setPatchConfirmation(null);
       setPatchStatus('ROOT 修补镜像刷写已完成。');
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'ROOT 修补镜像刷写失败');
+      setErrorText(errorMessage(error, 'ROOT 修补镜像刷写失败'));
     } finally {
       setRootBusy(false);
     }
@@ -358,13 +367,22 @@ export const RootPage: FC = () => {
       setReadiness(null);
       setPatchStatus(result.status);
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : 'ROOT 全自动流程失败');
+      setErrorText(errorMessage(error, 'ROOT 全自动流程失败'));
     } finally {
       setRootBusy(false);
     }
   };
 
-  const isBusy = loading || rootBusy;
+  const cancelRootOperation = async () => {
+    setErrorText('');
+    try {
+      await invoke('operation_cancel');
+    } catch (error) {
+      setErrorText(errorMessage(error, '取消 ROOT 操作失败'));
+    }
+  };
+
+  const isBusy = loading || rootBusy || otaChecking;
 
   return (
     <section className="nw-root-page" aria-label="Vivo ROOT">
@@ -444,6 +462,7 @@ export const RootPage: FC = () => {
             <button type="button" className="nw-test-root-install-device-manager" disabled={isBusy} onClick={() => void installManagerOnDevice()}>安装管理器</button>
             <button type="button" className="nw-test-root-preflight" disabled={isBusy} onClick={() => void preflightRoot()}>ROOT 预检</button>
             <button type="button" className="nw-test-root-automatic" disabled={isBusy || !readiness?.canRunAutomatic} onClick={() => void runAutomaticRoot()}>全自动 ROOT</button>
+            {rootBusy ? <button type="button" className="nw-test-root-cancel" onClick={() => void cancelRootOperation()}>取消操作</button> : null}
             <button type="button" className="nw-test-root-patch" disabled={isBusy || (manager === 'vivoKsu' ? initBoot === null : vendorBoot === null)} onClick={() => void patchRootImage()}>修补镜像</button>
             {patchedArtifact ? <button type="button" className="nw-test-root-transfer" disabled={isBusy} onClick={() => void preparePatchedArtifactFlash()}>刷写 {patchedArtifact.partition}</button> : null}
           </div>

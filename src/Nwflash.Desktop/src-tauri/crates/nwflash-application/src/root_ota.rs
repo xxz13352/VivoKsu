@@ -1,10 +1,14 @@
 //! ROOT 云端 OTA 提取：从服务器解析出的 OTA 链接按需提取修补所需的启动分区镜像。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nwflash_domain::{DomainError, FlashImageInfo};
+use nwflash_infrastructure::{
+    validate_available_space, OtaDiskSpaceProvider, SystemOtaDiskSpaceProvider,
+};
 use nwflash_infrastructure::remote_firmware::{
     extract_zip_members, list_zip_members, probe_remote_kind, RemoteFirmwareError,
     RemoteFirmwareKind,
@@ -35,11 +39,17 @@ pub struct RootOtaExtractOptions<'a> {
     pub staging_root: &'a Path,
 }
 
-pub struct RootOtaService;
+pub struct RootOtaService {
+    disk_space: Arc<dyn OtaDiskSpaceProvider>,
+}
 
 impl RootOtaService {
     pub fn new() -> Self {
-        Self
+        Self::with_disk_space(Arc::new(SystemOtaDiskSpaceProvider))
+    }
+
+    pub fn with_disk_space(disk_space: Arc<dyn OtaDiskSpaceProvider>) -> Self {
+        Self { disk_space }
     }
 
     /// 创建一个唯一、可写、由调用方负责清理的 staging 根目录。
@@ -131,11 +141,13 @@ impl RootOtaService {
         P: FnMut(f64),
     {
         let metadata_directory = staging_root.join("metadata");
-        let inspection =
-            FirmwareExtractService::inspect_payload(executable, url, &metadata_directory, || {
-                is_canceled()
-            })
-            .map_err(|error| map_firmware_extract_error(error, "读取 payload 分区信息失败。"))?;
+        let inspection = FirmwareExtractService::inspect_payload(
+            executable,
+            url,
+            &metadata_directory,
+            &mut *is_canceled,
+        )
+        .map_err(|error| map_firmware_extract_error(error, "读取 payload 分区信息失败。"))?;
         let _ = std::fs::remove_dir_all(&metadata_directory);
         if is_canceled() {
             return Err(RootOtaError::Cancelled.into_domain());
@@ -168,7 +180,7 @@ impl RootOtaService {
             url,
             &selected,
             &image_directory,
-            || is_canceled(),
+            &mut *is_canceled,
             |_partition, written| {
                 if total_bytes > 0 {
                     report_progress((written as f64 / total_bytes as f64).clamp(0.0, 1.0));
@@ -216,17 +228,35 @@ impl RootOtaService {
         F: FnMut() -> bool,
         P: FnMut(f64),
     {
-        let image_directory = staging_root.join("images");
         let wanted: [&str; 3] = ["init_boot", "boot", "vendor_boot"];
 
-        // 先列出远程 zip 成员，算出目标分区的总字节，用于计算进度百分比。
+        // 先列出远程 zip 成员，在创建图片输出前预留所选分区的 staging 容量。
         let members = list_zip_members(url, None, is_canceled)
             .map_err(|error| map_remote_firmware_error(error, "读取直接镜像 zip 分区列表失败。"))?;
-        let total_bytes: u64 = members
+        if is_canceled() {
+            return Err(RootOtaError::Cancelled.into_domain());
+        }
+        let total_bytes = members
             .iter()
             .filter(|member| wanted.contains(&member.name.as_str()))
-            .map(|member| member.size_bytes.max(0) as u64)
-            .sum();
+            .try_fold(0u64, |total, member| {
+                let size = u64::try_from(member.size_bytes).map_err(|_| {
+                    RootOtaError::InvalidFormat("直接镜像 zip 包含无效的分区大小。".to_string())
+                        .into_domain()
+                })?;
+                total.checked_add(size).ok_or_else(|| {
+                    RootOtaError::InvalidFormat("直接镜像 zip 分区总大小超出支持范围。".to_string())
+                        .into_domain()
+                })
+            })?;
+        let available_bytes = self.disk_space.available_bytes(staging_root).map_err(|error| {
+            DomainError::InvalidOperation(format!("读取解包磁盘空间失败：{error}"))
+        })?;
+        validate_available_space(total_bytes, available_bytes).map_err(|error| {
+            DomainError::InvalidOperation(format!("解包磁盘空间不足：{error}"))
+        })?;
+
+        let image_directory = staging_root.join("images");
 
         // 跨成员累计已下载字节。基础设施回调按成员报告当前值，应用层按差值合并。
         let mut completed_bytes = 0u64;
@@ -280,6 +310,12 @@ impl RootOtaService {
             vendor_boot: vendor_boot.map(to_flash),
             staging_root: staging_root.to_path_buf(),
         })
+    }
+}
+
+impl Default for RootOtaService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

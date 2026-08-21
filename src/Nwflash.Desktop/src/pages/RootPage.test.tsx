@@ -48,6 +48,45 @@ describe('RootPage', () => {
     vi.clearAllMocks();
   });
 
+  test('自动 KMI 默认开启，与 C# ROOT 工作流保持一致', async () => {
+    const command = invoke as unknown as ReturnType<typeof vi.fn>;
+    command
+      .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
+      .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: null })
+      .mockResolvedValueOnce(OTA_CHECK_OFF);
+
+    renderRoot();
+    await waitUntil(() => host.querySelector('.nw-root-version') !== null);
+
+    expect((host.querySelector('.nw-test-root-auto-kmi') as HTMLInputElement).checked).toBe(true);
+  });
+
+  test('ROOT 执行中提供取消操作并调用统一取消命令', async () => {
+    const command = invoke as unknown as ReturnType<typeof vi.fn>;
+    let resolveAutomatic: ((value: unknown) => void) | undefined;
+    command
+      .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
+      .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: null })
+      .mockResolvedValueOnce(OTA_CHECK_OFF)
+      .mockResolvedValueOnce({ id: 'root-image-init_boot-cancel', kind: 'initBoot', fileName: 'init_boot.img', partitionName: 'init_boot', sizeBytes: 1024 })
+      .mockResolvedValueOnce({ managerLabel: 'Vivo KSU', effectiveKmi: 'android14-6.1', canPatch: true, canRunAutomatic: true, summary: 'ROOT 前置条件已就绪' })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveAutomatic = resolve; }));
+
+    renderRoot();
+    await waitUntil(() => host.querySelector('.nw-root-version') !== null);
+    (host.querySelector('.nw-test-root-select-init') as HTMLButtonElement).click();
+    await waitUntil(() => host.textContent?.includes('init_boot.img') ?? false);
+    (host.querySelector('.nw-test-root-preflight') as HTMLButtonElement).click();
+    await waitUntil(() => host.textContent?.includes('ROOT 前置条件已就绪') ?? false);
+    (host.querySelector('.nw-test-root-automatic') as HTMLButtonElement).click();
+    await waitUntil(() => host.querySelector('.nw-test-root-cancel') !== null);
+
+    (host.querySelector('.nw-test-root-cancel') as HTMLButtonElement).click();
+    await waitUntil(() => command.mock.calls.some(([name]) => name === 'operation_cancel'));
+    expect(command).toHaveBeenCalledWith('operation_cancel');
+    resolveAutomatic?.({ flashedPartitionCount: 0, commandCount: 0, status: '已取消' });
+  });
+
   test('renders the WPF ROOT workbench idle structure', async () => {
     const command = invoke as unknown as ReturnType<typeof vi.fn>;
     command
@@ -171,6 +210,9 @@ describe('RootPage', () => {
     (host.querySelector('.nw-test-root-select-init') as HTMLButtonElement).click();
     await waitUntil(() => host.textContent?.includes('init_boot.img') ?? false);
 
+    // This regression keeps the pre-existing manual-KMI contract explicit now
+    // that the page defaults to automatic KMI detection.
+    (host.querySelector('.nw-test-root-auto-kmi') as HTMLInputElement).click();
     (host.querySelector('.nw-test-root-preflight') as HTMLButtonElement).click();
     await waitUntil(() => host.textContent?.includes('已就绪：将修补 init_boot。') ?? false);
 
@@ -200,7 +242,6 @@ describe('RootPage', () => {
     await waitUntil(() => host.querySelector('.nw-root-version') !== null);
     (host.querySelector('.nw-test-root-select-init') as HTMLButtonElement).click();
     await waitUntil(() => host.textContent?.includes('init_boot.img') ?? false);
-    (host.querySelector('.nw-test-root-auto-kmi') as HTMLInputElement).click();
     (host.querySelector('.nw-test-root-preflight') as HTMLButtonElement).click();
     await waitUntil(() => host.textContent?.includes('已就绪：将修补 init_boot。') ?? false);
 
@@ -259,6 +300,7 @@ describe('RootPage', () => {
     await waitUntil(() => host.querySelector('.nw-root-version') !== null);
     (host.querySelector('.nw-test-root-select-init') as HTMLButtonElement).click();
     await waitUntil(() => host.textContent?.includes('init_boot.img') ?? false);
+    (host.querySelector('.nw-test-root-auto-kmi') as HTMLInputElement).click();
     (host.querySelector('.nw-test-root-patch') as HTMLButtonElement).click();
     await waitUntil(() => host.textContent?.includes('patched_init_boot.img') ?? false);
 
@@ -311,8 +353,8 @@ describe('RootPage', () => {
         manager: 'vivoKsu',
         initBootId: 'root-image-init_boot-auto',
         vendorBootId: null,
-        useAutomaticKmi: false,
-        selectedKmi: 'android14-6.1',
+        useAutomaticKmi: true,
+        selectedKmi: null,
       },
     });
     expect(command).not.toHaveBeenCalledWith('root_install_manager', expect.anything());
@@ -379,8 +421,8 @@ describe('RootPage', () => {
         manager: 'officialKernelSu',
         initBootId: 'root-image-init_boot-official',
         vendorBootId: 'root-image-vendor_boot-official',
-        useAutomaticKmi: false,
-        selectedKmi: 'android14-6.1',
+        useAutomaticKmi: true,
+        selectedKmi: null,
       },
     });
     expect(command).not.toHaveBeenCalledWith('root_patch_official_vendor_boot', expect.anything());
@@ -451,6 +493,53 @@ describe('RootPage', () => {
     expect(serverRadio).not.toBeNull();
     // available=false → 服务器来源单选禁用。
     await waitUntil(() => (serverRadio as HTMLInputElement).disabled === true);
+  });
+
+  test('服务器检测未完成时锁定检测按钮，避免并发请求', async () => {
+    const command = invoke as unknown as ReturnType<typeof vi.fn>;
+    let resolveOtaCheck: ((value: unknown) => void) | undefined;
+    command
+      .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
+      .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOtaCheck = resolve;
+      }));
+
+    renderRoot();
+    await waitUntil(() => host.querySelector('.nw-root-ota-source') !== null);
+    await waitUntil(() => command.mock.calls.some(([name]) => name === 'root_ota_check'));
+
+    const checkButton = host.querySelector('.nw-test-root-ota-check') as HTMLButtonElement;
+    expect(checkButton.disabled).toBe(true);
+    expect(command.mock.calls.filter(([name]) => name === 'root_ota_check')).toHaveLength(1);
+
+    resolveOtaCheck?.(OTA_CHECK_OFF);
+    await waitUntil(() => !checkButton.disabled);
+  });
+
+  test('服务器检测按钮在同一事件循环内重复点击也只发出一次请求', async () => {
+    const command = invoke as unknown as ReturnType<typeof vi.fn>;
+    let resolveOtaCheck: ((value: unknown) => void) | undefined;
+    command
+      .mockResolvedValueOnce({ update_required: false, force_update: false, latest: null, min_version: null, download_url: null })
+      .mockResolvedValueOnce({ has_token: true, healthy: true, running: false, session_id: 'root-session' })
+      .mockResolvedValueOnce(OTA_CHECK_OFF)
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveOtaCheck = resolve;
+      }));
+
+    renderRoot();
+    await waitUntil(() => host.querySelector('.nw-test-root-ota-check') !== null);
+    await waitUntil(() => !(host.querySelector('.nw-test-root-ota-check') as HTMLButtonElement).disabled);
+
+    const checkButton = host.querySelector('.nw-test-root-ota-check') as HTMLButtonElement;
+    checkButton.click();
+    checkButton.click();
+
+    await waitUntil(() => command.mock.calls.filter(([name]) => name === 'root_ota_check').length >= 2);
+    expect(command.mock.calls.filter(([name]) => name === 'root_ota_check')).toHaveLength(2);
+
+    resolveOtaCheck?.(OTA_CHECK_OFF);
   });
 
   test('勾选服务器来源后从服务器提取镜像并填充启动镜像槽位', async () => {

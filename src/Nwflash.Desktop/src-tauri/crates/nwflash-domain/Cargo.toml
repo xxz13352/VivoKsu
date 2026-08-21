@@ -1,0 +1,9 @@
+[package]
+name = "nwflash-domain"
+version = "1.0.1"
+edition = "2021"
+description = "Pure domain models for NWflash Rust migration"
+
+[dependencies]
+serde = { version = "1.0.210", features = ["derive"] }
+thiserror = "1.0.69"

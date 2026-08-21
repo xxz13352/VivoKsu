@@ -1,0 +1,445 @@
+use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
+
+use nwflash_domain::UsageLogEntry;
+use nwflash_infrastructure::{CloudflareClient, CloudflareError, DEFAULT_APP_VERSION};
+
+fn create_client(base_url: &str) -> CloudflareClient {
+    CloudflareClient::new(base_url, DEFAULT_APP_VERSION)
+}
+
+#[tokio::test]
+async fn resolve_async_queries_the_server_with_pd_and_version_and_deserializes_the_rom() {
+    let mock_server = MockServer::start().await;
+
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    let rom_body = serde_json::json!({
+        "pd": "PD2057",
+        "version": "16.2.10.0.W10.V000L1",
+        "url": "https://sysuptxdl.vivo.com.cn/full.zip",
+        "name": "full",
+        "sizeBytes": 1024
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/api/rom"))
+        .and(query_param("pd", "PD2057"))
+        .and(query_param("version", "16.2.10.0/W10.V000L1"))
+        .and(header("Authorization", "Bearer tok"))
+        .and(header("X-Nwflash-Version", DEFAULT_APP_VERSION))
+        .and(path_regex(r"^/api/rom$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rom_body))
+        .mount(&mock_server)
+        .await;
+
+    let rom = api
+        .resolve_rom("tok", "PD2057", "16.2.10.0/W10.V000L1")
+        .await
+        .expect("resolve_rom should deserialize response");
+
+    assert_eq!(rom.pd, "PD2057");
+    assert_eq!(rom.size_bytes, Some(1024));
+    assert_eq!(rom.version, "16.2.10.0.W10.V000L1");
+}
+
+#[tokio::test]
+async fn resolve_async_escapes_special_characters_in_query_parameters() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/api/rom"))
+        .and(header("Authorization", "Bearer tok"))
+        .and(header("X-Nwflash-Version", DEFAULT_APP_VERSION))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "pd": "PD 2057",
+            "version": "16.2.10.0/W30",
+            "url": "https://x/y"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let _ = api
+        .resolve_rom("tok", "PD 2057", "16.2.10.0/W30")
+        .await
+        .expect("should pass encoded query");
+
+    let received = mock_server
+        .received_requests()
+        .await
+        .expect("received request");
+    assert_eq!(received.len(), 1);
+    let request = &received[0];
+    let path = request.url.path();
+    let query = request.url.query().unwrap_or("");
+    let _path_and_query = if query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{query}")
+    };
+    assert!(query.contains("pd=PD%202057"));
+    assert!(query.contains("version=16.2.10.0%2FW30"));
+}
+
+#[tokio::test]
+async fn resolve_async_maps_not_found_to_chinese_message() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/api/rom"))
+        .and(header("Authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "error": "未找到 PD2057 对应的 ROM。"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let error = api
+        .resolve_rom("tok", "PD2057", "nope")
+        .await
+        .expect_err("not found should be mapped");
+
+    assert_eq!(error.status_code(), Some(404));
+    assert!(format!("{error}").contains("未找到"));
+}
+
+#[tokio::test]
+async fn resolve_async_maps_insufficient_credits_status() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/api/rom"))
+        .and(header("Authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(402).set_body_json(serde_json::json!({
+            "error": "VOTA 未能解析 ROM 下载链接。(INSUFFICIENT_CREDITS)"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let error = api
+        .resolve_rom("tok", "PD2057", "v")
+        .await
+        .expect_err("insufficient credits should be mapped");
+
+    assert_eq!(error.status_code(), Some(402));
+    assert!(format!("{error}").contains("INSUFFICIENT_CREDITS"));
+}
+
+#[tokio::test]
+async fn heartbeat_posts_session_id_client_version_and_active_flag() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+    let token = "tok";
+
+    Mock::given(method("POST"))
+        .and(path("/api/heartbeat"))
+        .and(header("Authorization", format!("Bearer {token}")))
+        .and(header("X-Nwflash-Version", DEFAULT_APP_VERSION))
+        .and(body_json(serde_json::json!({
+            "sessionId": "sess-abc",
+            "clientVersion": DEFAULT_APP_VERSION,
+            "active": true
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"force_exit":false})),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let heartbeat = api
+        .heartbeat(token, "sess-abc", true)
+        .await
+        .expect("heartbeat should parse response");
+    assert!(!heartbeat.force_exit);
+}
+
+#[tokio::test]
+async fn heartbeat_parses_force_exit_reason() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("POST"))
+        .and(path("/api/heartbeat"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"force_exit": true, "reason": "违规下线"})),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let heartbeat = api
+        .heartbeat("tok", "sess-abc", true)
+        .await
+        .expect("heartbeat should parse forced exit");
+    assert!(heartbeat.force_exit);
+    assert_eq!(heartbeat.reason.as_deref(), Some("违规下线"));
+}
+
+#[tokio::test]
+async fn heartbeat_maps_426_to_update_required() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("POST"))
+        .and(path("/api/heartbeat"))
+        .respond_with(ResponseTemplate::new(426).set_body_json(serde_json::json!({
+            "error":"请更新 VivoKsu 到最新版本后继续使用。",
+            "code":"UPDATE_REQUIRED",
+            "latest":"2.0.0",
+            "min":"1.0.0",
+            "download_url":"https://x/VivoKsu-2.0.0.zip"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let err = api
+        .heartbeat("tok", "sess-abc", true)
+        .await
+        .expect_err("426 should map to update required");
+    match err {
+        CloudflareError::UpdateRequired(info) => {
+            assert_eq!(info.latest, Some("2.0.0".to_string()));
+            assert_eq!(info.min_version, Some("1.0.0".to_string()));
+            assert_eq!(
+                info.download_url,
+                Some("https://x/VivoKsu-2.0.0.zip".to_string())
+            );
+        }
+        other => panic!("expect update required, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn get_online_deserializes_sessions_and_self_flag() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/api/online"))
+        .and(header("Authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "count": 2,
+            "sessions": [
+                {
+                    "name":"张三",
+                    "client_version":"1.0.0",
+                    "connected_at":1000,
+                    "last_seen_at":1000,
+                    "duration_seconds":3600,
+                    "is_self":true
+                },
+                {
+                    "name":"李四",
+                    "client_version":"1.0.0",
+                    "connected_at":2000,
+                    "last_seen_at":2000,
+                    "duration_seconds":1800,
+                    "is_self":false
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let sessions = api
+        .get_online("tok")
+        .await
+        .expect("online sessions should parse");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].name, "张三");
+    assert!(sessions[0].is_self);
+    assert_eq!(sessions[1].name, "李四");
+    assert!(!sessions[1].is_self);
+}
+
+#[tokio::test]
+async fn get_online_parses_lenient_string_numbers_and_non_bool_self_flag() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("GET"))
+        .and(path("/api/online"))
+        .and(header("Authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessions": [
+                {
+                    "name":"王五",
+                    "client_version":"1.0.0",
+                    "connected_at":"1724000000",
+                    "last_seen_at":"1723999999",
+                    "duration_seconds":"1800",
+                    "is_self":"true"
+                },
+                {
+                    "name":"赵六",
+                    "client_version":"1.0.0",
+                    "connected_at": 99,
+                    "is_self": false
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let sessions = api
+        .get_online("tok")
+        .await
+        .expect("string-typed numbers and non-bool self flag should parse leniently");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].connected_at, 1_724_000_000);
+    assert_eq!(sessions[0].last_seen_at, 1_723_999_999);
+    assert_eq!(sessions[0].duration_seconds, 1800);
+    // Only a literal JSON `true` counts as self; a string "true" is false.
+    assert!(!sessions[0].is_self);
+    // The second session omits last_seen_at/duration_seconds -> default 0.
+    assert_eq!(sessions[1].connected_at, 99);
+    assert_eq!(sessions[1].last_seen_at, 0);
+    assert_eq!(sessions[1].duration_seconds, 0);
+    assert!(!sessions[1].is_self);
+}
+
+#[tokio::test]
+async fn authorize_operation_posts_operation_and_parses_allowed() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("POST"))
+        .and(path("/api/operation/authorize"))
+        .and(header("Authorization", "Bearer tok"))
+        .and(body_json(serde_json::json!({
+            "operation": "Flashing",
+            "title": "正在刷写 boot"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "allowed": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let result = api
+        .authorize_operation("tok", "Flashing", "正在刷写 boot")
+        .await
+        .expect("authorize should parse");
+    assert!(result.allowed);
+}
+
+#[tokio::test]
+async fn authorize_operation_maps_401_to_api_error() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("POST"))
+        .and(path("/api/operation/authorize"))
+        .and(header("Authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": "API token 无效或已停用。"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let err = api
+        .authorize_operation("tok", "Flashing", "正在刷写 boot")
+        .await
+        .expect_err("401 should map");
+    assert_eq!(err.status_code(), Some(401));
+}
+
+#[tokio::test]
+async fn upload_usage_logs_posts_the_batch() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+    let logs = vec![
+        UsageLogEntry {
+            operation: "Flashing".to_string(),
+            title: "正在刷写 boot".to_string(),
+            status: "success".to_string(),
+            event_id: "evt-1".to_string(),
+            started_at: 1000,
+            ended_at: Some(1060),
+            duration_ms: Some(60000),
+        },
+        UsageLogEntry {
+            operation: "Rebooting".to_string(),
+            title: "正在重启设备".to_string(),
+            status: "failed".to_string(),
+            event_id: "evt-2".to_string(),
+            started_at: 2000,
+            ended_at: Some(2010),
+            duration_ms: Some(10000),
+        },
+    ];
+
+    Mock::given(method("POST"))
+        .and(path("/api/usage/logs"))
+        .and(header("Authorization", "Bearer tok"))
+        .and(body_json(serde_json::json!({
+            "logs": [
+                {
+                    "operation": "Flashing",
+                    "title": "正在刷写 boot",
+                    "status": "success",
+                    "event_id": "evt-1",
+                    "started_at": 1000,
+                    "ended_at": 1060,
+                    "duration_ms": 60000
+                },
+                {
+                    "operation": "Rebooting",
+                    "title": "正在重启设备",
+                    "status": "failed",
+                    "event_id": "evt-2",
+                    "started_at": 2000,
+                    "ended_at": 2010,
+                    "duration_ms": 10000
+                }
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "received": 2
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let response = api
+        .upload_usage_logs("tok", &logs)
+        .await
+        .expect("upload usage logs should parse");
+    assert!(response.ok);
+}
+
+#[tokio::test]
+async fn heartbeat_maps_403_to_api_error_before_json_parse() {
+    let mock_server = MockServer::start().await;
+    let base_url = mock_server.uri();
+    let api = create_client(&base_url);
+
+    Mock::given(method("POST"))
+        .and(path("/api/heartbeat"))
+        .respond_with(
+            ResponseTemplate::new(403).set_body_string("<html><body>Forbidden</body></html>"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let err = api
+        .heartbeat("tok", "sess-abc", true)
+        .await
+        .expect_err("forbidden html should map to api error");
+    assert_eq!(err.status_code(), Some(403));
+}

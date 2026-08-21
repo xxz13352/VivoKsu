@@ -1,0 +1,15 @@
+:root {
+  --nw-font-family: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+  --nw-bg-page: #f7f9fb;
+  --nw-surface: #ffffff;
+  --nw-surface-elevated: #f8fafc;
+  --nw-border: #dde5ea;
+  --nw-text-primary: #102531;
+  --nw-text-subtle: #6b7b86;
+  --nw-accent: #087a70;
+  --nw-accent-strong: #e8f4f2;
+  --nw-danger: #c85b46;
+  --nw-radius-large: 8px;
+  --nw-radius-small: 6px;
+  --nw-gap: 12px;
+}

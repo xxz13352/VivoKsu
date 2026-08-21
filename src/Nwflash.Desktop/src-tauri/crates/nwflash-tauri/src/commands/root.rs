@@ -21,21 +21,24 @@ use nwflash_infrastructure::{
     resolve_vendor_boot_module_directories, validate_patched_root_image, RemoteAssetDownloader,
     VivoRootResourceService,
 };
-use nwflash_windows::{process::run_command_with_cancel, ProcessCommand};
+use nwflash_windows::{bundled_platform_tool, process::run_command_with_cancel, ProcessCommand};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::oneshot;
 use tokio::task;
 
-use crate::commands::software::application_root;
-use crate::AppState;
+use crate::{
+    session_capabilities::{SessionCapabilityLease, SessionCapabilityScope},
+    AppState,
+};
 
 static ROOT_IMAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static ROOT_PATCH_ARTIFACT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const VIVO_KSU_REMOTE_DIRECTORY: &str = "/data/local/tmp";
 const VIVO_KSU_REMOTE_LIBRARY: &str = "/data/local/tmp/vivoksu_libksud.so";
 const VENDOR_BOOT_REMOTE_BASE: &str = "/data/local/tmp/nwflash_vendor_boot";
+const ROOT_CAPABILITY_UNAVAILABLE: &str = "ROOT 会话能力已失效，请重新登录后再试。";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,6 +180,7 @@ fn automatic_root_stage_plan(manager: RootManager) -> &'static [AutomaticRootSta
 
 #[derive(Debug, Clone)]
 struct RootImageSelection {
+    epoch: u64,
     id: String,
     image: FlashImageInfo,
     /// 实际刷写/修补的目标分区名（`init_boot`、`boot` 或 `vendor_boot`）。
@@ -190,44 +194,126 @@ struct RootImageRuntimeState {
     vendor_boot: Option<RootImageSelection>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RootImageRuntime {
+    scope: Arc<SessionCapabilityScope>,
     state: Arc<Mutex<RootImageRuntimeState>>,
 }
 
 impl RootImageRuntime {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_scope(Arc::new(SessionCapabilityScope::new()))
     }
 
-    pub fn replace(
+    pub(crate) fn with_scope(scope: Arc<SessionCapabilityScope>) -> Self {
+        Self {
+            scope,
+            state: Arc::new(Mutex::new(RootImageRuntimeState::default())),
+        }
+    }
+
+    fn capture_lease(&self) -> Result<SessionCapabilityLease, String> {
+        self.scope
+            .capture()
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())
+    }
+
+    pub(crate) fn replace_with_target(
         &self,
+        lease: SessionCapabilityLease,
         kind: RootImageKind,
         image: FlashImageInfo,
         target_partition_name: String,
-    ) -> RootImageSelectionDto {
+    ) -> Result<RootImageSelectionDto, String> {
         let id = format!(
             "root-image-{}-{}",
             kind.label(),
             ROOT_IMAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let selection = RootImageSelection {
+            epoch: lease.epoch,
             id: id.clone(),
             image,
             target_partition_name,
         };
-        let mut state = self
-            .state
-            .lock()
-            .expect("root image runtime lock should not be poisoned");
-        match kind {
-            RootImageKind::InitBoot => state.init_boot = Some(selection.clone()),
-            RootImageKind::VendorBoot => state.vendor_boot = Some(selection.clone()),
-        }
-        root_image_selection_dto(kind, selection)
+        self.scope
+            .commit(lease, || {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("root image runtime lock should not be poisoned");
+                match kind {
+                    RootImageKind::InitBoot => state.init_boot = Some(selection.clone()),
+                    RootImageKind::VendorBoot => state.vendor_boot = Some(selection.clone()),
+                }
+                root_image_selection_dto(kind, selection)
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())
     }
 
-    /// 本地选择的便捷重载：目标分区名默认等于 kind 的 label（init_boot / vendor_boot）。
+    pub(crate) fn replace_extracted_set(
+        &self,
+        lease: SessionCapabilityLease,
+        boot: Option<(FlashImageInfo, String)>,
+        vendor_boot: Option<FlashImageInfo>,
+    ) -> Result<(Option<RootImageSelectionDto>, Option<RootImageSelectionDto>), String> {
+        let init_boot = boot.map(|(image, target_partition_name)| RootImageSelection {
+            epoch: lease.epoch,
+            id: format!(
+                "root-image-{}-{}",
+                RootImageKind::InitBoot.label(),
+                ROOT_IMAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ),
+            image,
+            target_partition_name,
+        });
+        let vendor_boot = vendor_boot.map(|image| RootImageSelection {
+            epoch: lease.epoch,
+            id: format!(
+                "root-image-{}-{}",
+                RootImageKind::VendorBoot.label(),
+                ROOT_IMAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ),
+            image,
+            target_partition_name: RootImageKind::VendorBoot.label().to_string(),
+        });
+        self.scope
+            .commit(lease, || {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("root image runtime lock should not be poisoned");
+                state.init_boot = init_boot.clone();
+                state.vendor_boot = vendor_boot.clone();
+                (
+                    init_boot.map(|selection| {
+                        root_image_selection_dto(RootImageKind::InitBoot, selection)
+                    }),
+                    vendor_boot.map(|selection| {
+                        root_image_selection_dto(RootImageKind::VendorBoot, selection)
+                    }),
+                )
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())
+    }
+
+    /// Test-only fixture helper for virtual paths that do not exist on disk.
+    #[cfg(test)]
+    pub fn replace(
+        &self,
+        kind: RootImageKind,
+        image: FlashImageInfo,
+        target_partition_name: String,
+    ) -> RootImageSelectionDto {
+        let lease = self
+            .capture_lease()
+            .expect("ROOT image test runtime must be activated");
+        self.replace_with_target(lease, kind, image, target_partition_name)
+            .expect("current test lease should publish ROOT image")
+    }
+
+    /// Test-only fixture helper: target defaults to kind label.
+    #[cfg(test)]
     pub fn replace_default(
         &self,
         kind: RootImageKind,
@@ -242,81 +328,212 @@ impl RootImageRuntime {
     }
 
     fn get_selection(&self, kind: RootImageKind, id: &str) -> Result<RootImageSelection, String> {
-        let state = self
-            .state
-            .lock()
-            .expect("root image runtime lock should not be poisoned");
-        let selection = match kind {
-            RootImageKind::InitBoot => state.init_boot.as_ref(),
-            RootImageKind::VendorBoot => state.vendor_boot.as_ref(),
-        };
-        selection
-            .filter(|selection| selection.id == id)
-            .cloned()
-            .ok_or_else(|| "ROOT 镜像选择已失效，请重新选择。".to_string())
+        let lease = self.capture_lease()?;
+        self.get_selection_with_lease(lease, kind, id)
+    }
+
+    fn get_selection_with_lease(
+        &self,
+        lease: SessionCapabilityLease,
+        kind: RootImageKind,
+        id: &str,
+    ) -> Result<RootImageSelection, String> {
+        self.scope
+            .commit(lease, || {
+                let state = self
+                    .state
+                    .lock()
+                    .expect("root image runtime lock should not be poisoned");
+                let selection = match kind {
+                    RootImageKind::InitBoot => state.init_boot.as_ref(),
+                    RootImageKind::VendorBoot => state.vendor_boot.as_ref(),
+                };
+                selection
+                    .filter(|selection| selection.id == id && selection.epoch == lease.epoch)
+                    .cloned()
+                    .ok_or_else(|| "ROOT 镜像选择已失效，请重新选择。".to_string())
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?
     }
 
     /// 取当前 boot 槽位（InitBoot kind）的镜像与其实际目标分区名。
+    #[cfg(test)]
     fn get_boot_with_target(&self, id: &str) -> Result<(FlashImageInfo, String), String> {
         let selection = self.get_selection(RootImageKind::InitBoot, id)?;
         Ok((selection.image, selection.target_partition_name))
     }
 
+    fn get_boot_with_target_with_lease(
+        &self,
+        lease: SessionCapabilityLease,
+        id: &str,
+    ) -> Result<(FlashImageInfo, String), String> {
+        let selection = self.get_selection_with_lease(lease, RootImageKind::InitBoot, id)?;
+        Ok((selection.image, selection.target_partition_name))
+    }
+
+    #[cfg(test)]
     fn take_automatic(
         &self,
         options: RootAutomaticOptionsDto,
     ) -> Result<RootAutomaticSelection, String> {
+        let lease = self.capture_lease()?;
+        self.take_automatic_with_lease(lease, options)
+    }
+
+    fn take_automatic_with_lease(
+        &self,
+        lease: SessionCapabilityLease,
+        options: RootAutomaticOptionsDto,
+    ) -> Result<RootAutomaticSelection, String> {
+        let (init_boot, vendor_boot) = self.snapshot_automatic(lease, &options)?;
+        self.take_snapshotted_automatic(lease, options, &init_boot, vendor_boot.as_ref())
+    }
+
+    #[cfg(test)]
+    fn take_automatic_with_lease_and_observer(
+        &self,
+        lease: SessionCapabilityLease,
+        options: RootAutomaticOptionsDto,
+        observe: impl FnOnce(&RootImageSelection, Option<&RootImageSelection>) -> Result<(), String>,
+    ) -> Result<RootAutomaticSelection, String> {
+        let (init_boot, vendor_boot) = self.snapshot_automatic(lease, &options)?;
+
+        observe(&init_boot, vendor_boot.as_ref())?;
+
+        self.take_snapshotted_automatic(lease, options, &init_boot, vendor_boot.as_ref())
+    }
+
+    fn snapshot_automatic(
+        &self,
+        lease: SessionCapabilityLease,
+        options: &RootAutomaticOptionsDto,
+    ) -> Result<(RootImageSelection, Option<RootImageSelection>), String> {
+        self.scope
+            .commit(lease, || {
+                let state = self
+                    .state
+                    .lock()
+                    .expect("root image runtime lock should not be poisoned");
+                let init_boot = state
+                    .init_boot
+                    .as_ref()
+                    .filter(|selection| {
+                        selection.id == options.init_boot_id && selection.epoch == lease.epoch
+                    })
+                    .cloned()
+                    .ok_or_else(|| "ROOT 镜像选择已失效，请重新选择。".to_string())?;
+
+                let vendor_boot = match options.manager {
+                    RootManager::VivoKsu => {
+                        if options.vendor_boot_id.is_some() {
+                            return Err("Vivo KSU 全自动流程只接受 init_boot 镜像。".to_string());
+                        }
+                        None
+                    }
+                    RootManager::OfficialKernelSu => {
+                        let vendor_boot_id =
+                            options.vendor_boot_id.as_deref().ok_or_else(|| {
+                                "官方 KernelSU 全自动流程需要当前 vendor_boot 镜像。".to_string()
+                            })?;
+                        Some(
+                            state
+                                .vendor_boot
+                                .as_ref()
+                                .filter(|selection| {
+                                    selection.id == vendor_boot_id && selection.epoch == lease.epoch
+                                })
+                                .cloned()
+                                .ok_or_else(|| "ROOT 镜像选择已失效，请重新选择。".to_string())?,
+                        )
+                    }
+                };
+
+                Ok((init_boot, vendor_boot))
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?
+    }
+
+    fn take_snapshotted_automatic(
+        &self,
+        lease: SessionCapabilityLease,
+        options: RootAutomaticOptionsDto,
+        expected_init_boot: &RootImageSelection,
+        expected_vendor_boot: Option<&RootImageSelection>,
+    ) -> Result<RootAutomaticSelection, String> {
+        self.scope
+            .commit(lease, || {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("root image runtime lock should not be poisoned");
+                let init_boot_is_current = state.init_boot.as_ref().is_some_and(|selection| {
+                    selection.id == expected_init_boot.id
+                        && selection.epoch == lease.epoch
+                        && expected_init_boot.epoch == lease.epoch
+                });
+                let vendor_boot_is_current = match options.manager {
+                    RootManager::VivoKsu => expected_vendor_boot.is_none(),
+                    RootManager::OfficialKernelSu => {
+                        let Some(expected_vendor_boot) = expected_vendor_boot else {
+                            return Err(
+                                "官方 KernelSU 全自动流程需要当前 vendor_boot 镜像。".to_string()
+                            );
+                        };
+                        state.vendor_boot.as_ref().is_some_and(|selection| {
+                            selection.id == expected_vendor_boot.id
+                                && selection.epoch == lease.epoch
+                                && expected_vendor_boot.epoch == lease.epoch
+                        })
+                    }
+                };
+                if !init_boot_is_current || !vendor_boot_is_current {
+                    return Err("ROOT 镜像选择已失效，请重新选择。".to_string());
+                }
+
+                let init_boot = state
+                    .init_boot
+                    .take()
+                    .ok_or_else(|| "ROOT 镜像选择已失效，请重新选择。".to_string())?;
+                let vendor_boot = if options.manager == RootManager::OfficialKernelSu {
+                    state.vendor_boot.take()
+                } else {
+                    None
+                };
+
+                Ok(RootAutomaticSelection {
+                    manager: options.manager,
+                    init_boot: init_boot.image,
+                    boot_partition_name: init_boot.target_partition_name,
+                    vendor_boot: vendor_boot.map(|selection| selection.image),
+                    use_automatic_kmi: options.use_automatic_kmi,
+                    selected_kmi: options.selected_kmi,
+                })
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn clear_owned(&self) -> Vec<PathBuf> {
         let mut state = self
             .state
             .lock()
             .expect("root image runtime lock should not be poisoned");
-        let init_boot = state
-            .init_boot
-            .as_ref()
-            .filter(|selection| selection.id == options.init_boot_id)
-            .cloned()
-            .ok_or_else(|| "ROOT 镜像选择已失效，请重新选择。".to_string())?;
-
-        let vendor_boot = match options.manager {
-            RootManager::VivoKsu => {
-                if options.vendor_boot_id.is_some() {
-                    return Err("Vivo KSU 全自动流程只接受 init_boot 镜像。".to_string());
-                }
-                None
-            }
-            RootManager::OfficialKernelSu => {
-                let vendor_boot_id = options.vendor_boot_id.as_deref().ok_or_else(|| {
-                    "官方 KernelSU 全自动流程需要当前 vendor_boot 镜像。".to_string()
-                })?;
-                Some(
-                    state
-                        .vendor_boot
-                        .as_ref()
-                        .filter(|selection| selection.id == vendor_boot_id)
-                        .cloned()
-                        .ok_or_else(|| "ROOT 镜像选择已失效，请重新选择。".to_string())?,
-                )
-            }
-        };
-
         state.init_boot = None;
-        if options.manager == RootManager::OfficialKernelSu {
-            state.vendor_boot = None;
-        }
+        state.vendor_boot = None;
+        Vec::new()
+    }
+}
 
-        Ok(RootAutomaticSelection {
-            manager: options.manager,
-            init_boot: init_boot.image,
-            boot_partition_name: init_boot.target_partition_name,
-            vendor_boot: vendor_boot.map(|selection| selection.image),
-            use_automatic_kmi: options.use_automatic_kmi,
-            selected_kmi: options.selected_kmi,
-        })
+impl Default for RootImageRuntime {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[derive(Debug, Clone)]
 struct RootPatchedArtifact {
+    epoch: u64,
     id: String,
     partition: QuickFlashPartition,
     image: FlashImageInfo,
@@ -327,46 +544,76 @@ struct RootPatchedArtifact {
 struct RootPatchedArtifactState {
     init_boot: Option<RootPatchedArtifact>,
     vendor_boot: Option<RootPatchedArtifact>,
-    prepared_flash: Option<(String, PartitionExecutionPlan)>,
+    prepared_flash: Option<PreparedRootFlash>,
 }
 
-#[derive(Clone, Default)]
+struct PreparedRootFlash {
+    epoch: u64,
+    artifact_id: String,
+    plan: PartitionExecutionPlan,
+}
+
+#[derive(Clone)]
 pub struct RootPatchedArtifactRuntime {
+    scope: Arc<SessionCapabilityScope>,
     state: Arc<Mutex<RootPatchedArtifactState>>,
 }
 
 impl RootPatchedArtifactRuntime {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_scope(Arc::new(SessionCapabilityScope::new()))
     }
 
-    pub fn replace(
+    pub(crate) fn with_scope(scope: Arc<SessionCapabilityScope>) -> Self {
+        Self {
+            scope,
+            state: Arc::new(Mutex::new(RootPatchedArtifactState::default())),
+        }
+    }
+
+    #[cfg(test)]
+    fn capture_lease(&self) -> Result<SessionCapabilityLease, String> {
+        self.scope
+            .capture()
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())
+    }
+
+    #[cfg(test)]
+    fn replace(
         &self,
         kind: RootImageKind,
         image: FlashImageInfo,
         flash_partition: QuickFlashPartition,
     ) -> RootPatchedArtifactDto {
-        self.replace_with_ownership(kind, image, flash_partition, None)
+        let lease = self
+            .capture_lease()
+            .expect("ROOT artifact test runtime must be activated");
+        self.replace_with_ownership(lease, kind, image, flash_partition, None)
+            .expect("current test lease should publish ROOT artifact")
     }
 
     fn replace_owned(
         &self,
+        lease: SessionCapabilityLease,
         kind: RootImageKind,
         image: FlashImageInfo,
         flash_partition: QuickFlashPartition,
         staging_root: PathBuf,
-    ) -> RootPatchedArtifactDto {
-        self.replace_with_ownership(kind, image, flash_partition, Some(staging_root))
+    ) -> Result<RootPatchedArtifactDto, String> {
+        self.replace_with_ownership(lease, kind, image, flash_partition, Some(staging_root))
     }
 
     fn replace_with_ownership(
         &self,
+        lease: SessionCapabilityLease,
         kind: RootImageKind,
         image: FlashImageInfo,
         flash_partition: QuickFlashPartition,
         staging_root: Option<PathBuf>,
-    ) -> RootPatchedArtifactDto {
+    ) -> Result<RootPatchedArtifactDto, String> {
+        let candidate_root = staging_root.clone();
         let artifact = RootPatchedArtifact {
+            epoch: lease.epoch,
             id: format!(
                 "root-patch-{}-{}",
                 kind.label(),
@@ -376,55 +623,154 @@ impl RootPatchedArtifactRuntime {
             image,
             staging_root,
         };
+        let publication = self.scope.commit(lease, || {
+            let mut state = self
+                .state
+                .lock()
+                .expect("root patched artifact runtime lock should not be poisoned");
+            let replaced = match kind {
+                RootImageKind::InitBoot => state.init_boot.replace(artifact.clone()),
+                RootImageKind::VendorBoot => state.vendor_boot.replace(artifact.clone()),
+            };
+            state.prepared_flash = None;
+            (
+                root_patched_artifact_dto(artifact),
+                replaced.and_then(|previous| previous.staging_root),
+            )
+        });
+        match publication {
+            Ok((dto, previous_root)) => {
+                if let Some(previous_root) = previous_root {
+                    let _ = fs::remove_dir_all(previous_root);
+                }
+                Ok(dto)
+            }
+            Err(_) => {
+                if let Some(candidate_root) = candidate_root {
+                    let _ = fs::remove_dir_all(candidate_root);
+                }
+                Err(ROOT_CAPABILITY_UNAVAILABLE.to_string())
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn get(&self, artifact_id: &str) -> Result<RootPatchedArtifact, String> {
+        let lease = self.capture_lease()?;
+        self.get_with_lease(lease, artifact_id)
+    }
+
+    fn get_with_lease(
+        &self,
+        lease: SessionCapabilityLease,
+        artifact_id: &str,
+    ) -> Result<RootPatchedArtifact, String> {
+        self.scope
+            .commit(lease, || {
+                let state = self
+                    .state
+                    .lock()
+                    .expect("root patched artifact runtime lock should not be poisoned");
+                let artifact = [state.init_boot.as_ref(), state.vendor_boot.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .find(|artifact| artifact.id == artifact_id && artifact.epoch == lease.epoch)
+                    .cloned()
+                    .ok_or_else(|| "ROOT 修补工件已失效，请重新修补。".to_string());
+                artifact
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?
+    }
+
+    #[cfg(test)]
+    fn prepare_flash(&self, artifact_id: String, plan: PartitionExecutionPlan) {
+        let lease = self
+            .capture_lease()
+            .expect("ROOT artifact test runtime must be activated");
+        self.prepare_flash_with_lease(lease, artifact_id, plan)
+            .expect("current test lease should publish prepared ROOT flash");
+    }
+
+    fn prepare_flash_with_lease(
+        &self,
+        lease: SessionCapabilityLease,
+        artifact_id: String,
+        plan: PartitionExecutionPlan,
+    ) -> Result<(), String> {
+        self.scope
+            .commit(lease, || {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("root patched artifact runtime lock should not be poisoned");
+                let artifact_is_current = [state.init_boot.as_ref(), state.vendor_boot.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|artifact| artifact.id == artifact_id && artifact.epoch == lease.epoch);
+                if !artifact_is_current {
+                    return Err("ROOT 修补工件已失效，请重新修补。".to_string());
+                }
+                state.prepared_flash = Some(PreparedRootFlash {
+                    epoch: lease.epoch,
+                    artifact_id,
+                    plan,
+                });
+                Ok(())
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?
+    }
+
+    #[cfg(test)]
+    fn take_prepared_flash(&self, artifact_id: &str) -> Result<PartitionExecutionPlan, String> {
+        let lease = self.capture_lease()?;
+        self.take_prepared_flash_with_lease(lease, artifact_id)
+    }
+
+    fn take_prepared_flash_with_lease(
+        &self,
+        lease: SessionCapabilityLease,
+        artifact_id: &str,
+    ) -> Result<PartitionExecutionPlan, String> {
+        self.scope
+            .commit(lease, || {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("root patched artifact runtime lock should not be poisoned");
+                match state.prepared_flash.take() {
+                    Some(prepared)
+                        if prepared.artifact_id == artifact_id && prepared.epoch == lease.epoch =>
+                    {
+                        Ok(prepared.plan)
+                    }
+                    Some(prepared) => {
+                        state.prepared_flash = Some(prepared);
+                        Err("ROOT 修补镜像刷写预检已失效，请重新确认。".to_string())
+                    }
+                    None => Err("请先确认 ROOT 修补镜像刷写。".to_string()),
+                }
+            })
+            .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn clear_owned(&self) -> Vec<PathBuf> {
         let mut state = self
             .state
             .lock()
             .expect("root patched artifact runtime lock should not be poisoned");
-        let replaced = match kind {
-            RootImageKind::InitBoot => state.init_boot.replace(artifact.clone()),
-            RootImageKind::VendorBoot => state.vendor_boot.replace(artifact.clone()),
-        };
-        if let Some(previous_root) = replaced.and_then(|previous| previous.staging_root) {
-            let _ = fs::remove_dir_all(previous_root);
-        }
         state.prepared_flash = None;
-        root_patched_artifact_dto(artifact)
-    }
-
-    fn get(&self, artifact_id: &str) -> Result<RootPatchedArtifact, String> {
-        let state = self
-            .state
-            .lock()
-            .expect("root patched artifact runtime lock should not be poisoned");
-        let artifact = [state.init_boot.as_ref(), state.vendor_boot.as_ref()]
+        [state.init_boot.take(), state.vendor_boot.take()]
             .into_iter()
             .flatten()
-            .find(|artifact| artifact.id == artifact_id)
-            .cloned()
-            .ok_or_else(|| "ROOT 修补工件已失效，请重新修补。".to_string());
-        artifact
+            .filter_map(|artifact| artifact.staging_root)
+            .collect()
     }
+}
 
-    fn prepare_flash(&self, artifact_id: String, plan: PartitionExecutionPlan) {
-        self.state
-            .lock()
-            .expect("root patched artifact runtime lock should not be poisoned")
-            .prepared_flash = Some((artifact_id, plan));
-    }
-
-    fn take_prepared_flash(&self, artifact_id: &str) -> Result<PartitionExecutionPlan, String> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("root patched artifact runtime lock should not be poisoned");
-        match state.prepared_flash.take() {
-            Some((stored_id, plan)) if stored_id == artifact_id => Ok(plan),
-            Some((stored_id, plan)) => {
-                state.prepared_flash = Some((stored_id, plan));
-                Err("ROOT 修补镜像刷写预检已失效，请重新确认。".to_string())
-            }
-            None => Err("请先确认 ROOT 修补镜像刷写。".to_string()),
-        }
+impl Default for RootPatchedArtifactRuntime {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -462,8 +808,19 @@ fn root_patched_artifact_dto(artifact: RootPatchedArtifact) -> RootPatchedArtifa
     }
 }
 
+#[cfg(test)]
 fn automatic_root_flash_source(
     runtime: &RootPatchedArtifactRuntime,
+    manager: RootManager,
+    artifact_ids: &[String],
+) -> Result<SafeFlashPreparedSource, String> {
+    let lease = runtime.capture_lease()?;
+    automatic_root_flash_source_with_lease(runtime, lease, manager, artifact_ids)
+}
+
+fn automatic_root_flash_source_with_lease(
+    runtime: &RootPatchedArtifactRuntime,
+    lease: SessionCapabilityLease,
     manager: RootManager,
     artifact_ids: &[String],
 ) -> Result<SafeFlashPreparedSource, String> {
@@ -483,7 +840,7 @@ fn automatic_root_flash_source(
 
     let artifacts = artifact_ids
         .iter()
-        .map(|artifact_id| runtime.get(artifact_id))
+        .map(|artifact_id| runtime.get_with_lease(lease, artifact_id))
         .collect::<Result<Vec<_>, _>>()?;
     let mut partitions = Vec::with_capacity(artifacts.len());
     // 依规范顺序排列：boot 槽位（init_boot 或 boot 由工件真实分区名决定）在前，vendor_boot 在后。
@@ -552,7 +909,7 @@ fn build_adb_kernel_release_command(serial: &str) -> Result<ProcessCommand, Stri
         return Err("当前 ADB 设备标识无效。".to_string());
     }
     Ok(ProcessCommand::new(
-        "adb.exe",
+        bundled_platform_tool("adb.exe"),
         [
             "-s".to_string(),
             serial.to_string(),
@@ -595,7 +952,7 @@ fn build_adb_manager_command<'a>(
     }
     let mut args = vec!["-s".to_string(), serial.to_string(), "shell".to_string()];
     args.extend(command.into_iter().map(str::to_string));
-    Ok(ProcessCommand::new("adb.exe", args))
+    Ok(ProcessCommand::new(bundled_platform_tool("adb.exe"), args))
 }
 
 fn vivo_ksu_remote_source(partition: &str) -> String {
@@ -629,7 +986,8 @@ fn build_vivo_ksu_patch_commands(
     VivoRootResourceService::validate_kmi(kmi).map_err(|_| "不支持的 ROOT KMI。".to_string())?;
     validate_boot_partition_name(partition)?;
 
-    let adb = |arguments: Vec<String>| ProcessCommand::new("adb.exe", arguments);
+    let adb =
+        |arguments: Vec<String>| ProcessCommand::new(bundled_platform_tool("adb.exe"), arguments);
     let remote_source = vivo_ksu_remote_source(partition);
     let remote_patched = vivo_ksu_remote_patched(partition);
     // 脚本内用相对文件名（脚本已 cd 到 VIVO_KSU_REMOTE_DIRECTORY）。
@@ -740,7 +1098,8 @@ fn build_vendor_boot_setup_commands(
         return Err("当前 ADB 设备标识无效。".to_string());
     }
     let remote_root = vendor_boot_remote_root_from_token(workspace_token)?;
-    let adb = |arguments: Vec<String>| ProcessCommand::new("adb.exe", arguments);
+    let adb =
+        |arguments: Vec<String>| ProcessCommand::new(bundled_platform_tool("adb.exe"), arguments);
     let unpack_script = format!(
         "cd {remote_root} && chmod 755 magiskboot && ./magiskboot unpack vendor_boot.img 2>&1; echo UNPACK_EXIT=$?; find . -maxdepth 3 -name '*.cpio' 2>/dev/null"
     );
@@ -806,7 +1165,7 @@ fn build_vendor_boot_module_update_command(
     }
     let filter = match file_name {
         "modules.load" | "modules.load.recovery" => {
-            format!("sed -i '/vr\\\\.ko/d' {file_name}")
+            format!("sed -i '/vr\\.ko/d' {file_name}")
         }
         "modules.softdep" => {
             "sed -i '/softdep[[:space:]]\\+vr[[:space:]]\\+pre/d' modules.softdep".to_string()
@@ -818,7 +1177,7 @@ fn build_vendor_boot_module_update_command(
         "cd {validated_root}/vendor_ramdisk && {validated_root}/magiskboot cpio ramdisk.cpio \"extract {path} {file_name}\" && test -f {file_name} && {filter} && {validated_root}/magiskboot cpio ramdisk.cpio \"add 0644 {path} {file_name}\" && rm -f {file_name}"
     );
     Ok(ProcessCommand::new(
-        "adb.exe",
+        bundled_platform_tool("adb.exe"),
         [
             "-s".to_string(),
             serial.to_string(),
@@ -845,7 +1204,7 @@ fn build_vendor_boot_repack_pull_commands(
     );
     Ok(vec![
         ProcessCommand::new(
-            "adb.exe",
+            bundled_platform_tool("adb.exe"),
             [
                 "-s".to_string(),
                 serial.to_string(),
@@ -857,7 +1216,7 @@ fn build_vendor_boot_repack_pull_commands(
             ],
         ),
         ProcessCommand::new(
-            "adb.exe",
+            bundled_platform_tool("adb.exe"),
             [
                 "-s".to_string(),
                 serial.to_string(),
@@ -917,6 +1276,26 @@ where
         let _ = fs::remove_dir_all(staging);
     }
     workflow_result
+}
+
+fn publish_root_patch_candidate(
+    artifacts: &RootPatchedArtifactRuntime,
+    lease: SessionCapabilityLease,
+    kind: RootImageKind,
+    candidate: Result<FlashImageInfo, DomainError>,
+    flash_partition: QuickFlashPartition,
+    staging: PathBuf,
+) -> Result<RootPatchedArtifactDto, DomainError> {
+    let image = match candidate {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            let _ = fs::remove_dir_all(staging);
+            return Err(error);
+        }
+    };
+    artifacts
+        .replace_owned(lease, kind, image, flash_partition, staging)
+        .map_err(DomainError::InvalidOperation)
 }
 
 fn is_safe_adb_serial_character(character: char) -> bool {
@@ -1036,7 +1415,7 @@ async fn install_root_manager_core(
         .map_err(|_| DomainError::InvalidOperation("ROOT 管理器资源校验失败。".to_string()))?;
 
     context.report_stage(format!("正在安装 {manager_label} 管理器"));
-    let install = FileManagerService::with_platform_tools("adb.exe", "fastboot.exe")
+    let install = FileManagerService::bundled()
         .build_install_apk_command(&serial, Path::new(&verified.apk_path))
         .map_err(|_| DomainError::InvalidOperation("ROOT 管理器安装条件无效。".to_string()))?;
     execute_root_manager_command(
@@ -1075,6 +1454,7 @@ async fn install_root_manager_core(
 
 #[allow(clippy::too_many_arguments)]
 async fn patch_vivo_ksu_core(
+    lease: SessionCapabilityLease,
     manager: RootManager,
     serial: String,
     source: FlashImageInfo,
@@ -1159,7 +1539,7 @@ async fn patch_vivo_ksu_core(
         task::spawn_blocking({
             let source = source.clone();
             let staged_output = staged_output.clone();
-            move || validate_patched_root_image(&source, &staged_output)
+            move || validate_patched_root_image(&source, &staged_output).map_err(|_| ())
         })
         .await
         .map_err(|_| DomainError::Internal("ROOT 产物校验任务已中断。".to_string()))?
@@ -1169,23 +1549,23 @@ async fn patch_vivo_ksu_core(
     let cleanup = build_vivo_ksu_patch_cleanup_command(&serial, partition)
         .map_err(DomainError::InvalidInput)?;
     let _ = execute_root_patch_command(cleanup, tokio_util::sync::CancellationToken::new()).await;
-    let patched = match patch_result {
-        Ok(patched) => patched,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-    };
     let flash_partition = quick_flash_partition_from_name(partition)
         .ok_or_else(|| DomainError::InvalidInput("不支持的 ROOT boot 分区名。".to_string()))?;
-    let artifact =
-        artifacts.replace_owned(RootImageKind::InitBoot, patched, flash_partition, staging);
+    let artifact = publish_root_patch_candidate(
+        &artifacts,
+        lease,
+        RootImageKind::InitBoot,
+        patch_result,
+        flash_partition,
+        staging,
+    )?;
     report_root_subprogress(context, progress_base, progress_span, 1.0);
     Ok(artifact)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn patch_official_vendor_boot_core(
+    lease: SessionCapabilityLease,
     serial: String,
     source: FlashImageInfo,
     app_root: PathBuf,
@@ -1276,7 +1656,7 @@ async fn patch_official_vendor_boot_core(
         task::spawn_blocking({
             let source = source.clone();
             let staged_output = staged_output.clone();
-            move || validate_patched_root_image(&source, &staged_output)
+            move || validate_patched_root_image(&source, &staged_output).map_err(|_| ())
         })
         .await
         .map_err(|_| DomainError::Internal("ROOT 产物校验任务已中断。".to_string()))?
@@ -1285,7 +1665,7 @@ async fn patch_official_vendor_boot_core(
     .await;
     let cleanup_serial = serial.clone();
     let cleanup_remote_root = remote_root.clone();
-    let patched = finalize_vendor_boot_workflow(patch_result, staging.clone(), async move {
+    let patch_result = finalize_vendor_boot_workflow(patch_result, staging.clone(), async move {
         if let Ok(cleanup) =
             build_vendor_boot_cleanup_command(&cleanup_serial, &cleanup_remote_root)
         {
@@ -1294,13 +1674,15 @@ async fn patch_official_vendor_boot_core(
         }
         Ok(())
     })
-    .await?;
-    let artifact = artifacts.replace_owned(
+    .await;
+    let artifact = publish_root_patch_candidate(
+        &artifacts,
+        lease,
         RootImageKind::VendorBoot,
-        patched,
+        patch_result,
         QuickFlashPartition::VendorBoot,
         staging,
-    );
+    )?;
     report_root_subprogress(context, progress_base, progress_span, 1.0);
     Ok(artifact)
 }
@@ -1317,21 +1699,51 @@ fn root_preflight_response(
         })
 }
 
+fn build_root_automatic_execution_request<'a>(
+    source: &'a SafeFlashPreparedSource,
+    options: &'a SafeFlashBuildOptions,
+    serial: &'a str,
+) -> SafeFlashExecutionRequest<'a> {
+    SafeFlashExecutionRequest {
+        source,
+        options,
+        serial,
+        transition_to_fastbootd: true,
+    }
+}
+
+#[cfg(test)]
 fn root_preflight_from_runtime(
     runtime: &RootImageRuntime,
     options: RootPreflightOptionsDto,
     connected_kernel_release: Option<String>,
 ) -> Result<RootPatchReadiness, String> {
-    let init_boot = options
-        .init_boot_id
-        .as_deref()
-        .map(|id| runtime.get(RootImageKind::InitBoot, id))
-        .transpose()?;
-    let vendor_boot = options
-        .vendor_boot_id
-        .as_deref()
-        .map(|id| runtime.get(RootImageKind::VendorBoot, id))
-        .transpose()?;
+    let lease = runtime.capture_lease()?;
+    root_preflight_from_runtime_with_lease(runtime, lease, options, connected_kernel_release)
+}
+
+fn root_preflight_from_runtime_with_lease(
+    runtime: &RootImageRuntime,
+    lease: SessionCapabilityLease,
+    options: RootPreflightOptionsDto,
+    connected_kernel_release: Option<String>,
+) -> Result<RootPatchReadiness, String> {
+    let init_boot = match options.init_boot_id.as_deref() {
+        Some(id) => Some(
+            runtime
+                .get_selection_with_lease(lease, RootImageKind::InitBoot, id)?
+                .image,
+        ),
+        None => None,
+    };
+    let vendor_boot = match options.vendor_boot_id.as_deref() {
+        Some(id) => Some(
+            runtime
+                .get_selection_with_lease(lease, RootImageKind::VendorBoot, id)?
+                .image,
+        ),
+        None => None,
+    };
     root_preflight_response(RootPatchPreflightRequest {
         manager: options.manager,
         init_boot,
@@ -1347,10 +1759,11 @@ pub async fn root_preflight(
     state: State<'_, AppState>,
     options: RootPreflightOptionsDto,
 ) -> Result<RootPatchReadiness, String> {
-    let serial = options
-        .use_automatic_kmi
-        .then(|| state.device_runtime.active_adb_serial())
-        .transpose()?;
+    let lease = state
+        .session_capabilities
+        .capture()
+        .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
+    let device_runtime = state.device_runtime.clone();
     let runtime = state.root_image_runtime.clone();
     let readiness = Arc::new(Mutex::new(None));
     let readiness_for_operation = readiness.clone();
@@ -1361,16 +1774,22 @@ pub async fn root_preflight(
             "ROOT 预检",
             move |context, cancellation| async move {
                 context.report_stage("正在检查 ROOT 条件");
-                let connected_kernel_release = match serial {
-                    Some(serial) => {
-                        context.report_stage("正在读取设备 Kernel 版本");
-                        Some(read_connected_kernel_release(serial, cancellation.clone()).await?)
-                    }
-                    None => None,
+                let connected_kernel_release = if options.use_automatic_kmi {
+                    context.report_stage("正在读取设备 Kernel 版本");
+                    let serial = device_runtime
+                        .active_adb_serial()
+                        .map_err(DomainError::DeviceUnavailable)?;
+                    Some(read_connected_kernel_release(serial.clone(), cancellation.clone()).await?)
+                } else {
+                    None
                 };
-                let result =
-                    root_preflight_from_runtime(&runtime, options, connected_kernel_release)
-                        .map_err(DomainError::InvalidOperation)?;
+                let result = root_preflight_from_runtime_with_lease(
+                    &runtime,
+                    lease,
+                    options,
+                    connected_kernel_release,
+                )
+                .map_err(DomainError::InvalidOperation)?;
                 *readiness_for_operation
                     .lock()
                     .map_err(|_| DomainError::Internal("ROOT 预检结果锁不可用。".to_string()))? =
@@ -1394,8 +1813,13 @@ pub async fn root_install_manager(
     state: State<'_, AppState>,
     manager: RootManager,
 ) -> Result<RootManagerInstallDto, String> {
-    let serial = state.device_runtime.active_adb_serial()?;
-    let app_root = application_root();
+    let lease = state
+        .session_capabilities
+        .capture()
+        .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
+    let capability_scope = state.session_capabilities.clone();
+    let device_runtime = state.device_runtime.clone();
+    let app_root = nwflash_windows::bundled_resource_root();
     let result = Arc::new(Mutex::new(None));
     let result_for_operation = result.clone();
 
@@ -1405,6 +1829,9 @@ pub async fn root_install_manager(
             OperationKind::Installing,
             "安装 ROOT 管理器",
             move |context, cancellation| async move {
+                let serial = device_runtime
+                    .active_adb_serial()
+                    .map_err(DomainError::DeviceUnavailable)?;
                 let installation = install_root_manager_core(
                     manager,
                     serial,
@@ -1415,6 +1842,11 @@ pub async fn root_install_manager(
                     1.0,
                 )
                 .await?;
+                if !capability_scope.is_current(lease) {
+                    return Err(DomainError::InvalidOperation(
+                        ROOT_CAPABILITY_UNAVAILABLE.to_string(),
+                    ));
+                }
                 *result_for_operation.lock().map_err(|_| {
                     DomainError::Internal("ROOT 管理器结果锁不可用。".to_string())
                 })? = Some(installation);
@@ -1437,11 +1869,15 @@ pub async fn root_patch_vivo_ksu(
     state: State<'_, AppState>,
     options: RootVivoKsuPatchOptionsDto,
 ) -> Result<RootPatchedArtifactDto, String> {
-    let serial = state.device_runtime.active_adb_serial()?;
+    let lease = state
+        .session_capabilities
+        .capture()
+        .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
+    let device_runtime = state.device_runtime.clone();
     let (source, partition) = state
         .root_image_runtime
-        .get_boot_with_target(&options.init_boot_id)?;
-    let app_root = application_root();
+        .get_boot_with_target_with_lease(lease, &options.init_boot_id)?;
+    let app_root = nwflash_windows::bundled_resource_root();
     let artifacts = state.root_patched_artifacts.clone();
     let result = Arc::new(Mutex::new(None));
     let result_for_operation = result.clone();
@@ -1452,9 +1888,13 @@ pub async fn root_patch_vivo_ksu(
             OperationKind::Hashing,
             format!("修补 Vivo KSU {partition}"),
             move |context, cancellation| async move {
+                let serial = device_runtime
+                    .active_adb_serial()
+                    .map_err(DomainError::DeviceUnavailable)?;
                 let manager = options.manager.unwrap_or(RootManager::VivoKsu);
                 let partition = partition.clone();
                 let artifact = patch_vivo_ksu_core(
+                    lease,
                     manager,
                     serial,
                     source,
@@ -1492,11 +1932,16 @@ pub async fn root_patch_official_vendor_boot(
     state: State<'_, AppState>,
     options: RootOfficialVendorBootPatchOptionsDto,
 ) -> Result<RootPatchedArtifactDto, String> {
-    let serial = state.device_runtime.active_adb_serial()?;
+    let lease = state
+        .session_capabilities
+        .capture()
+        .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
+    let device_runtime = state.device_runtime.clone();
     let source = state
         .root_image_runtime
-        .get(RootImageKind::VendorBoot, &options.vendor_boot_id)?;
-    let app_root = application_root();
+        .get_selection_with_lease(lease, RootImageKind::VendorBoot, &options.vendor_boot_id)?
+        .image;
+    let app_root = nwflash_windows::bundled_resource_root();
     let artifacts = state.root_patched_artifacts.clone();
     let result = Arc::new(Mutex::new(None));
     let result_for_operation = result.clone();
@@ -1506,7 +1951,11 @@ pub async fn root_patch_official_vendor_boot(
             OperationKind::Hashing,
             "修补官方 KernelSU vendor_boot",
             move |context, cancellation| async move {
+                let serial = device_runtime
+                    .active_adb_serial()
+                    .map_err(DomainError::DeviceUnavailable)?;
                 let artifact = patch_official_vendor_boot_core(
+                    lease,
                     serial,
                     source,
                     app_root,
@@ -1539,7 +1988,13 @@ pub fn root_prepare_patched_artifact_flash(
     state: State<'_, AppState>,
     artifact_id: String,
 ) -> Result<RootPatchedFlashConfirmationDto, String> {
-    let artifact = state.root_patched_artifacts.get(&artifact_id)?;
+    let lease = state
+        .session_capabilities
+        .capture()
+        .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
+    let artifact = state
+        .root_patched_artifacts
+        .get_with_lease(lease, &artifact_id)?;
     let plan = crate::commands::quick_flash::build_preset_execution_plan(
         &state.device_runtime,
         &artifact.image.path,
@@ -1549,7 +2004,7 @@ pub fn root_prepare_patched_artifact_flash(
     let task_count = plan.tasks.len();
     state
         .root_patched_artifacts
-        .prepare_flash(artifact_id, plan);
+        .prepare_flash_with_lease(lease, artifact_id, plan)?;
     Ok(RootPatchedFlashConfirmationDto {
         partition,
         task_count,
@@ -1561,11 +2016,32 @@ pub async fn root_execute_patched_artifact_flash(
     state: State<'_, AppState>,
     artifact_id: String,
 ) -> Result<crate::commands::quick_flash::CommandExecutionResultDto, String> {
-    state.root_patched_artifacts.get(&artifact_id)?;
-    let plan = state
-        .root_patched_artifacts
-        .take_prepared_flash(&artifact_id)?;
-    crate::commands::quick_flash::quick_flash_execute_commands(state, plan).await
+    root_execute_patched_artifact_flash_inner(&state, artifact_id).await
+}
+
+async fn root_execute_patched_artifact_flash_inner(
+    state: &AppState,
+    artifact_id: String,
+) -> Result<crate::commands::quick_flash::CommandExecutionResultDto, String> {
+    let capability_scope = state.session_capabilities.clone();
+    let root_patched_artifacts = state.root_patched_artifacts.clone();
+    crate::commands::quick_flash::quick_flash_execute_with_plan_provider(
+        state,
+        "快速刷写 ROOT 修补镜像".to_string(),
+        move || {
+            let lease = capability_scope
+                .capture()
+                .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
+            let plan = root_patched_artifacts
+                .take_prepared_flash_with_lease(lease, &artifact_id)?;
+            Ok(crate::commands::quick_flash::QuickFlashExecutionRequest {
+                plan,
+                auto_reboot: false,
+                switch_to_slot: None,
+            })
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1573,10 +2049,14 @@ pub async fn root_run_automatic(
     state: State<'_, AppState>,
     options: RootAutomaticOptionsDto,
 ) -> Result<RootAutomaticResultDto, String> {
+    let lease = state
+        .session_capabilities
+        .capture()
+        .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
     let device_runtime = state.device_runtime.clone();
     let image_runtime = state.root_image_runtime.clone();
     let artifacts = state.root_patched_artifacts.clone();
-    let app_root = application_root();
+    let app_root = nwflash_windows::bundled_resource_root();
     let result = Arc::new(Mutex::new(None));
     let result_for_operation = result.clone();
 
@@ -1586,17 +2066,17 @@ pub async fn root_run_automatic(
             OperationKind::Installing,
             "ROOT 自动流程",
             move |context, cancellation| async move {
-                let serial = device_runtime
-                    .active_adb_serial()
-                    .map_err(DomainError::DeviceUnavailable)?;
                 let mut selection = image_runtime
-                    .take_automatic(options)
+                    .take_automatic_with_lease(lease, options)
                     .map_err(DomainError::InvalidOperation)?;
                 let manager = selection.manager;
                 let stage_plan = automatic_root_stage_plan(manager);
                 let mut artifact_ids = Vec::with_capacity(stage_plan.len().saturating_sub(2));
 
                 for (index, stage) in stage_plan.iter().copied().enumerate() {
+                    let serial = device_runtime
+                        .active_adb_serial()
+                        .map_err(DomainError::DeviceUnavailable)?;
                     let progress_base = index as f64 / stage_plan.len() as f64;
                     let progress_span = 1.0 / stage_plan.len() as f64;
                     match stage {
@@ -1626,6 +2106,7 @@ pub async fn root_run_automatic(
                             );
                             let boot_partition_name = selection.boot_partition_name.clone();
                             let artifact = patch_vivo_ksu_core(
+                                lease,
                                 manager,
                                 serial.clone(),
                                 selection.init_boot.clone(),
@@ -1654,6 +2135,7 @@ pub async fn root_run_automatic(
                                 )
                             })?;
                             let artifact = patch_official_vendor_boot_core(
+                                lease,
                                 serial.clone(),
                                 source,
                                 app_root.clone(),
@@ -1671,9 +2153,13 @@ pub async fn root_run_automatic(
                                 "ROOT 自动流程: 正在等待并刷写 ROOT 镜像",
                                 OperationKind::Flashing,
                             );
-                            let source =
-                                automatic_root_flash_source(&artifacts, manager, &artifact_ids)
-                                    .map_err(DomainError::InvalidOperation)?;
+                            let source = automatic_root_flash_source_with_lease(
+                                &artifacts,
+                                lease,
+                                manager,
+                                &artifact_ids,
+                            )
+                            .map_err(DomainError::InvalidOperation)?;
                             let build_options = SafeFlashBuildOptions {
                                 serial: serial.clone(),
                                 is_safe_flash: false,
@@ -1688,12 +2174,11 @@ pub async fn root_run_automatic(
                             let stage_cancellation = cancellation.clone();
                             let execution = task::spawn_blocking(move || {
                                 SafeFlashExecutionService::system().execute(
-                                    SafeFlashExecutionRequest {
-                                        source: &source,
-                                        options: &build_options,
-                                        transition_to_fastbootd: true,
-                                        expected_serial: Some(build_options.serial.as_str()),
-                                    },
+                                    build_root_automatic_execution_request(
+                                        &source,
+                                        &build_options,
+                                        &serial,
+                                    ),
                                     || stage_cancellation.is_cancelled(),
                                     |stage| stage_context.report_stage(stage),
                                     |progress| {
@@ -1740,13 +2225,17 @@ pub async fn root_select_image(
     state: State<'_, AppState>,
     kind: RootImageKind,
 ) -> Result<RootImageSelectionDto, String> {
+    let lease = state
+        .session_capabilities
+        .capture()
+        .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
     let path = select_root_image(&app_handle).await?;
     let image = tokio::task::spawn_blocking(move || inspect_root_image(&path))
         .await
         .map_err(|_| "ROOT 镜像检查任务已中断。".to_string())??;
-    Ok(state
+    state
         .root_image_runtime
-        .replace(kind, image, kind.label().to_string()))
+        .replace_with_target(lease, kind, image, kind.label().to_string())
 }
 
 async fn select_root_image(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -1771,28 +2260,425 @@ mod tests {
     use std::{
         fs::{self, File},
         io::Write,
-        path::Path,
+        path::{Path, PathBuf},
+        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use nwflash_application::{RootManager, RootPatchPreflightRequest};
-    use nwflash_domain::{
-        DomainError, FlashImageInfo, PartitionExecutionPlan, PartitionOperationKind, PartitionTask,
-        PartitionTransportKind, QuickFlashPartition,
     };
 
     use super::{
         automatic_root_flash_source, automatic_root_stage_plan, build_adb_kernel_release_command,
         build_manager_launch_command, build_manager_package_verification_command,
-        build_vendor_boot_cleanup_command, build_vendor_boot_module_update_command,
-        build_vendor_boot_repack_pull_commands, build_vendor_boot_setup_commands,
-        build_vivo_ksu_patch_commands, finalize_vendor_boot_workflow, inspect_root_image,
-        manager_resource_key, parse_kernel_release, quick_flash_partition_from_name,
-        root_preflight_from_runtime, root_preflight_response, AutomaticRootStage,
-        RootAutomaticOptionsDto, RootImageKind, RootImageRuntime,
+        build_root_automatic_execution_request, build_vendor_boot_cleanup_command,
+        build_vendor_boot_module_update_command, build_vendor_boot_repack_pull_commands,
+        build_vendor_boot_setup_commands, build_vivo_ksu_patch_commands,
+        finalize_vendor_boot_workflow, inspect_root_image, manager_resource_key,
+        parse_kernel_release, publish_root_patch_candidate, quick_flash_partition_from_name,
+        root_execute_patched_artifact_flash_inner, root_preflight_from_runtime,
+        root_preflight_response, AutomaticRootStage, RootAutomaticOptionsDto, RootImageKind,
+        RootImageRuntime,
         RootOfficialVendorBootPatchOptionsDto, RootPatchedArtifactRuntime, RootPreflightOptionsDto,
         RootVivoKsuPatchOptionsDto,
     };
+    use crate::{session_capabilities::SessionCapabilityScope, AppState};
+    use futures::future::BoxFuture;
+    use nwflash_application::{
+        OperationAuthorization, OperationCoordinator, OperationCoordinatorError,
+        OperationPermissionGate, RootManager, RootPatchPreflightRequest, SafeFlashBuildOptions,
+        SafeFlashPreparedSource,
+    };
+    use nwflash_domain::{
+        DomainError, FlashImageInfo, OperationKind, PartitionExecutionPlan,
+        PartitionOperationKind, PartitionTask, PartitionTransportKind, QuickFlashPartition,
+    };
+    use tokio::sync::Notify;
+
+    struct BlockingRootAuthorization {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        authorization: OperationAuthorization,
+    }
+
+    impl OperationPermissionGate for BlockingRootAuthorization {
+        fn authorize(
+            &self,
+            _operation: OperationKind,
+            _title: String,
+        ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            let authorization = self.authorization.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(authorization)
+            })
+        }
+    }
+
+    fn temporary_root_patch_fixture() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "nwflash-root-patched-artifact-runtime-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("ROOT patch fixture should be created");
+        root
+    }
+
+    fn prepared_root_patch_plan(image: &Path) -> PartitionExecutionPlan {
+        PartitionExecutionPlan {
+            serial: "DEVICE-A".to_string(),
+            transport: PartitionTransportKind::Fastboot,
+            operation: PartitionOperationKind::Write,
+            tasks: vec![PartitionTask {
+                partition_name: "init_boot".to_string(),
+                device_path: String::new(),
+                image_path: Some(image.to_string_lossy().into_owned()),
+                output_path: None,
+                size_bytes: Some(4),
+            }],
+        }
+    }
+
+    fn activated_root_image_runtime() -> RootImageRuntime {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        scope.activate();
+        RootImageRuntime::with_scope(scope)
+    }
+
+    fn activated_root_artifact_runtime() -> RootPatchedArtifactRuntime {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        scope.activate();
+        RootPatchedArtifactRuntime::with_scope(scope)
+    }
+
+    fn prepared_root_flash_is_present(
+        runtime: &RootPatchedArtifactRuntime,
+        artifact_id: &str,
+    ) -> bool {
+        runtime
+            .state
+            .lock()
+            .expect("root patched artifact runtime lock should not be poisoned")
+            .prepared_flash
+            .as_ref()
+            .is_some_and(|prepared| prepared.artifact_id == artifact_id)
+    }
+
+    #[test]
+    fn stale_root_image_and_prepared_artifact_are_rejected_after_reactivation() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let lease = scope.activate();
+        let images = RootImageRuntime::with_scope(scope.clone());
+        let artifacts = RootPatchedArtifactRuntime::with_scope(scope.clone());
+        let root = temporary_root_patch_fixture();
+        let image_path = root.join("selected-init_boot.img");
+        fs::write(&image_path, b"AAAA").expect("external selected image fixture");
+        let image = FlashImageInfo {
+            path: image_path.to_string_lossy().into_owned(),
+            size_bytes: 4,
+        };
+
+        let selection = images
+            .replace_with_target(
+                lease,
+                RootImageKind::InitBoot,
+                image.clone(),
+                "init_boot".to_string(),
+            )
+            .expect("current lease should publish a ROOT image");
+        let artifact = artifacts
+            .replace_with_ownership(
+                lease,
+                RootImageKind::InitBoot,
+                image,
+                QuickFlashPartition::InitBoot,
+                None,
+            )
+            .expect("current lease should publish a ROOT artifact");
+        artifacts
+            .prepare_flash_with_lease(
+                lease,
+                artifact.artifact_id.clone(),
+                prepared_root_patch_plan(&image_path),
+            )
+            .expect("current lease should publish a prepared ROOT flash plan");
+
+        scope.invalidate(|| {});
+        scope.activate();
+
+        assert!(images.get(RootImageKind::InitBoot, &selection.id).is_err());
+        assert!(artifacts
+            .take_prepared_flash(&artifact.artifact_id)
+            .is_err());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn root_clear_owned_collects_artifact_staging_without_claiming_selected_image() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let lease = scope.activate();
+        let images = RootImageRuntime::with_scope(scope.clone());
+        let artifacts = RootPatchedArtifactRuntime::with_scope(scope.clone());
+        let root = temporary_root_patch_fixture();
+        let external_image = root.join("external-init_boot.img");
+        fs::write(&external_image, b"external").expect("external image fixture");
+        images
+            .replace_with_target(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: external_image.to_string_lossy().into_owned(),
+                    size_bytes: 8,
+                },
+                "init_boot".to_string(),
+            )
+            .expect("current lease should publish the external selection");
+
+        let owned_staging = root.join("owned-artifact");
+        fs::create_dir_all(&owned_staging).expect("owned staging fixture");
+        let patched_image = owned_staging.join("patched.img");
+        fs::write(&patched_image, b"patched").expect("patched image fixture");
+        artifacts
+            .replace_owned(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: patched_image.to_string_lossy().into_owned(),
+                    size_bytes: 7,
+                },
+                QuickFlashPartition::InitBoot,
+                owned_staging.clone(),
+            )
+            .expect("current lease should publish the owned artifact");
+
+        let (image_roots, artifact_roots) =
+            scope.invalidate(|| (images.clear_owned(), artifacts.clear_owned()));
+
+        assert!(image_roots.is_empty());
+        assert_eq!(artifact_roots, vec![owned_staging.clone()]);
+        for owned_root in artifact_roots {
+            fs::remove_dir_all(owned_root).expect("caller should delete returned owned roots");
+        }
+        assert!(external_image.exists());
+        assert!(!owned_staging.exists());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn app_state_root_revocation_deletes_owned_staging_but_not_selected_external_image() {
+        let state = AppState::new();
+        let lease = state.session_capabilities.activate();
+        let root = temporary_root_patch_fixture();
+        let external_image = root.join("external-init_boot.img");
+        fs::write(&external_image, b"external").expect("external image fixture");
+        let selection = state
+            .root_image_runtime
+            .replace_with_target(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: external_image.to_string_lossy().into_owned(),
+                    size_bytes: 8,
+                },
+                "init_boot".to_string(),
+            )
+            .expect("current lease should publish the external image selection");
+
+        let owned_staging = root.join("owned-artifact");
+        fs::create_dir_all(&owned_staging).expect("owned staging fixture");
+        let patched_image = owned_staging.join("patched.img");
+        fs::write(&patched_image, b"patched").expect("patched image fixture");
+        state
+            .root_patched_artifacts
+            .replace_with_ownership(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: patched_image.to_string_lossy().into_owned(),
+                    size_bytes: 7,
+                },
+                QuickFlashPartition::InitBoot,
+                Some(owned_staging.clone()),
+            )
+            .expect("current lease should publish the owned artifact");
+        let idle_lease = state
+            .operation_coordinator
+            .try_acquire_idle()
+            .expect("idle state should grant teardown admission");
+
+        state.revoke_root_capabilities(&idle_lease);
+
+        assert!(state.session_capabilities.capture().is_err());
+        assert!(state
+            .root_image_runtime
+            .get(RootImageKind::InitBoot, &selection.id)
+            .is_err());
+        assert!(external_image.exists());
+        assert!(!owned_staging.exists());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn rejected_stale_artifact_commit_deletes_only_its_candidate_staging() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let lease = scope.activate();
+        let images = RootImageRuntime::with_scope(scope.clone());
+        let artifacts = RootPatchedArtifactRuntime::with_scope(scope.clone());
+        let root = temporary_root_patch_fixture();
+        let external_image = root.join("external-init_boot.img");
+        fs::write(&external_image, b"external").expect("external image fixture");
+        images
+            .replace_with_target(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: external_image.to_string_lossy().into_owned(),
+                    size_bytes: 8,
+                },
+                "init_boot".to_string(),
+            )
+            .expect("current lease should publish the external image selection");
+        let candidate_staging = root.join("late-candidate");
+        fs::create_dir_all(&candidate_staging).expect("candidate staging fixture");
+        let patched_image = candidate_staging.join("patched.img");
+        fs::write(&patched_image, b"patched").expect("patched image fixture");
+        scope.invalidate(|| {});
+        let result = artifacts.replace_owned(
+            lease,
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: patched_image.to_string_lossy().into_owned(),
+                size_bytes: 7,
+            },
+            QuickFlashPartition::InitBoot,
+            candidate_staging.clone(),
+        );
+
+        assert!(result.is_err());
+        assert!(!candidate_staging.exists());
+        assert!(external_image.exists());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn automatic_root_consumption_rejects_a_replacement_between_snapshot_and_take() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let lease = scope.activate();
+        let runtime = RootImageRuntime::with_scope(scope);
+        let root = temporary_root_patch_fixture();
+        let initial_path = root.join("initial.img");
+        let replacement_path = root.join("replacement.img");
+        fs::write(&initial_path, b"initial").expect("initial image fixture");
+        fs::write(&replacement_path, b"replacement").expect("replacement image fixture");
+        let initial = runtime
+            .replace_with_target(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: initial_path.to_string_lossy().into_owned(),
+                    size_bytes: 7,
+                },
+                "init_boot".to_string(),
+            )
+            .expect("initial selection should publish");
+        let initial_id = initial.id.clone();
+        let mut replacement_id = None;
+
+        let result = runtime.take_automatic_with_lease_and_observer(
+            lease,
+            RootAutomaticOptionsDto {
+                manager: RootManager::VivoKsu,
+                init_boot_id: initial.id,
+                vendor_boot_id: None,
+                use_automatic_kmi: false,
+                selected_kmi: Some("android14-6.1".to_string()),
+            },
+            |init_boot, vendor_boot| {
+                assert_eq!(init_boot.id, initial_id);
+                assert!(vendor_boot.is_none());
+                let replacement = runtime.replace_with_target(
+                    lease,
+                    RootImageKind::InitBoot,
+                    FlashImageInfo {
+                        path: replacement_path.to_string_lossy().into_owned(),
+                        size_bytes: 11,
+                    },
+                    "init_boot".to_string(),
+                )?;
+                replacement_id = Some(replacement.id);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(runtime
+            .get(
+                RootImageKind::InitBoot,
+                replacement_id
+                    .as_deref()
+                    .expect("replacement should publish during verification"),
+            )
+            .is_ok());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn prepared_root_plan_rejects_its_old_epoch_without_artifact_lookup() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let lease = scope.activate();
+        let runtime = RootPatchedArtifactRuntime::with_scope(scope.clone());
+        let artifact = runtime.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: r"C:\private\root-stage\patched-init_boot.img".to_string(),
+                size_bytes: 4,
+            },
+            QuickFlashPartition::InitBoot,
+        );
+        runtime
+            .prepare_flash_with_lease(
+                lease,
+                artifact.artifact_id.clone(),
+                prepared_root_patch_plan(Path::new(r"C:\private\root-stage\patched-init_boot.img")),
+            )
+            .expect("current epoch should publish prepared plan");
+
+        scope.invalidate(|| {});
+        let current = scope.activate();
+
+        assert!(runtime
+            .take_prepared_flash_with_lease(current, &artifact.artifact_id)
+            .is_err());
+    }
+
+    #[test]
+    fn automatic_root_execution_uses_the_current_fastbootd_target() {
+        let source = SafeFlashPreparedSource {
+            staging_root: None,
+            partitions: Vec::new(),
+            wipe_data_image_path: None,
+            has_block_based_content: false,
+        };
+        let options = SafeFlashBuildOptions {
+            serial: "ROOT-DEVICE".to_string(),
+            is_safe_flash: false,
+            is_keep_root: false,
+            wipe_data: false,
+            wipe_data_image_path: None,
+            slot_mode: nwflash_domain::SafeFlashSlotMode::CurrentSlot,
+            current_slot: None,
+        };
+
+        let request =
+            build_root_automatic_execution_request(&source, &options, options.serial.as_str());
+
+        assert!(request.transition_to_fastbootd);
+        assert_eq!(request.options.serial, "ROOT-DEVICE");
+        assert_eq!(request.serial, "ROOT-DEVICE");
+    }
 
     #[test]
     fn root_preflight_returns_only_safe_readiness_metadata() {
@@ -1819,7 +2705,7 @@ mod tests {
 
     #[test]
     fn root_image_runtime_returns_an_opaque_handle_and_invalidates_replaced_paths() {
-        let runtime = RootImageRuntime::new();
+        let runtime = activated_root_image_runtime();
         let first = runtime.replace_default(
             RootImageKind::InitBoot,
             FlashImageInfo {
@@ -1848,8 +2734,55 @@ mod tests {
     }
 
     #[test]
+    fn root_image_selection_remains_usable_after_the_current_device_changes() {
+        let runtime = activated_root_image_runtime();
+        let original_target = "DEVICE-A";
+        let selection = runtime.replace_default(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: r"C:\private\device-a-init_boot.img".to_string(),
+                size_bytes: 1024,
+            },
+        );
+        let current_target = "DEVICE-B";
+        assert_ne!(current_target, original_target);
+
+        let stored = runtime
+            .get_selection(RootImageKind::InitBoot, &selection.id)
+            .expect("a current opaque ROOT image must be target-neutral");
+        assert_eq!(stored.image.size_bytes, 1024);
+        assert!(!format!("{stored:?}").contains("device_serial"));
+    }
+
+    #[test]
+    fn selected_root_image_allows_same_size_changed_bytes_before_use() {
+        let root = std::env::temp_dir().join(format!(
+            "nwflash-root-target-neutral-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("test root should be created");
+        let image_path = root.join("init_boot.img");
+        fs::write(&image_path, b"AAAA").expect("image should be written");
+
+        let runtime = activated_root_image_runtime();
+        let image = inspect_root_image(&image_path).expect("image should be inspected");
+        let selection = runtime.replace_default(RootImageKind::InitBoot, image);
+        fs::write(&image_path, b"BBBB").expect("same-size replacement should be written");
+
+        let resolved = runtime
+            .get(RootImageKind::InitBoot, &selection.id)
+            .expect("a current opaque selection must not depend on historical file bytes");
+        assert_eq!(resolved.path, image_path.to_string_lossy());
+        assert_eq!(resolved.size_bytes, 4);
+        fs::remove_dir_all(root).expect("test root should be removed");
+    }
+
+    #[test]
     fn root_image_runtime_boot_slot_carries_cloud_extraction_partition_name() {
-        let runtime = RootImageRuntime::new();
+        let runtime = activated_root_image_runtime();
         // 本地选择默认 init_boot。
         let local = runtime.replace_default(
             RootImageKind::InitBoot,
@@ -1895,7 +2828,7 @@ mod tests {
 
     #[test]
     fn root_preflight_resolves_only_current_opaque_image_ids() {
-        let runtime = RootImageRuntime::new();
+        let runtime = activated_root_image_runtime();
         let init_boot = runtime.replace_default(
             RootImageKind::InitBoot,
             FlashImageInfo {
@@ -1960,7 +2893,10 @@ mod tests {
         let command = build_adb_kernel_release_command("ADB-ROOT-1")
             .expect("current ADB serial should build a kernel query");
 
-        assert_eq!(command.program, "adb.exe");
+        assert_eq!(
+            command.program,
+            nwflash_windows::bundled_platform_tool("adb.exe")
+        );
         assert_eq!(
             command.args,
             vec!["-s", "ADB-ROOT-1", "shell", "uname", "-r"]
@@ -2001,7 +2937,10 @@ mod tests {
 
         let verify = build_manager_package_verification_command("ADB-ROOT-1", "me.inkdye.vivoksu")
             .expect("fixed Vivo KSU package should build a verification command");
-        assert_eq!(verify.program, "adb.exe");
+        assert_eq!(
+            verify.program,
+            nwflash_windows::bundled_platform_tool("adb.exe")
+        );
         assert_eq!(
             verify.args,
             vec![
@@ -2047,7 +2986,10 @@ mod tests {
         .expect("supported KMI should produce controlled patch commands");
 
         assert_eq!(commands.len(), 4);
-        assert_eq!(commands[0].program, "adb.exe");
+        assert_eq!(
+            commands[0].program,
+            nwflash_windows::bundled_platform_tool("adb.exe")
+        );
         assert_eq!(
             commands[0].args,
             vec![
@@ -2140,7 +3082,7 @@ mod tests {
 
     #[test]
     fn root_patched_artifacts_are_opaque_and_bound_to_the_matching_quick_flash_partition() {
-        let runtime = RootPatchedArtifactRuntime::new();
+        let runtime = activated_root_artifact_runtime();
         let first = runtime.replace(
             RootImageKind::InitBoot,
             FlashImageInfo {
@@ -2174,8 +3116,132 @@ mod tests {
     }
 
     #[test]
+    fn root_patch_artifact_lookup_allows_same_size_changed_bytes() {
+        let root = temporary_root_patch_fixture();
+        let image = root.join("patched.img");
+        fs::write(&image, b"AAAA").expect("fixture image");
+        let runtime = activated_root_artifact_runtime();
+        let dto = runtime.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: image.to_string_lossy().into_owned(),
+                size_bytes: 4,
+            },
+            QuickFlashPartition::InitBoot,
+        );
+
+        fs::write(&image, b"BBBB").expect("same-size replacement");
+
+        let artifact = runtime
+            .get(&dto.artifact_id)
+            .expect("a current opaque artifact must not depend on historical file bytes");
+        assert_eq!(artifact.image.path, image.to_string_lossy());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn root_patch_artifact_change_does_not_block_prepared_plan_consumption() {
+        let root = temporary_root_patch_fixture();
+        let image = root.join("patched.img");
+        fs::write(&image, b"AAAA").expect("fixture image");
+        let runtime = activated_root_artifact_runtime();
+        let dto = runtime.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: image.to_string_lossy().into_owned(),
+                size_bytes: 4,
+            },
+            QuickFlashPartition::InitBoot,
+        );
+        runtime.prepare_flash(dto.artifact_id.clone(), prepared_root_patch_plan(&image));
+
+        fs::write(&image, b"BBBB").expect("same-size replacement");
+
+        assert_eq!(
+            runtime
+                .take_prepared_flash(&dto.artifact_id)
+                .expect("a current prepared plan must not depend on historical artifact bytes")
+                .tasks[0]
+                .partition_name,
+            "init_boot"
+        );
+        assert!(runtime.take_prepared_flash(&dto.artifact_id).is_err());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn automatic_root_patched_artifact_source_allows_same_size_changed_bytes() {
+        let root = temporary_root_patch_fixture();
+        let image = root.join("patched.img");
+        fs::write(&image, b"AAAA").expect("fixture image");
+        let runtime = activated_root_artifact_runtime();
+        let dto = runtime.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: image.to_string_lossy().into_owned(),
+                size_bytes: 4,
+            },
+            QuickFlashPartition::InitBoot,
+        );
+
+        fs::write(&image, b"BBBB").expect("same-size replacement");
+
+        let source =
+            automatic_root_flash_source(&runtime, RootManager::VivoKsu, &[dto.artifact_id])
+                .expect("a current opaque artifact must remain usable by automatic ROOT");
+        assert_eq!(source.partitions[0].image_path, image.to_string_lossy());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn automatic_root_patched_artifact_source_accepts_unchanged_current_bytes() {
+        let root = temporary_root_patch_fixture();
+        let image = root.join("patched.img");
+        fs::write(&image, b"AAAA").expect("fixture image");
+        let runtime = activated_root_artifact_runtime();
+        let dto = runtime.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: image.to_string_lossy().into_owned(),
+                size_bytes: 4,
+            },
+            QuickFlashPartition::InitBoot,
+        );
+
+        let source =
+            automatic_root_flash_source(&runtime, RootManager::VivoKsu, &[dto.artifact_id])
+                .expect("unchanged current artifact should remain usable");
+
+        assert_eq!(source.partitions.len(), 1);
+        assert_eq!(source.partitions[0].image_path, image.to_string_lossy());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn root_patch_artifact_remains_usable_after_the_current_device_changes() {
+        let runtime = activated_root_artifact_runtime();
+        let original_target = "DEVICE-A";
+        let artifact = runtime.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: r"C:\private\root-stage\device-a-patched.img".to_string(),
+                size_bytes: 2048,
+            },
+            QuickFlashPartition::InitBoot,
+        );
+        let current_target = "DEVICE-B";
+        assert_ne!(current_target, original_target);
+
+        let stored = runtime
+            .get(&artifact.artifact_id)
+            .expect("a current opaque ROOT artifact must be target-neutral");
+        assert_eq!(stored.image.size_bytes, 2048);
+        assert!(!format!("{stored:?}").contains("device_serial"));
+    }
+
+    #[test]
     fn automatic_root_flash_source_accepts_current_opaque_init_and_vendor_artifacts_in_order() {
-        let runtime = RootPatchedArtifactRuntime::new();
+        let runtime = activated_root_artifact_runtime();
         let init_boot = runtime.replace(
             RootImageKind::InitBoot,
             FlashImageInfo {
@@ -2206,14 +3272,14 @@ mod tests {
         assert!(automatic_root_flash_source(
             &runtime,
             RootManager::VivoKsu,
-            &["forged-artifact".to_string()]
+            &["forged-artifact".to_string()],
         )
         .is_err());
     }
 
     #[test]
     fn automatic_root_flash_source_accepts_boot_fallback_for_vivo_ksu() {
-        let runtime = RootPatchedArtifactRuntime::new();
+        let runtime = activated_root_artifact_runtime();
         // 云端提取的 boot 槽位回退到 boot 分区（设备无 init_boot）。
         let boot = runtime.replace(
             RootImageKind::InitBoot,
@@ -2234,7 +3300,7 @@ mod tests {
 
     #[test]
     fn automatic_root_flash_source_still_rejects_non_boot_first_slots() {
-        let runtime = RootPatchedArtifactRuntime::new();
+        let runtime = activated_root_artifact_runtime();
         // 造假一个既不是 init_boot 也不是 boot 的工件 -> 自动流程应拒绝。
         let artifact = runtime.replace(
             RootImageKind::VendorBoot,
@@ -2254,7 +3320,7 @@ mod tests {
 
     #[test]
     fn automatic_root_request_enforces_manager_images_and_consumes_current_handles_once() {
-        let runtime = RootImageRuntime::new();
+        let runtime = activated_root_image_runtime();
         let init_boot = runtime.replace_default(
             RootImageKind::InitBoot,
             FlashImageInfo {
@@ -2302,7 +3368,7 @@ mod tests {
 
     #[test]
     fn automatic_root_request_rejects_forged_stale_and_cross_manager_handles() {
-        let runtime = RootImageRuntime::new();
+        let runtime = activated_root_image_runtime();
         let stale = runtime.replace_default(
             RootImageKind::InitBoot,
             FlashImageInfo {
@@ -2412,7 +3478,7 @@ mod tests {
 
     #[test]
     fn root_patch_flash_preflight_is_bound_to_one_current_artifact_and_consumed_once() {
-        let runtime = RootPatchedArtifactRuntime::new();
+        let runtime = activated_root_artifact_runtime();
         let artifact = runtime.replace(
             RootImageKind::InitBoot,
             FlashImageInfo {
@@ -2447,6 +3513,72 @@ mod tests {
         assert!(runtime.take_prepared_flash(&artifact.artifact_id).is_err());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn denied_root_patched_flash_preserves_capability_for_authorized_retry() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut state = AppState::new();
+        state.operation_coordinator = OperationCoordinator::new(
+            None,
+            Some(Arc::new(BlockingRootAuthorization {
+                entered: entered.clone(),
+                release: release.clone(),
+                authorization: OperationAuthorization::deny("test denial"),
+            })),
+            None,
+            None,
+            None,
+        );
+        state.session_capabilities.activate();
+        let artifact = state.root_patched_artifacts.replace(
+            RootImageKind::InitBoot,
+            FlashImageInfo {
+                path: r"C:\test-only\patched-init_boot.img".to_string(),
+                size_bytes: 4,
+            },
+            QuickFlashPartition::InitBoot,
+        );
+        let mut plan = prepared_root_patch_plan(Path::new(
+            r"C:\test-only\patched-init_boot.img",
+        ));
+        plan.transport = PartitionTransportKind::Automatic;
+        state
+            .root_patched_artifacts
+            .prepare_flash(artifact.artifact_id.clone(), plan);
+
+        let execution =
+            root_execute_patched_artifact_flash_inner(&state, artifact.artifact_id.clone());
+        let observe_pending_authorization = async {
+            entered.notified().await;
+            assert!(prepared_root_flash_is_present(
+                &state.root_patched_artifacts,
+                &artifact.artifact_id
+            ));
+            assert!(matches!(
+                state.operation_coordinator.try_acquire_idle(),
+                Err(OperationCoordinatorError::InProgress)
+            ));
+            release.notify_one();
+        };
+        let (denied, ()) = tokio::join!(execution, observe_pending_authorization);
+
+        assert!(denied.is_err());
+        assert!(prepared_root_flash_is_present(
+            &state.root_patched_artifacts,
+            &artifact.artifact_id
+        ));
+
+        state.operation_coordinator = OperationCoordinator::default();
+        let retry =
+            root_execute_patched_artifact_flash_inner(&state, artifact.artifact_id.clone()).await;
+
+        assert!(retry.is_err());
+        assert!(!prepared_root_flash_is_present(
+            &state.root_patched_artifacts,
+            &artifact.artifact_id
+        ));
+    }
+
     #[test]
     fn replacing_owned_root_patch_artifacts_only_cleans_the_superseded_owned_staging() {
         let root = std::env::temp_dir().join(format!(
@@ -2462,7 +3594,9 @@ mod tests {
         fs::create_dir_all(&external).expect("external fixture should be created");
         fs::create_dir_all(&first).expect("first owned staging should be created");
         fs::create_dir_all(&second).expect("second owned staging should be created");
-        let runtime = RootPatchedArtifactRuntime::new();
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let lease = scope.activate();
+        let runtime = RootPatchedArtifactRuntime::with_scope(scope);
 
         runtime.replace(
             RootImageKind::InitBoot,
@@ -2472,28 +3606,101 @@ mod tests {
             },
             QuickFlashPartition::InitBoot,
         );
-        runtime.replace_owned(
-            RootImageKind::InitBoot,
-            FlashImageInfo {
-                path: first.join("patched.img").to_string_lossy().into_owned(),
-                size_bytes: 1,
-            },
-            QuickFlashPartition::InitBoot,
-            first.clone(),
-        );
-        runtime.replace_owned(
-            RootImageKind::InitBoot,
-            FlashImageInfo {
-                path: second.join("patched.img").to_string_lossy().into_owned(),
-                size_bytes: 1,
-            },
-            QuickFlashPartition::InitBoot,
-            second.clone(),
-        );
+        runtime
+            .replace_owned(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: first.join("patched.img").to_string_lossy().into_owned(),
+                    size_bytes: 1,
+                },
+                QuickFlashPartition::InitBoot,
+                first.clone(),
+            )
+            .expect("current lease should publish first owned artifact");
+        runtime
+            .replace_owned(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: second.join("patched.img").to_string_lossy().into_owned(),
+                    size_bytes: 1,
+                },
+                QuickFlashPartition::InitBoot,
+                second.clone(),
+            )
+            .expect("current lease should publish second owned artifact");
 
         assert!(external.is_dir());
         assert!(!first.exists());
         assert!(second.is_dir());
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn failed_root_patch_candidate_preserves_prior_owned_artifact_and_prepared_plan() {
+        let root = temporary_root_patch_fixture();
+        let prior_root = root.join("prior-owned");
+        let candidate_root = root.join("failed-candidate-owned");
+        let unrelated_root = root.join("unrelated");
+        fs::create_dir_all(&prior_root).expect("prior owned staging should be created");
+        fs::create_dir_all(&candidate_root).expect("candidate owned staging should be created");
+        fs::create_dir_all(&unrelated_root).expect("unrelated directory should be created");
+        let prior_image = prior_root.join("patched.img");
+        fs::write(&prior_image, b"AAAA").expect("prior owned artifact should be written");
+        fs::write(candidate_root.join("patched.img"), b"BBBB")
+            .expect("failed candidate should be written");
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let lease = scope.activate();
+        let runtime = RootPatchedArtifactRuntime::with_scope(scope);
+        let prior = runtime
+            .replace_owned(
+                lease,
+                RootImageKind::InitBoot,
+                FlashImageInfo {
+                    path: prior_image.to_string_lossy().into_owned(),
+                    size_bytes: 4,
+                },
+                QuickFlashPartition::InitBoot,
+                prior_root.clone(),
+            )
+            .expect("current lease should publish prior owned artifact");
+        runtime.prepare_flash(
+            prior.artifact_id.clone(),
+            prepared_root_patch_plan(&prior_image),
+        );
+
+        let result = publish_root_patch_candidate(
+            &runtime,
+            lease,
+            RootImageKind::InitBoot,
+            Err::<FlashImageInfo, _>(DomainError::InvalidOperation(
+                "candidate validation failed".to_string(),
+            )),
+            QuickFlashPartition::InitBoot,
+            candidate_root.clone(),
+        );
+
+        assert!(matches!(result, Err(DomainError::InvalidOperation(_))));
+        assert!(!candidate_root.exists());
+        assert!(prior_root.is_dir());
+        assert!(unrelated_root.is_dir());
+        assert_eq!(
+            runtime
+                .get(&prior.artifact_id)
+                .expect("failed candidate must not replace the prior artifact")
+                .image
+                .path,
+            prior_image.to_string_lossy()
+        );
+        assert_eq!(
+            runtime
+                .take_prepared_flash(&prior.artifact_id)
+                .expect("failed candidate must not consume the prior prepared plan")
+                .tasks[0]
+                .partition_name,
+            "init_boot"
+        );
         fs::remove_dir_all(root).expect("fixture directory should be removed");
     }
 
@@ -2560,7 +3767,10 @@ mod tests {
         )
         .expect("a Rust-owned vendor_boot workspace should build cleanup");
 
-        assert_eq!(cleanup.program, "adb.exe");
+        assert_eq!(
+            cleanup.program,
+            nwflash_windows::bundled_platform_tool("adb.exe")
+        );
         assert_eq!(
             cleanup.args,
             vec![
@@ -2641,7 +3851,10 @@ mod tests {
         )
         .expect("a filtered GKI modules directory and known module list should build");
 
-        assert_eq!(command.program, "adb.exe");
+        assert_eq!(
+            command.program,
+            nwflash_windows::bundled_platform_tool("adb.exe")
+        );
         assert!(command.args.last().is_some_and(|script| script
             .contains("sed -i '/softdep[[:space:]]\\+vr[[:space:]]\\+pre/d' modules.softdep")));
         assert!(build_vendor_boot_module_update_command(

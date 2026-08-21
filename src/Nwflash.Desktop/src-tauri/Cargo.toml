@@ -1,0 +1,45 @@
+[package]
+name = "nwflash-desktop"
+version = "1.0.1"
+edition = "2021"
+description = "奶蛙Flash Desktop Workspace Root"
+
+[workspace]
+members = [
+  "crates/nwflash-domain",
+  "crates/nwflash-application",
+  "crates/nwflash-infrastructure",
+  "crates/nwflash-windows",
+  "crates/nwflash-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.1"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+nwflash-tauri = { path = "crates/nwflash-tauri" }
+tauri = { version = "2.0.3", features = ["wry"] }
+tauri-plugin-dialog = "2.7.2"
+# Tauri discovers permission manifests from direct application dependencies. The plugins are
+# registered only by nwflash-tauri's `e2e` feature, so release builds expose no WDIO server.
+tauri-plugin-wdio = "1.3.0"
+tauri-plugin-wdio-webdriver = "1.3.0"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dev-dependencies]
+futures = "0.3.34"
+nwflash-application = { path = "crates/nwflash-application" }
+nwflash-domain = { path = "crates/nwflash-domain" }
+nwflash-infrastructure = { path = "crates/nwflash-infrastructure" }
+nwflash-windows = { path = "crates/nwflash-windows" }
+tokio = { version = "1.40.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7.13"
+wiremock = "0.6.5"
+
+[features]
+e2e = ["nwflash-tauri/e2e"]

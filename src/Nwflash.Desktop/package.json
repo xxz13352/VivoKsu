@@ -1,0 +1,33 @@
+{
+  "name": "nwflash-desktop",
+  "private": true,
+  "version": "1.0.1",
+  "description": "奶蛙Flash(Rust/Tauri) desktop client workspace",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:e2e": "set VITE_NWFLASH_WDIO_E2E=true&& vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^22.13.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@wdio/tauri-plugin": "^1.3.0",
+    "@vitejs/plugin-react": "^5.0.1",
+    "jsdom": "^30.0.1",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.5",
+    "vitest": "^3.0.0"
+  }
+}

@@ -12,7 +12,9 @@ use std::thread;
 pub fn spawn_range_server(data: Vec<u8>) -> String {
     let data = Arc::new(data);
     let listener = TcpListener::bind("127.0.0.1:0").expect("range server should bind");
-    let addr = listener.local_addr().expect("bound address should be known");
+    let addr = listener
+        .local_addr()
+        .expect("bound address should be known");
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
