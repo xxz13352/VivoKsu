@@ -1,5 +1,9 @@
 # 奶蛙Flash(NWflash)项目架构文档
 
+> **当前实现说明**：当前 Windows 客户端以 [project-architecture.md](project-architecture.md) 和 `src/Nwflash.Desktop/` 源码为准。本文件保留 Cloudflare 服务背景与 WPF 历史基线，不能作为现行 Tauri/Rust IPC 或发布边界的依据。
+
+> Tauri/Rust Windows release verification: `scripts/Verify-TauriRelease.ps1` validates the per-user NSIS layout, bundled device dependencies and SHA-256 manifest. See `docs/architecture-tauri-migration.md` for the Tauri package boundary.
+
 > Vivo 手机刷机 / Root 工具箱。Windows WPF 桌面应用(.NET 8) + Cloudflare Worker API + Web 后台。
 > 本文描述系统整体架构、模块职责、关键数据流与设计决策。业务细节见 [safeflash-ota.md](safeflash-ota.md)、[../cloudflare/API.md](../cloudflare/API.md)。
 
@@ -123,7 +127,9 @@ VivoKsu 工具/
 flowchart TD
     A[App.OnStartup] --> B[注册崩溃日志<br/>DispatcherUnhandledException → crash.log]
     B --> V["BlockForForcedUpdate<br/>版本门禁:过低 → 更新窗 + 退出"]
-    V --> S["ShutdownMode = OnExplicitShutdown<br/>关窗不自动退出,由代码显式 Shutdown"]
+    B --> CV["version_check<br/>/api/app/version<br/>force_update/update_required"]
+    CV -->|需更新| U["阻断主界面<br/>展示更新提示，禁止登录"]
+    CV -->|通过| S["ShutdownMode = OnExplicitShutdown<br/>关窗不自动退出,由代码显式 Shutdown"]
     S --> L["RunApplicationLoop()<br/>登录循环(登出后可重入)"]
     L --> C["LoginWindow.ShowDialog<br/>每次启动强制登录"]
     C -->|取消/关闭| G["Shutdown()<br/>不进主界面"]
@@ -140,6 +146,7 @@ flowchart TD
 要点:
 
 - **每次启动强制登录**:无本地免登录 —— 每次启动必弹登录窗,`/api/login` 通过才进主界面;token 不持久化,仅本次会话注入 `OtaApiClient`([LoginService.cs](src/VivoKsu.App/Services/LoginService.cs) 用 `ConfigureAwait(false)`,不依赖 UI 上下文)。
+- **启动版本门禁**:启动时先发起 `/api/app/version` 版本检查；若返回 `update_required=true/force_update=true`，前端进入更新提示态并阻止登录入口，避免在版本不符状态继续创建会话。
 - **同进程登出(2026-08-15 新增)**:点「登出」→ `MainViewModel.LogoutCommand`(`CanExecute = !Coordinator.IsBusy`,刷写/传输运行中禁用,防打断设备操作,与 force-exit「刷写中先取消等 Idle 再退」一致)→ `AppComposition.OnLogoutAsync`(`StopAsync` 优雅下线后抛 `LogoutRequested` 事件)→ App 关主窗 → `OnMainWindowClosed` 识别登出态(`isLogout`)重入 `RunApplicationLoop` 弹登录窗。旧 composition 已 `StopAsync`(`stopped` 幂等守卫,登出后 OnExit 直接返回),新登录全新构造,无状态残留。
 - **退出清理**:`OnExit` 用 `DispatcherFrame` 泵消息最多 5s 等 `composition.StopAsync()` 完成 —— 清理下载的 Vivo 临时 gzip 与各盘 `Nwflash\safe-flash` staging,并停监视/镜像进程。
 - **崩溃日志**:未捕获异常写 `%LOCALAPPDATA%\Nwflash\crash.log`(商业工具排查用)。
@@ -363,11 +370,48 @@ flowchart TD
 | `VivoRootResourceService` | Root 管理器 APK 校验(**SHA-256 白名单** + AndroidManifest.zip 检查,防被替换) |
 | `VivoVendorBootProcessor` | vendor_boot 补丁处理(官方 / GKI 内核),GKI 缺失跳过;输出已存在先删再重试 |
 | `NwflashDevicePatchService` | 设备 patch 应用(经 adb root) |
-| `QuickFlashService` | 快速刷写:`is-userspace` getvar 失败降级不抛;`expectedSerial` 防串号错刷;**一律 fastbootd**(不再提供 Fastboot/bootloader 选择) |
+| `QuickFlashService` | 快速刷写:`is-userspace` getvar 失败降级不抛;serial 仅在当前命令构造时临时派生;**一律 fastbootd**(不再提供 Fastboot/bootloader 选择) |
 | `MirrorService` + `ScrcpyProvisioningService` | scrcpy 投屏;启动用 **`ADB` 环境变量** 指向内置 adb(scrcpy v4.0 移除了 `--adb-path`);自动投屏开关关闭时取消在途协调;`.staging` 目录清理 |
 | `AdbFileService` | ADB root 通道文件浏览 / 上传 / 下载 / 删除 |
 | `DeviceInfoService` | 读设备详情(版本 / 电量 / 型号) |
 | `ToolPathPreferences` | 本地设置(settings.json),含登录 token 持久化 |
+
+### 3.11 2026.8 Tauri/Rust 迁移中的当前实现
+
+当前工程在 `src/Nwflash.Desktop/` 下并行实现桌面客户端主干：
+
+```text
+src/Nwflash.Desktop/
+├─ src/                         # React 前端壳体（导航、页面容器、状态展示）
+└─ src-tauri/
+   ├─ tauri.conf.json           # Windows 窗口与安全能力
+   └─ crates/
+      ├─ nwflash-domain         # 纯领域模型（页面枚举、错误、日志条目等）
+      ├─ nwflash-application    # 协调器、会话生命周期、文件/刷写用例与取消流程
+      ├─ nwflash-infrastructure # Cloudflare 客户端与持久日志等基础设施
+      ├─ nwflash-windows        # Windows 进程执行、platform-tools 与设备命令组装
+      └─ nwflash-tauri          # Tauri command 与事件桥
+```
+
+- `src/Nwflash.Desktop/src/app/pageManifest.ts` 已按 WPF 侧边栏基线固定为 10 个页面，且将 `OperationLog` 从主导航移除。
+- `src/Nwflash.Desktop/src/components/AppShell.tsx` 负责左中右三栏布局、统一进度文本与退出态，右侧常驻展示 `OperationLogPanel`。
+- `src/Nwflash.Desktop/src/components/OperationLogPanel.tsx` 从 Rust 侧快照命令拉取最近日志（当前显示 5 条，按时间倒序）。
+- `src/Nwflash.Desktop/src-tauri/crates/nwflash-tauri/src/lib.rs` 注册 `operation:snapshot` 与 `session:*` 事件；`operation_logs_snapshot` 已暴露为 Tauri command。
+- `src/Nwflash.Desktop/src-tauri/crates/nwflash-infrastructure/src/operation_log.rs` 实现日志内存环形写入与持久化，容量上限保持 500 条。
+- `src/Nwflash.Desktop/src/app/App.tsx` 已从本地演示态切换为真实会话入口：`auth_login`、`auth_validate_token`、`session_state`、`session_start`、`session_stop`、`auth_logout` 与 `session` 事件驱动登录状态与退出态。
+- 会话相关约束：
+  - 无 token 时显示登录表单；
+  - `/api/login` 成功后立即启动会话心跳与在线轮询（`session_start`）；
+  - `session:force-exit`/`session:update-required` 事件会清空进度并退回登录态；
+  - 会话恢复时校验 token 或会话状态异常时，立即退回未登录态并重置顶部会话文案；
+  - Bearer token 仅保存在 Rust `AppState.session_token`；`AuthSessionDto` 和前端 `AuthSessionPayload` 只包含 `username`、`name`，前端不接收或持久化 token。
+
+- 当前公开 Tauri handler 不暴露原始 Quick Flash plan/执行 helper、未经约束的任意 ROM 解析、未经 HTTP(S) 校验的固件 URL、命令数组或 Rust 管理的资源路径。固件提取另有受 HTTP(S)、Range 读取和 opaque ID 约束的远程命令；payload URL 直接交给支持 Range 的提取工具，按所选分区读取；本地固件检查/提取与受约束的 Safe Flash/Quick Flash prepare/execute 工作流仍可用。
+- 当前设备模型是一次启动操作一台已发现设备：多设备同时发现会进入拒绝状态，`DeviceRuntime` 只保存最新设备快照。serial 仅作为界面显示和当前 ADB/Fastboot 命令目标；Rust 瞬态计划/预览可以携带 serial，但执行会在构造命令前从当前唯一设备重新解析并覆盖它，不做跨步骤等值绑定。这一运行时哈希/serial 边界遵循 [产品决策](product-decisions.md)；发行与资源完整性不受影响。
+- Rust 资源 provisioner 的完整性边界：scrcpy 使用固定的 Genymobile v4.1 Windows ZIP 官方直链、`11,305,298` 字节和固定 SHA-256，不调用 GitHub `releases/latest` API；下载器同时校验长度与摘要，发布 payload 后才清理 staging。ROOT 管理器在 bundle/cache 候选间验证非空、可选 SHA-256 与 APK manifest 结构，有效 cache 可替代无效 bundle；payload_dumper availability 校验预期 SHA-256，损坏 cache 在校验下载重装前删除。
+- 进程 stdout/stderr 在子进程运行期间由独立 reader 并发排空；正常完成会在构造输出前回收 reader，取消或超时会在终止并回收子进程后回收 reader。大输出与 reader 失败回归测试覆盖该边界。运行时 ROOT 镜像/工件 byte fingerprint 门禁已移除，路径、格式、大小、不透明 ID 和 session epoch 校验保留。
+
+这一层保持“前端仅渲染、Rust 执行”边界：前端不持久化 token，不拼接 shell 命令，不发起 Cloudflare 直接请求。
 
 ---
 
@@ -551,7 +595,7 @@ sequenceDiagram
 | 心跳导致分区表反复重读打断操作 | `DeviceRefreshed` 只在身份变化 / 手动 / 补偿时触发;分区表仅点按读取 |
 | 自动刷新静默吞异常留幻影设备 | 连续 3 次失败降级未连接 + 记错误 |
 | 备份无完整性校验 | 备份文件长度必须等于 `SizeBytes` |
-| Root/快速刷写无串号绑定 | `expectedSerial` 与当前设备比对,防错刷 |
+| 全部功能不应绑定序列号 | 每次启动只连接一台设备；Rust 仅在当前命令构造时从最新设备快照临时派生 serial。瞬态计划可暂存命令目标，但绝不跨步骤比较、不以 serial 作为身份或执行门禁，执行前会用当前目标重建命令 |
 | KernelSU.apk 无校验 | SHA-256 白名单 + AndroidManifest 检查 |
 | 取消不杀子进程 | adb / fastboot / scrcpy 全部杀进程树 |
 | adb server 版本不一致检测不到设备 | 应用统一用内置 `platform-tools/adb.exe` 起 server |
@@ -583,6 +627,29 @@ sequenceDiagram
 ---
 
 ## 9. 发布与内置组件
+
+### 9.0 Tauri/Rust 发布边界
+
+`scripts/Publish-TauriRelease.ps1` 是未保护 Tauri 发布物的组合入口。其输入是 Vite 已嵌入 Tauri EXE
+的前端、Rust `nwflash-desktop.exe`、`tauri.conf.json` 的 NSIS 配置和三类固定资源；其输出为
+`artifacts/tauri-release/` 中的 EXE、一个 Windows x64 NSIS 安装器、`resources/` 和 SHA-256 清单。
+发布脚本不接受或打包 scrcpy、ROOT APK、payload_dumper，也不调用 Cloudflare 部署流程。
+
+`scripts/Verify-TauriRelease.ps1` 只接受这一暂存布局：验证 EXE、唯一安装器、固定资源、禁止的按需资源和
+.NET runtime 文件，再生成 UTF-8 `SHA256SUMS.txt`，以保留中文安装器文件名。`scripts/Test-TauriRelease.ps1`
+在临时目录执行同一发布暂存、拒绝按需资源、静默安装和静默卸载烟测。独立发布烟测会启动安装后的 EXE 并确认
+“奶蛙Flash”窗口出现，再终止该临时实例后卸载；这个步骤不与卸载脚本并发。`.nwflash-tauri-release` 标记是
+发布脚本允许清空重建目录的唯一授权，未标记的非空目录会拒绝。NSIS 使用每用户模式，安装目录仅由安装器负责；
+USB 驱动安装仍在应用运行时按需请求提升权限。
+
+本阶段产物是未保护、未签名的输入。VMProtect、EXE 签名、最终 NSIS 重打包、安装器签名和 Authenticode
+验证是 Task 19 的独立门禁，未完成前 Tauri 安装器不得作为默认下载。
+
+Task 19 的 `Protect-NwflashRelease.ps1`、`Sign-NwflashRelease.ps1` 与
+`Verify-ProtectedRelease.ps1` 只使用受控环境变量中的工具路径、参数数组和证书 thumbprint。VMP 参数数组在
+进程启动前替换 `{project}` 与 `{input}`，不拼接 shell 命令；签名完成后必须对 EXE 与 NSIS 分别取得
+`Get-AuthenticodeSignature` 的 `Valid` 状态。该边界不改变 Cloudflare 或授权职责，且不会把任何凭据写入发布
+目录、哈希清单或浏览器状态。
 
 ```powershell
 ./scripts/Publish-Release.ps1

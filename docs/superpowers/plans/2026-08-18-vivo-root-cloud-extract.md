@@ -193,9 +193,9 @@
 **Interfaces:**
 ```rust
 pub struct ResolvedRootOta { pub url: String, pub name: Option<String>, pub size_bytes: Option<i64>,
-                             pub pd: String, pub version: String, pub serial: String }
+                             pub pd: String, pub version: String }
 pub struct RootOtaRuntime { state: Arc<Mutex<RootOtaRuntimeState>> }  // resolved + staging_root(所有者)
-impl RootOtaRuntime { pub fn new(); pub fn store(&self, ResolvedRootOta) ; pub fn resolve(&self, serial) -> Result<ResolvedRootOta,String>;
+impl RootOtaRuntime { pub fn new(); pub fn store(&self, ResolvedRootOta) ; pub fn resolve(&self) -> Result<ResolvedRootOta,String>;
                       pub fn take_staging(&self)->Option<PathBuf>; pub fn cleanup(&self); }
 
 
@@ -207,12 +207,12 @@ pub struct RootOtaExtractResultDto { pub source_label: String,
     pub initBoot: Option<RootImageSelectionDto>, pub vendorBoot: Option<RootImageSelectionDto> }
 ```
 - `session_token()`（复用 safe_flash 的私有函数，抽为 commands 内共享或重写）。
-- `root_ota_check`：`device_runtime.active_adb_serial()` 失败 / token 缺失 → `Ok{available:false}`（静默）。否则 `read_online_ota_identity` → `client.resolve_rom(&token,&pd,&version)` → OK 缓存到 `RootOtaRuntime`（含 serial）→ `{available:true,label}`；Err → `{available:false}`。
-- `root_ota_extract_images`：`root_ota_runtime.resolve(当前 serial)`（serial 不一致 → 明确错误「设备已变更，请重新检测服务器 OTA」）；`OperationCoordinator.run_async(OperationKind::Extracting? 或 Hashing, "提取服务器 OTA 分区", ...)`：provision payload_dumper（`PayloadDumperProvisioner`，仅 payload 需要——可先 probe 后再 provision，或统一 provision 无妨：下载过一次后缓存）；`RootOtaService::extract` 到新 staging（`create_root_ota_staging`）；把结果写入 `RootImageRuntime`（`replace(InitBoot, boot_image, boot_partition_name)`、`replace(VendorBoot, vendor_boot, "vendor_boot")`）；staging 所有权移交 `RootOtaRuntime.take_staging` 前的旧 staging 清理；返回 DTO（来源 label = `ResolvedRootOta.name` 或 "服务器 OTA"）。
+- `root_ota_check`：`device_runtime.active_adb_serial()` 失败 / token 缺失 → `Ok{available:false}`（静默）。否则 `read_online_ota_identity` → `client.resolve_rom(&token,&pd,&version)` → OK 缓存到 `RootOtaRuntime`（不含 serial）→ `{available:true,label}`；Err → `{available:false}`。
+- `root_ota_extract_images`：`root_ota_runtime.resolve()` 取得受控来源，不比较任何缓存 serial；`OperationCoordinator.run_async(OperationKind::Extracting? 或 Hashing, "提取服务器 OTA 分区", ...)`：provision payload_dumper（`PayloadDumperProvisioner`，仅 payload 需要——可先 probe 后再 provision，或统一 provision 无妨：下载过一次后缓存）；`RootOtaService::extract` 到新 staging（`create_root_ota_staging`）；把结果写入 `RootImageRuntime`（`replace(InitBoot, boot_image, boot_partition_name)`、`replace(VendorBoot, vendor_boot, "vendor_boot")`）；staging 所有权移交 `RootOtaRuntime.take_staging` 前的旧 staging 清理；返回 DTO（来源 label = `ResolvedRootOta.name` 或 "服务器 OTA"）。
 - `OperationKind` 需要在 domain 枚举里加 `Extracting`？—— 查看现有枚举后决定：若已有合适变体（`Hashing`/`Installing`）直接复用，否则在 `nwflash-domain::operation` 加 `Extracting` 并同步 usage 枚举/映射。
 - 安全：DTO 无 URL/serial/path；输入空结构体（`deny_unknown_fields` 无意义可省）。
 
-- [ ] **Step 1: 写 DTO + runtime 单测**（同文件 `#[cfg(test)]`）：缓存存储/读取；serial 不一致拒绝；换缓存清理旧 staging（构造临时目录）。
+- [ ] **Step 1: 写 DTO + runtime 单测**（同文件 `#[cfg(test)]`）：缓存存储/读取且不保存 serial；重复检测替换缓存并清理旧 staging（构造临时目录）。
 - [ ] **Step 2: 实现 runtime + 两个 command**。
 - [ ] **Step 3: AppState/接线 + session_stop 清理调用**（仿现有 runtime 清理的时机）。
 - [ ] **Step 4: command 层安全测试**：

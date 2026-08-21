@@ -66,7 +66,7 @@ staging 目录在剩余空间最大的固定盘 `Nwflash\safe-flash\<guid>\`,下
 - 封装 `FastbootCliRunner`:子进程调 `fastboot.exe -s <serial> flash <分区> <镜像>` / `getvar partition-type:<名>` / `reboot`。
 - **分区存在性预检**:flash 前 `getvar partition-type:<分区>`,设备没有的分区(OTA 里区域变体专属)跳过 + 日志,避免未知分区中止整条流程导致半刷。
 - **刷写模式(vivo 一律 fastbootd)**:`adb reboot fastboot`(ADB→fastbootd)→ 等待 FastbootConnected → 逐个 `fastboot flash` → `fastboot reboot`(回系统)。
-- 刷写循环不再每次校验 `session.Serial == 缓存`(避免长时间刷大分区时监控瞬时抖动误判),依赖 fastboot 自身报错;用当前 `session.Serial`。
+- 刷写循环不绑定预检或缓存 serial：工具每次启动只连接一台设备，Rust 在每条 ADB/Fastboot 命令构造时从当前快照临时取得目标 serial；不跨步骤比较 serial，设备状态异常交由当前 fastboot 命令的结果返回。
 
 ## 进度显示
 

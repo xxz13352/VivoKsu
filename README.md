@@ -1,5 +1,7 @@
 # 奶蛙Flash(NWflash)
 
+> Tauri/Rust Windows release verification uses `scripts/Verify-TauriRelease.ps1`; it validates the per-user NSIS layout, bundled dependencies and SHA-256 manifest.
+
 Vivo 手机刷机 / Root 工具箱 —— **商业付费工具**,Windows WPF 桌面应用(.NET 8)。**客户端统一显示「奶蛙Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**。
 
 提供 ADB / Fastboot 设备检测、分区可视刷写、快速刷写(KernelSU)、payload 解包与云端提取、ADB 投屏、文件管理等能力,全程中文界面、teal 主题。
@@ -161,6 +163,33 @@ dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
 ```
 
 ## 发布
+
+### Tauri/Rust Windows 发布物
+
+Tauri 迁移发布物由 `scripts/Publish-TauriRelease.ps1` 生成。它首先复制并校验固定设备资源，构建
+`nwflash-desktop.exe` 和每用户 NSIS 安装器，然后将受保护、已签名产物暂存到
+`artifacts/tauri-release/`：根目录仅包含 EXE、一个 `*-setup.exe` 和 `SHA256SUMS.txt`，固定资源位于
+`resources/`。目录由 `.nwflash-tauri-release` 标记为脚本可重建的生成目录；未标记的非空目录会被拒绝。
+NSIS 使用 `currentUser` 安装模式和内嵌 WebView2 bootstrapper；Tauri EXE 不携带 .NET runtime。发布阶段自动执行
+VMProtect、EXE/安装器签名、安装卸载测试和清单校验；缺少受控保护或签名配置时直接失败。开发调试若确实需要
+未签名产物，必须显式传入 `-DevelopmentUnsigned`，该产物不得发布。
+
+```powershell
+./scripts/Publish-TauriRelease.ps1
+./scripts/Verify-TauriRelease.ps1 -ReleaseRoot artifacts/tauri-release
+./scripts/Test-TauriRelease.ps1
+```
+
+`Verify-TauriRelease.ps1` 只读取并核验已生成的 `SHA256SUMS.txt`，不会覆盖清单；正式产物还必须通过
+`scripts/Verify-ProtectedRelease.ps1` 的签名身份校验。
+
+验证器要求 `adb.exe`、`fastboot.exe`、Vivo 驱动压缩包和 `magiskboot.so` 同包，并拒绝 `scrcpy`、ROOT
+管理器 APK 与 `payload_dumper`。这些按需资源仍由 Rust 的受校验 provisioner 下载；资源分类的唯一发布
+清单是 `src/Nwflash.Desktop/src-tauri/resources/README.md`。
+
+最终下载包还必须经过 `docs/release/tauri-vmp-signing-runbook.md` 的 VMP 和 Authenticode 门禁。保护与签名脚本
+只从受控发布环境读取 `NWFLASH_VMP_PATH`、`NWFLASH_VMP_ARGUMENTS`、`NWFLASH_SIGNTOOL_PATH` 与
+`NWFLASH_CERT_THUMBPRINT`；这些值、证书和任何生产凭据均不进入仓库。
 
 ```powershell
 ./scripts/Publish-Release.ps1

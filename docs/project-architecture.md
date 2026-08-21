@@ -1,6 +1,8 @@
 # 奶蛙Flash当前项目架构
 
-> 本文描述当前交付主线：`src/Nwflash.Desktop/` 的 React + Tauri + Rust 客户端，以及其与 Cloudflare 服务的边界。`src/VivoKsu.App/` 的 WPF 实现保留为迁移历史和视觉基线，不是当前桌面端的实现依据。
+> 本文是当前项目唯一的项目级架构规范，描述当前交付主线：`src/Nwflash.Desktop/` 的 React + Tauri + Rust 客户端，以及其与 Cloudflare 服务的边界。`src/VivoKsu.App/` 的 WPF 实现保留为迁移历史和视觉基线，不是当前桌面端的实现依据。
+
+> 文档状态：2026-08-21。发布、资源供应和临时文件边界以当前脚本与 Rust workspace 为准。
 
 ## 1. 系统总览
 
@@ -51,13 +53,14 @@ VivoKsu 工具/
 
 ## 3. 客户端分层
 
-Cargo 依赖方向固定为：
+客户端调用与 crate 依赖关系固定为：
 
 ```text
-domain <- windows
-domain <- infrastructure
-domain + windows + infrastructure <- application
-domain + windows + infrastructure + application <- tauri
+React -> Tauri invoke/event -> nwflash-tauri -> nwflash-application
+                                            |-> nwflash-infrastructure
+                                            |-> nwflash-windows
+
+nwflash-domain 被 nwflash-windows / nwflash-infrastructure / nwflash-application / nwflash-tauri 共享
 ```
 
 | 层 | 责任 | 不应承担的责任 |
@@ -68,7 +71,7 @@ domain + windows + infrastructure + application <- tauri
 | `nwflash-application` | 操作互斥、取消、进度、设备会话、刷写和提取用例 | Tauri 类型、React DTO |
 | `nwflash-tauri` | `AppState`、公开 command、事件投射和生命周期 | 把原始敏感状态交给 WebView |
 
-`src-tauri/src/main.rs` 仅安装崩溃日志并调用 `nwflash_tauri::run_app`。Tauri 宿主在启动时创建 `AppState`，绑定设备监视、会话、操作和固件进度事件，再集中注册公开 command。
+`src-tauri/src/main.rs` 仅安装崩溃日志并调用 `nwflash_tauri::run_app`。Tauri 宿主在启动时创建 `AppState`；它持有 session token、`OperationCoordinator`、`DeviceRuntime`，以及固件、payload、分区、投屏、ROOT 和 Safe Flash 的私有 runtime。宿主随后绑定设备监视、会话、操作和固件进度事件；`generate_handler!` 注册表是公开 command 白名单，未注册的 helper 不是浏览器能力。
 
 ## 4. 前端与窗口
 
@@ -80,19 +83,22 @@ React `App.tsx` 是应用状态入口：
 4. 订阅 `operation:snapshot`、`device:snapshot`、`session:force-exit` 和 `session:update-required`。
 5. 根据登录态同步原生窗口：登录页客户区为 `400x564`，主界面客户区为 `1240x700`。
 
-页面按设备、刷机和状态分组。React 只维护显示状态、用户意图和安全 DTO；设备 serial、token、原始进程命令、资源绝对路径和刷写计划不进入页面状态。
+页面按设备、刷机和状态分组。React 主要维护显示状态、用户意图和 DTO；`DeviceSnapshot` 和 TypeScript `DeviceSnapshotPayload` 包含 serial，并由概览页显示当前设备。通用预设 Quick Flash 是当前例外：页面会把原生对话框选出的 `imagePath` 与封闭分区请求保存在 `PendingFlashPlan`，确认后重新提交给执行 command；公开 prepare API 还可返回含 serial 和 `ProcessCommandDto` 的 `QuickFlashPlanDto` 预览，这是现有/遗留 API 暴露限制。浏览器仍不能把 serial、任意程序或 shell 文本作为执行输入；token 和服务端解析的 ROM/OTA URL 仍留在 Rust。
 
 ## 5. IPC 与安全边界
 
-Tauri command 是浏览器与 Rust 的唯一业务边界。前端可以提交封闭枚举、用户确认、由原生文件对话框选择的路径或 Rust 生成的不透明 ID；Rust 在执行前重新校验所有输入。
+> 产品决策（2026-08-21）：当前业务流程已移除运行时镜像/工件/OTA 哈希门禁和跨步骤设备 serial 绑定。serial 只保留为当前命令目标和显示字段；发行物和受控资源的完整性校验保留。完整规则见 [product-decisions.md](product-decisions.md)。
+
+Tauri command 是浏览器与 Rust 的唯一业务边界。前端可以提交封闭枚举、用户确认、路径或 Rust 生成的不透明 ID，Rust 按各 command 的契约校验相关输入。UI 通常用原生文件/目录对话框取得路径，但 IPC 的 `String` 类型本身不能证明对话框 provenance；不能把所有路径都概括为原生对话框来源，也不能笼统声称 Rust 已重新校验每一种输入。
 
 以下能力只保留在 Rust 内部：
 
 - bearer token：仅存于 `AppState.session_token`；登录响应只投射用户名和显示名。
-- 当前设备 serial：由 `DeviceRuntime` 从最新有效快照派生，前端不能指定。
-- 外部程序、命令数组、shell 文本和环境变量：由 Windows 适配器固定构造。
-- ROM URL、staging 目录、固件工件路径和刷写计划：由用例运行时保存，前端仅拿到安全摘要或 capability ID。
-- 快速刷写、分区、ROOT 和 Safe Flash 的准备产物：只可由相同 Rust runtime 在确认执行时消费，不能由浏览器伪造或复用过期计划。
+- 当前设备 serial：快照 DTO 和现有 `QuickFlashPlanDto` 预览可以将 serial 投射给 React，但公开执行 command 不接受 browser serial。Rust 只从当前 `DeviceRuntime` 派生实际 ADB/Fastboot 命令目标。
+- 单设备与 serial 规则：每次启动只处理当前唯一设备，多设备仍拒绝；没有浏览器设备选择器或跨启动 serial 身份。计划/预览可为兼容保留瞬态 serial，但不得作为工件/capability 身份或执行门禁；每个执行阶段从当前唯一传输重新取得命令目标。
+- 外部程序、命令数组、shell 文本和环境变量：只由 Rust/Windows 适配器构造，浏览器不能提交或改写；现有 `QuickFlashPlanDto` 可把 Rust 生成的 `ProcessCommandDto` 作为预览投射出去，但这些字段不是执行输入。
+- 服务端解析的 ROM/OTA URL、staging 目录，以及固件工件、prepared dual-slot、ROOT 和 Safe Flash 的受保护计划由 Rust runtime 保存，前端仅拿到安全摘要或 capability ID。
+- 不透明确认边界适用于固件工件、prepared dual-slot、ROOT 和 Safe Flash；通用预设 Quick Flash 不消费 Rust-owned confirmation capability，而是在单次 execution invocation 内重新检查 browser-held 请求。
 
 窗口 API 也受 Tauri capability 控制。`capabilities/default.json` 显式授予主窗口关闭、最小化、最大化、尺寸和可调整性权限；前端顺序等待窗口状态同步，避免登录后把主界面挤在登录窗口尺寸内。
 
@@ -137,9 +143,20 @@ sequenceDiagram
 ### 固件、ROOT 与资源
 
 - 固件提取在 Rust 中检查本地来源，按 ZIP、payload 或 Vivo 压缩格式分流，并将工件保存为不透明 runtime ID。
-- Quick Flash、可视刷写、ROOT 和 Safe Flash 都从当前设备快照和已验证工件构造受控计划；确认执行时再次解析 capability。
-- ROOT 的服务器 OTA 来源由 `root_ota_check` 在 Rust 内使用当前 ADB 设备的 PD/版本和内存 token 解析；URL、serial、PD、版本和 staging 不进入 React。`root_ota_extract_images` 使用 HTTP Range 处理 payload OTA 或直接镜像 ZIP，仅取得 `init_boot`（或 `boot` 回退）和 `vendor_boot`，再注册为不透明 ROOT 镜像 capability。实际 boot 分区名贯穿 Vivo KSU 修补和刷写，避免把无 `init_boot` 的设备误刷到错误分区。
-- platform-tools、驱动和 root-tools 作为 release resources 随包；scrcpy、ROOT 管理器 APK 和 payload_dumper 按需下载。下载使用 staging、长度和 SHA-256 校验，页面不接触下载路径。
+- 通用预设 Quick Flash 的确认模态只保存在浏览器：React 持有原生对话框选出的镜像路径/封闭分区请求，确认后调用 `quick_flash_execute_preset_images`。Rust 在同一次 execution invocation 中重新检查镜像；执行边界立即从当前 `DeviceRuntime` 解析唯一 transport serial，覆盖任何历史/预检 serial 后再构造 flash、切槽和重启命令。该路径不消费不透明 Rust confirmation capability。
+- 固件工件、prepared dual-slot、ROOT 和 Safe Flash 使用 Rust-owned runtime/capability 保存准备产物，确认执行时按各自契约重新解析或一次性消费。
+- 公开 `quick_flash_prepare_boot_image`/`quick_flash_prepare_preset_image` 仍返回 `QuickFlashPlanDto`，其中含 serial 和 Rust 生成的 `ProcessCommandDto` 程序/参数预览。这是当前/遗留 API 限制，不能据此声称原始命令或 flash plan 从不跨入浏览器；浏览器仍不能把任意程序、命令数组或 shell 文本提交为执行计划。
+- ROOT 的服务器 OTA 来源由 `root_ota_check` 在 Rust 内使用当前 ADB 设备的 PD/版本和内存 token 解析；私有 `RootOtaRuntime` 保存来源元数据和 session epoch，不把手机 serial 作为绑定字段。`root_ota_extract_images` 不接收浏览器 serial，只在需要当前 ADB 命令时临时取得目标，不做提取前后 serial 等值比较；产物以 session epoch 和不透明 ID 约束。该流程使用 HTTP Range 处理 payload OTA 或直接镜像 ZIP，仅取得 `init_boot`（或 `boot` 回退）和 `vendor_boot`；实际 boot 分区名贯穿 Vivo KSU 修补和刷写。ROOT OTA 的 URL、PD、版本和 staging 不进入 React；独立 `DeviceSnapshot` 中的 serial 仍只用于界面显示。
+- platform-tools、驱动和 root-tools 作为 release resources 随包，并由 `packaging/release/tauri-resources.json` 的精确白名单和 SHA-256 固定；scrcpy、ROOT 管理器 APK 和 payload_dumper 作为受控按需组件。下载统一使用 staging、长度和 SHA-256 校验，页面不接触下载路径。
+
+### 近期实现约定
+
+- **ADB Root 分区读取**：设备命令统一使用 `adb shell -T su -c '<完整命令>'`，Rust 先对整个 shell 命令和设备路径做引用，再传给 `su -c`。读取流程先校验 `id -u`、当前槽位和设备路径，任何一步失败都拒绝解析分区表，避免参数被设备 shell 拆开后产生语法错误。
+- **分区备份**：用户通过原生目录对话框选择输出目录后立即执行 `partitions_execute_backup`，不再显示二次确认或把本地路径交给 React 状态。每个分区先重新解析设备路径，输出写入 `.partial` 文件，完成大小校验后原子替换为最终文件；取消或失败会删除 partial 文件。
+- **操作日志**：日志只显示当前会话的实际设备操作，按时间戳从旧到新排列，最新记录固定在底部。常规的连接服务器、请求服务和检测服务器探测不写入面板；历史 OTA 文案在显示边界统一为服务器/固件，避免重复刷屏和暴露内部服务实现名。
+- **在线固件请求**：服务器固件检查和提取仍由 Rust 使用内存会话令牌完成，React 只接收可用状态、显示标签和安全结果，不接收上游 URL。界面文案使用“请求服务器”“在线固件”等通用名称，不把内部 OTA 服务名当作用户操作日志。
+- **HTTP(S) 固件提取**：`FirmwareExtractPage` 支持本地来源和用户粘贴的 HTTP 或 HTTPS 地址，UI 通常通过原生目录对话框选择输出目录；但公开 `firmware_extract_remote` 当前接受 `output_directory: String` 并直接转为提取所用 `PathBuf`，command 边界不能证明该目录来自对话框。Rust 仍校验 URL scheme/host、已检查来源等值、不透明分区 ID 和归档成员；远程 ZIP 只 Range 读取所需成员，先写 `.partial`、核对大小再原子重命名，payload 结果也经受控 partial/发布流程。目录 provenance 是当前架构限制和后续 hardening 边界。
+- **scrcpy 供应**：页面不提供 scrcpy 文件选择按钮。发布包若包含已验证的 `resources/scrcpy` 就直接使用；否则组件安装入口调用 Rust provisioner，从固定的 Genymobile scrcpy v4.1 官方 ZIP 地址下载，要求文件大小 `11,305,298` 字节且 SHA-256 为 `5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db`，并校验解压后每个文件的清单。流程不调用 GitHub release API，也不回退到用户 `PATH`。
 
 ## 7. 服务端边界
 
@@ -173,7 +190,7 @@ npm --prefix src/Nwflash.Desktop run tauri -- build --no-bundle
 ./scripts/Test-TauriRelease.ps1
 ```
 
-正式 Windows 发布物使用每用户 NSIS 安装器和嵌入式 WebView2 bootstrapper。发布 staging 目录由脚本标记和校验；构建缓存 `node_modules/`、`dist/`、`src-tauri/target/` 和临时测试输出不属于源码归档。
+正式 Windows 发布物使用每用户 NSIS 安装器和嵌入式 WebView2 bootstrapper。`Publish-TauriRelease.ps1` 默认执行 Rust/前端/原生 E2E 检查、受控 VMProtect、证书 thumbprint 校验、EXE 与安装器签名、安装验证和精确 SHA-256 清单；只有显式传入 `-DevelopmentUnsigned` 才允许生成未签名开发暂存，不能作为正式发布物。`Verify-TauriRelease.ps1` 只读取并核验既有清单，且拒绝额外文件和被错误打包的按需资源。发布 staging 目录由脚本标记和校验；构建缓存 `node_modules/`、`dist/`、`src-tauri/target/` 和临时测试输出不属于源码归档。
 
 ## 9. 临时文件与生命周期
 
@@ -183,10 +200,12 @@ npm --prefix src/Nwflash.Desktop run tauri -- build --no-bundle
 | --- | --- | --- |
 | 固定发布资源 | `src/Nwflash.Desktop/src-tauri/resources/`、`src/VivoKsu.App/` | 属于源码或发布输入，不得作为临时文件删除 |
 | Rust 运行时 staging | `%TEMP%\\nwflash-root-ota`、`%TEMP%\\nwflash-payload-extract-*`、Safe Flash 私有目录 | 由 Rust 创建并校验所有权；成功后交给对应 runtime，失败、取消、替换或会话结束时清理；不删除用户原始镜像 |
-| 前端/Rust 构建缓存 | `src/Nwflash.Desktop/node_modules/`、`dist/`、`src-tauri/target/`、`src-tauri/gen/` | 可由 `npm install`、Vite、Cargo 或 Tauri 重新生成，不进入源码归档；发布前可安全清理 |
+| 前端/Rust 构建缓存 | `src/Nwflash.Desktop/node_modules/`、`dist/`、`src-tauri/target/debug`、`src-tauri/gen/` | `node_modules`、`dist`、`target/debug` 和 `gen` 属于可重新生成的本地构建状态；`target/release` 属于发布输出，不按普通构建缓存处理。具体默认清理授权见下方唯一规范 |
 | 发布和本地工具暂存 | `artifacts/`、`output/`、`.superpowers/` | 仅用于本地发布、测试或 Codex 工作状态，已加入忽略规则；不作为交付输入 |
 
-清理构建/本地状态时只针对上述明确目录执行，不能对仓库根目录、用户目录或 `%TEMP%` 做通配递归删除。清理后可用以下命令恢复开发依赖和构建产物：
+默认深度清理的唯一规范是：完成目标验证后，只删除 `src-tauri/target/debug` 和 `e2e-tests/logs/*.log`；`target/release-rebuild` 与 `src-tauri/target/release` 的全部内容（含 `bundle`、`nsis`、`resources` 和 EXE）均属于保留范围，其中已经生成并验证的安装包是发布物；`node_modules`、`dist`、`gen` 和 `.superpowers` 也不在默认清理范围。清理必须只命中这些明确目标，不能对仓库根目录、用户目录或 `%TEMP%` 做通配递归删除。
+
+若后续按需重建开发依赖和构建产物，可运行：
 
 ```powershell
 npm install --prefix src/Nwflash.Desktop
@@ -198,5 +217,7 @@ cargo test --manifest-path src/Nwflash.Desktop/src-tauri/Cargo.toml --workspace
 
 - 只支持当前发现的一台设备；发现多台设备时拒绝继续操作。
 - 真机刷写、驱动安装和 ROOT 必须在已备份、可恢复的专用设备或虚拟环境中验收；mock 测试不替代设备验收。
-- 进程 stdout/stderr 的并发排空，以及 ROOT 已选镜像的内容指纹绑定，仍是后续整改项；不能把它们当作已完成安全能力。
+- 源码阅读、文档/静态检查和 mock 测试不构成原生 WDIO/显示传输、签名/VMProtect、安装器/release、真实网络或 Cloudflare 部署验收；这些项目仍须在对应外部环境按验收矩阵完成。
+- `firmware_extract_remote` 的 `output_directory: String` 当前没有在 command 层证明原生目录对话框 provenance；UI 的正常交互不能替代 IPC 边界保证，该字段仍需后续 hardening。
+- 进程 stdout/stderr 在子进程运行期间由独立 reader 并发排空；正常完成会在构造输出前回收 reader，取消或超时会在终止并回收子进程后回收 reader。大输出与 reader 失败回归测试覆盖该边界。ROOT 镜像/修补工件不再记录或复核运行时 SHA-256/fingerprint；路径、格式、大小、不透明 ID、session epoch 和 staging 所有权检查保留。
 - WPF 文档和截图可用于历史行为对照，当前命令、资源和 IPC 边界以本文件及 `src/Nwflash.Desktop/` 源码为准。

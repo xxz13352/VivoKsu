@@ -264,7 +264,7 @@
 
 **Produces:** 安全快速刷写、分区表显式读取、备份/写入/擦除、行级与总进度、确认窗和跨页面镜像映射。
 
-- [ ] **Step 1: 写失败测试**：覆盖未连接/错误模式拒绝、expected serial 检查、单预设只刷对应分区、双槽逻辑、确认前零副作用、取消、分区表不会被设备监视自动读取、ADB Root/Fastboot 自动选择、mounted/high-risk 分区拒绝、备份文件长度校验、首个失败停止。
+- [ ] **Step 1: 写失败测试**：覆盖未连接/错误模式拒绝、当前设备 serial 参数由 Rust 临时派生且不做 expected-serial 绑定、单预设只刷对应分区、双槽逻辑、确认前零副作用、取消、分区表不会被设备监视自动读取、ADB Root/Fastboot 自动选择、mounted/high-risk 分区拒绝、备份文件长度校验、首个失败停止。
 - [ ] **Step 2: 运行测试确认失败**：运行 `cargo test -p nwflash-application --test quick_flash --test partition_workspace --test partition_execution`；预期为 use case 不存在。
 - [ ] **Step 3: 实施刷写编排**：使用 Task 4 计划生成器和风险策略；所有 flash/erase/backup 都经 Task 6 协调器；分区表只响应 `partitions_refresh` 明确 command；将当前分区、行级进度、总进度、速度和确认摘要以 DTO 发送给前端；从固件/Root 页面来的镜像只能经受测的 `quick_flash_prepare_image` 状态入口进入。
 - [ ] **Step 4: 运行测试确认通过**：重复 Step 2，并运行 `npm run test --prefix src/Nwflash.Desktop -- QuickFlash LineFlash`；预期为确认窗、禁用态和右上进度区全部符合 Task 1 基线。

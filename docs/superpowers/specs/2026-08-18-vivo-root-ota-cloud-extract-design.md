@@ -51,10 +51,10 @@ RootPage 打开 ──> root_ota_check ──> 读设备 PD/版本 ──> clien
 
 ## 云端源获取（root_ota_check）
 
-- 页面打开时若 `has_token` 且有 ADB 设备：调用 `root_ota_check`。Rust 内读设备 PD/版本（现有 `read_online_ota_identity` 逻辑：`ro.product.device` + `ro.build.version.bbk` 末段及回退链）→ `resolve_rom(token, pd, version)` → 成功则缓存 `ResolvedRootOta { url, name, size_bytes, pd, version, serial }` 到 `RootOtaRuntime`，返回 `{ available: true, label }`；否则静默返回 `available: false`（不打断页面）。
+- 页面打开时若 `has_token` 且有 ADB 设备：调用 `root_ota_check`。Rust 内读设备 PD/版本（现有 `read_online_ota_identity` 逻辑：`ro.product.device` + `ro.build.version.bbk` 末段及回退链）→ `resolve_rom(token, pd, version)` → 成功则缓存 `ResolvedRootOta { url, name, size_bytes, pd, version }` 到 `RootOtaRuntime`，返回 `{ available: true, label }`；读取设备信息所需的 serial 仅是当前命令的临时参数，不写入 runtime；否则静默返回 `available: false`（不打断页面）。
 - 手动「检测服务器 OTA」按钮复用同一 command。
 - **URL 绝不进浏览器**：前端只拿 `available` + 显示 label + 不透明镜像 ID。
-- 缓存绑定 `serial`；提取前校验当前 serial 与缓存一致，设备更换后旧结果失效。
+- 缓存不绑定 `serial`；提取直接使用当前唯一设备和受控 OTA 来源，不做预检/提取 serial 比较。serial 只在 Rust 构造当前 ADB/Fastboot 命令时临时派生，允许作为该命令的瞬态目标参数，但不进入 DTO、OTA runtime 或持久化身份。
 - 信用点成本：唯一点一次 `/api/rom`（检查时），提取复用缓存，不重复查询。
 
 ### Data Transfer Object（前端可见）
@@ -132,7 +132,7 @@ HTTP Range 拉首 4 字节（仿 WPF `FirmwareFormatDetector.PeekAsync`）：
 ## 安全边界
 
 - URL / serial / pd / version / staging 路径全部在 Rust 侧；DTO 只含不透明 ID + 显示标签 + 大小。
-- `RootOtaRuntime` 缓存绑定 serial，换设备失效；提取前校验当前 serial 与缓存一致。
+- `RootOtaRuntime` 不保存或绑定 serial；换设备不会触发 serial 等值校验，当前命令始终从最新唯一设备快照取得临时目标。多设备发现仍直接返回 `MultipleDevices` 拒绝态。
 - command 入参 `deny_unknown_fields`，拒绝浏览器伪造字段（仿 `RootPreflightOptionsDto`）。
 - 无新前端能力：浏览器只提交意图（`check`/`extract`）+ 已有不透明 ID。
 
