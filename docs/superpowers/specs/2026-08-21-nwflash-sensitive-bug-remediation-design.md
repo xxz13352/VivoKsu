@@ -22,7 +22,6 @@ The first remediation stage covers only defects with a deterministic unsafe outc
 4. A single-connection OTA response can write past the previously probed content length before rejecting it.
 5. Online Safe Flash discards catalog-provided SHA-256 and size metadata, so the downloaded OTA is not bound to the catalog response.
 6. Direct-ZIP ROOT OTA extraction does not reserve disk space for the selected images before writing them.
-7. OTA staging cannot reliably replace an existing destination on Windows and may leave a partial file after commit failure.
 
 This stage deliberately excludes policy or larger architecture changes:
 
@@ -64,9 +63,10 @@ This prevents `\\file`, `\\\\server\\share`, drive-prefix, and traversal names f
 
 - `write_response_to_file` calculates the next byte count before writing; a response chunk exceeding the known total returns an error without writing that chunk.
 - Error paths remove the staging file and leave any existing destination untouched.
-- Replacing an existing destination uses a transactional rename: move the old destination to a sibling backup, promote staging, restore the backup if promotion fails, then remove the backup only after success.
 
 This is intentionally limited to the OTA download path, where an authoritative total length already exists. Generic resource maximum-size policy is deferred because several resources lack an immutable expected length.
+
+An existing Windows regression already verifies successful replacement of a destination through the current Tokio rename path. The audit claim that every existing-destination replacement fails was not reproducible here, so no speculative publish-path rewrite is included.
 
 ### 4. Bind Online Safe Flash to catalog integrity metadata
 
@@ -103,7 +103,7 @@ Each code change starts with a regression that fails on the current behavior.
 
 1. Safe Flash fake executor: failed/malformed `current-slot`, failed `has-slot`, and `is-userspace=no` must each produce no `flash` command; a verified slotless partition remains supported.
 2. Payload ZIP fixture: backslash-rooted and UNC-like names must be rejected before any output is created; a normal nested relative member remains extractable.
-3. OTA wiremock/local server: a response whose body exceeds its probed length must fail before writing the excess and preserve a pre-existing destination; a successful download replaces a pre-existing destination without leaving staging or backup files.
+3. OTA wiremock/local server: a response whose body exceeds its probed length must fail before writing the excess and preserve a pre-existing destination; the existing successful-replacement regression remains green.
 4. Online catalog fixture: missing/invalid integrity metadata is rejected; a same-length wrong-hash OTA fails before it is prepared for flashing; a matching artifact succeeds.
 5. ROOT OTA pure capacity helper: insufficient capacity is rejected before image extraction; checked valid aggregate sizes continue to extract.
 
