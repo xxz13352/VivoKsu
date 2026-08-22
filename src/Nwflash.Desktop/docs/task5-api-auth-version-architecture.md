@@ -3,8 +3,8 @@
 本任务只处理 Task 2 对应的会话门禁与版本链路部分：`Cloudflare API` 契约消费、`/api/login`、`/api/me`、`/api/heartbeat`、`/api/online`、`/api/operation/authorize`、`/api/usage/logs`、`/api/rom`、`/api/app/version`。
 
 目标约束来自以下基线：
-- `docs/migration-baselines/2026-08-16-wpf-behavior-baseline.md`
-- `docs/migration-baselines/api-contract-cases.md`
+- `archive/csharp/docs/migration-baselines/2026-08-16-wpf-behavior-baseline.md`
+- `archive/csharp/docs/migration-baselines/api-contract-cases.md`
 - `src/Nwflash.Desktop/docs/task4-domain-model-architecture.md`
 
 不改 `cloudflare/**`，所有行为以现有契约为真模型，优先保证“行为等价 + 可测试”。

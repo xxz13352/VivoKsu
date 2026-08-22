@@ -55,7 +55,7 @@ foreach ($required in @('platform-tools', 'drivers', 'root-tools', 'scrcpy', 'pa
     Assert-ReleaseCondition ($inventory.Contains($required)) "Bundled-resource inventory does not document $required."
 }
 
-foreach ($document in @('README.md', 'docs\architecture.md', 'docs\architecture-tauri-migration.md')) {
+foreach ($document in @('README.md', 'docs\project-architecture.md', 'src\Nwflash.Desktop\README.md')) {
     $content = Get-Content -Raw (Join-Path $repoRoot $document)
     Assert-ReleaseCondition ($content.Contains('Verify-TauriRelease.ps1')) "$document does not document the Tauri release verifier."
 }

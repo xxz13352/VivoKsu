@@ -158,6 +158,31 @@ function Assert-ExpectedResourceTree {
 function Stage-BundledResources {
     param([Parameter(Mandatory = $true)][object[]]$Entries)
 
+    $resourceRoot = ([IO.Path]::GetFullPath($resources)).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $resolvedEntries = @(
+        foreach ($entry in $Entries) {
+            [pscustomobject]@{
+                Entry = $entry
+                Source = Get-RepositoryFilePath ([string]$entry.source)
+                Destination = Get-ResourceDestinationPath -Root $resources -RelativePath ([string]$entry.destination)
+            }
+        }
+    )
+
+    $allSourcesMatchDestinations = @($resolvedEntries | Where-Object {
+        -not $_.Source.Equals($_.Destination, [StringComparison]::OrdinalIgnoreCase)
+    }).Count -eq 0
+    if ($allSourcesMatchDestinations) {
+        Assert-ExpectedResourceTree -Root $resources -Entries $Entries -Description 'active Tauri resource' -IgnoredPaths @('README.md')
+        return
+    }
+
+    foreach ($resolved in $resolvedEntries) {
+        if ($resolved.Source.StartsWith($resourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Release resource source overlaps Tauri staging: $($resolved.Entry.source)"
+        }
+    }
+
     $topLevelDirectories = @($Entries | ForEach-Object { ([string]$_.destination).Split('/')[0] } | Select-Object -Unique)
     foreach ($directoryName in $topLevelDirectories) {
         $directory = Get-ResourceDestinationPath -Root $resources -RelativePath $directoryName
@@ -166,13 +191,11 @@ function Stage-BundledResources {
         }
     }
 
-    foreach ($entry in $Entries) {
-        $source = Get-RepositoryFilePath ([string]$entry.source)
-        Assert-FileHash -Path $source -ExpectedHash ([string]$entry.sha256) -Description 'Release resource source'
-        $destination = Get-ResourceDestinationPath -Root $resources -RelativePath ([string]$entry.destination)
-        New-Item -ItemType Directory -Force (Split-Path -Parent $destination) | Out-Null
-        Copy-Item -LiteralPath $source -Destination $destination -Force
-        Assert-FileHash -Path $destination -ExpectedHash ([string]$entry.sha256) -Description 'Staged Tauri resource'
+    foreach ($resolved in $resolvedEntries) {
+        Assert-FileHash -Path $resolved.Source -ExpectedHash ([string]$resolved.Entry.sha256) -Description 'Release resource source'
+        New-Item -ItemType Directory -Force (Split-Path -Parent $resolved.Destination) | Out-Null
+        Copy-Item -LiteralPath $resolved.Source -Destination $resolved.Destination -Force
+        Assert-FileHash -Path $resolved.Destination -ExpectedHash ([string]$resolved.Entry.sha256) -Description 'Staged Tauri resource'
     }
 
     Assert-ExpectedResourceTree -Root $resources -Entries $Entries -Description 'staged Tauri resource' -IgnoredPaths @('README.md')

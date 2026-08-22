@@ -20,12 +20,9 @@ param(
 #   2. Drag-drop the three files below into the release's Assets box.
 #   3. Compute SHA256 (certutil -hashfile <file> SHA256) and paste into code.
 #
-# After upload, sync code constants:
-#   - apk/KSU.APK        -> VivoRootResourceService.ManagerApkSha256 ["KSU"]
-#   - apk/KernelSU.apk   -> VivoRootResourceService.ManagerApkSha256 ["OfficialKsu"]
-#   - payload_dumper.zip -> RemoteAssetCatalog (the CLIENT verifies the extracted
-#                           payload_dumper.exe against PayloadDumperSha256, so the
-#                           zip itself only needs to contain the real exe).
+# After upload, keep the active Rust/Tauri resource verification constants in sync.
+# The client verifies the extracted payload_dumper.exe; the transport ZIP only needs
+# to contain the verified executable at its root.
 
 $ErrorActionPreference = "Stop"
 
@@ -34,7 +31,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 }
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$appSource = Join-Path $repositoryRoot "src\VivoKsu.App"
+$appSource = Join-Path $repositoryRoot "src\Nwflash.Desktop\src-tauri\resources"
 $apkKsu = Join-Path $appSource "apk\KSU.APK"
 $apkKernelSu = Join-Path $appSource "apk\KernelSU.apk"
 $payloadExe = Join-Path $appSource "payload-tools\payload_dumper.exe"
@@ -80,5 +77,4 @@ foreach ($file in @($apkKsu, $apkKernelSu, $payloadZip)) {
     Write-Host "$hash  $name"
 }
 Write-Host ""
-Write-Host "KSU.APK / KernelSU.apk -> VivoRootResourceService.ManagerApkSha256."
-Write-Host "The client verifies the EXTRACTED payload_dumper.exe against RemoteAssetCatalog.PayloadDumperSha256 (the zip is only transport)."
+Write-Host "KSU.APK / KernelSU.apk and payload_dumper checks are owned by the Rust/Tauri client."

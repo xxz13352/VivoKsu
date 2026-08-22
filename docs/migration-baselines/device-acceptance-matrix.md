@@ -12,7 +12,7 @@
 
 | ID | 场景 | 允许环境 | 安全级别 | 前置条件 | 通过标准 | 自动化证据 | 本次状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| A-01 | C# 测试映射门禁 | 无设备、本地源码 | 无设备 | 仓库包含 `tests/VivoKsu.App.Tests` | 64/64 类恰好一行；证据文件存在；缺项/重复/越界路径失败 | `src/Nwflash.Desktop/src-tauri/tests/e2e/api.rs` | 已自动化 |
+| A-01 | Rust/Tauri workspace 测试门禁 | 无设备、本地源码 | 无设备 | Rust 资源与测试目录完整 | workspace 中所有 Rust 单元、集成和 E2E 测试通过；不读取 C# 源码或测试目录 | `src/Nwflash.Desktop/src-tauri/` 的 Cargo workspace | 已自动化 |
 | A-02 | Cloudflare 授权故障 | Wiremock、假 token | 无设备 | 仅指向本机 mock | 503 不产生 allowed；设备闭包不运行；协调器可恢复 | `src/Nwflash.Desktop/src-tauri/tests/e2e/api.rs`、`operation.rs` | 已自动化 |
 | A-03 | GitHub/下载服务器故障 | Wiremock、临时目录 | 无设备 | 预置已批准文件 | 503 和损坏候选均失败；原文件不覆盖；暂存文件清理 | `src/Nwflash.Desktop/src-tauri/tests/e2e/api.rs` | 已自动化 |
 | A-04 | adb 失败、Fastboot 恢复 | 注入进程输出 | 无设备 | 不启动系统 adb/fastboot | 仅执行 `adb devices -l` / `fastboot devices` 参数；错误可见；ADB 环境固定 | `src/Nwflash.Desktop/src-tauri/tests/e2e/device_process.rs` | 已自动化 |

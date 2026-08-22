@@ -1,6 +1,6 @@
 # 奶蛙Flash当前项目架构
 
-> 本文是当前项目唯一的项目级架构规范，描述当前交付主线：`src/Nwflash.Desktop/` 的 React + Tauri + Rust 客户端，以及其与 Cloudflare 服务的边界。`src/VivoKsu.App/` 的 WPF 实现保留为迁移历史和视觉基线，不是当前桌面端的实现依据。
+> 本文是当前项目唯一的项目级架构规范，描述当前交付主线：`src/Nwflash.Desktop/` 的 React + Tauri + Rust 客户端，以及其与 Cloudflare 服务的边界。C# / WPF 实现已封存于 `archive/csharp/`，不属于当前桌面端的实现、资源或发布输入。
 
 > 文档状态：2026-08-21。发布、资源供应和临时文件边界以当前脚本与 Rust workspace 为准。
 
@@ -48,7 +48,7 @@ VivoKsu 工具/
 ├─ cloudflare/                           # API、管理后台、用户门户与 D1 定义
 ├─ docs/                                 # 架构、迁移、发布与验收文档
 ├─ scripts/                              # 构建、发布、签名和验证脚本
-└─ src/VivoKsu.App/                      # WPF 历史实现与视觉基线
+└─ archive/csharp/                       # 已冻结的 WPF 历史实现与测试
 ```
 
 ## 3. 客户端分层
@@ -198,7 +198,7 @@ npm --prefix src/Nwflash.Desktop run tauri -- build --no-bundle
 
 | 类别 | 位置/示例 | 生命周期与处理方式 |
 | --- | --- | --- |
-| 固定发布资源 | `src/Nwflash.Desktop/src-tauri/resources/`、`src/VivoKsu.App/` | 属于源码或发布输入，不得作为临时文件删除 |
+| 固定发布资源 | `src/Nwflash.Desktop/src-tauri/resources/` | Rust/Tauri 的唯一源码与发布输入，不得作为临时文件删除 |
 | Rust 运行时 staging | `%TEMP%\\nwflash-root-ota`、`%TEMP%\\nwflash-payload-extract-*`、Safe Flash 私有目录 | 由 Rust 创建并校验所有权；成功后交给对应 runtime，失败、取消、替换或会话结束时清理；不删除用户原始镜像 |
 | 前端/Rust 构建缓存 | `src/Nwflash.Desktop/node_modules/`、`dist/`、`src-tauri/target/debug`、`src-tauri/gen/` | `node_modules`、`dist`、`target/debug` 和 `gen` 属于可重新生成的本地构建状态；`target/release` 属于发布输出，不按普通构建缓存处理。具体默认清理授权见下方唯一规范 |
 | 发布和本地工具暂存 | `artifacts/`、`output/`、`.superpowers/` | 仅用于本地发布、测试或 Codex 工作状态，已加入忽略规则；不作为交付输入 |
@@ -220,4 +220,4 @@ cargo test --manifest-path src/Nwflash.Desktop/src-tauri/Cargo.toml --workspace
 - 源码阅读、文档/静态检查和 mock 测试不构成原生 WDIO/显示传输、签名/VMProtect、安装器/release、真实网络或 Cloudflare 部署验收；这些项目仍须在对应外部环境按验收矩阵完成。
 - `firmware_extract_remote` 的 `output_directory: String` 当前没有在 command 层证明原生目录对话框 provenance；UI 的正常交互不能替代 IPC 边界保证，该字段仍需后续 hardening。
 - 进程 stdout/stderr 在子进程运行期间由独立 reader 并发排空；正常完成会在构造输出前回收 reader，取消或超时会在终止并回收子进程后回收 reader。大输出与 reader 失败回归测试覆盖该边界。ROOT 镜像/修补工件不再记录或复核运行时 SHA-256/fingerprint；路径、格式、大小、不透明 ID、session epoch 和 staging 所有权检查保留。
-- WPF 文档和截图可用于历史行为对照，当前命令、资源和 IPC 边界以本文件及 `src/Nwflash.Desktop/` 源码为准。
+- C# / WPF 文档、截图和项目保留在 [归档目录](../archive/csharp/README.md) 供历史行为对照；当前命令、资源和 IPC 边界以本文件及 `src/Nwflash.Desktop/` 源码为准。

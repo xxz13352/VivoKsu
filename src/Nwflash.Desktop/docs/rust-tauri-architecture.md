@@ -104,7 +104,7 @@ cargo test --manifest-path src/Nwflash.Desktop/src-tauri/Cargo.toml --workspace
 npm --prefix src/Nwflash.Desktop run tauri -- build --no-bundle
 ```
 
-`npm run build` 生成 Vite 前端 `dist/`；Tauri no-bundle 构建再由 Cargo 编译 Rust workspace 和桌面宿主，不创建 NSIS 安装器。正式发布脚本默认执行保护、签名、测试、安装验证和清单校验；未签名路径必须显式使用 `-DevelopmentUnsigned`，正式发布不能使用该开关。Windows release 资源边界见仓库级 [architecture-tauri-migration.md](../../../docs/architecture-tauri-migration.md) 与 [README.md](../README.md)。
+`npm run build` 生成 Vite 前端 `dist/`；Tauri no-bundle 构建再由 Cargo 编译 Rust workspace 和桌面宿主，不创建 NSIS 安装器。正式发布脚本默认执行保护、签名、测试、安装验证和清单校验；未签名路径必须显式使用 `-DevelopmentUnsigned`，正式发布不能使用该开关。Windows release 资源边界见仓库级 [项目架构](../../../docs/project-architecture.md) 与 [README.md](../README.md)。
 
 源码归档应包含 `src/`、`src-tauri/`、`e2e-tests/`、配置、测试、资源和本目录文档，但不包含 `node_modules/`、`dist/`、`src-tauri/target/`、运行日志、Tauri release staging 或 VMProtect 产物。
 

@@ -1,240 +1,71 @@
-# 奶蛙Flash(NWflash)
+# 奶蛙Flash（NWflash）
 
-> Tauri/Rust Windows release verification uses `scripts/Verify-TauriRelease.ps1`; it validates the per-user NSIS layout, bundled dependencies and SHA-256 manifest.
+> 当前桌面端为 `src/Nwflash.Desktop/` 中的 React + Tauri + Rust 客户端。Windows 发布物使用 `scripts/Verify-TauriRelease.ps1` 验证每用户 NSIS 布局、内置资源与 SHA-256 清单。
 
-Vivo 手机刷机 / Root 工具箱。**客户端统一显示「奶蛙Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**。
+奶蛙Flash是面向 Vivo 设备的 Windows 刷机与 Root 工具。客户端使用账号登录，后端由 Cloudflare Workers 与 D1 承载认证、版本策略、操作授权、在线状态和固件服务。
 
-提供 ADB / Fastboot 设备检测、分区可视刷写、快速刷写(KernelSU)、payload 解包与云端提取、ADB 投屏、文件管理等能力,全程中文界面、teal 主题。
+## 当前版本
 
-## 项目定位与账号访问
+- 活跃客户端：`src/Nwflash.Desktop/`（React + Tauri + Rust）。
+- 活跃发布资源：`src/Nwflash.Desktop/src-tauri/resources/`。
+- 活跃发布脚本：`scripts/Publish-TauriRelease.ps1`、`scripts/Verify-TauriRelease.ps1` 和 `scripts/Test-TauriRelease.ps1`。
+- C# / WPF 客户端已封存至 [archive/csharp/README.md](archive/csharp/README.md)，不参与当前构建、发布或后续版本更新。
 
-Nwflash 使用账号登录和服务端访问控制：
+## 功能
 
-- **登录授权**:桌面端启动必须用后台创建的账号登录,未登录不可进入主界面(登录门禁)。账号由 `web.nwflash.cc.cd` 后台「用户管理」创建。
-- **服务端全在 Cloudflare,零自有服务器**:API `api.nwflash.cc.cd`(Worker `nwflash-rom`)+ 后台 `web.nwflash.cc.cd`(Worker `nwflash-web`)+ 数据库 D1 `nwflash-db`,认证、版本授权、审计、后台管理全在 Cloudflare Edge。
-- **授权与控制**:版本在后台「版本号控制」启用才可查(未启用 → 404);封禁 / 停用即时生效(登录 401 / 查询 403);每次查询按用户记入访问日志。客户端每 5s 心跳保持在线,后台「在线状态」可实时查看会话并**强制下线**(≤5s 内客户端退出进程)。**每次用户操作运行前经服务端许可**(默认放行,封禁/停用即拒绝),操作结果与耗时按分类上传使用日志。
+- ADB / Fastboot 设备发现、设备信息和驱动安装。
+- 快速刷写、分区工作台、VIVO 线刷和双槽处理。
+- 本地与在线固件检查、payload 提取、ROOT 与镜像工件流程。
+- scrcpy 投屏、设备文件管理、统一操作日志与进度。
+- Cloudflare 会话、版本门禁、操作授权和在线状态。
 
-## 功能页面
+## 代码结构
 
-| 页面 | 说明 |
-| --- | --- |
-| **设备概览** | ADB / Fastboot 设备自动检测,显示串号、型号、系统版本、电量,一键刷新设备信息 |
-| **快速刷写** | 预设分区表(boot / init_boot / vendor_boot / lk)选择镜像并刷写;等待 Fastboot 设备、自动重启、双槽双刷 |
-| **ADB 投屏** | 通过 scrcpy 管理 Android 屏幕镜像(自动推送 scrcpy-server) |
-| **Vivo ROOT** | Root 自动化:KernelSU 安装、vendor_boot 补丁处理(自动处理官方与 GKI 内核)、magiskboot 操作、Root 资源管理 |
-| **文件管理** | ADB Root 通道的文件浏览 / 上传 / 下载(弹保存位置对话框) / 删除 |
-| **可视刷写** | 读取全量分区表,卡片式列表勾选后依序执行**备份 / 写入 / 擦除**;支持 Fastboot 与 ADB Root 双通道 |
-| **固件提取** | 解包 `payload.bin` / OTA zip;或粘贴云端直链,通过 HTTP Range **按需下载**镜像(不下载整个包),带实时进度与速度 |
-| **VIVO 线刷** | 一键刷机:adb 读设备 PD/版本 → 查 `api.nwflash.cc.cd` 拿 OTA 链接 → 多分片下载 → 解压解包 payload → **跳过 preloader/lk** → 自动重启 fastbootd 逐个刷入其余分区 → 重启。也可选择本地 .zip / payload.bin,或**已解包的固件文件夹**(设备断开后保留,重连直接刷,免下载解包) |
-| **在线状态** | 登录后每 5s 心跳保持在线;实时查看其他在线用户与在线时长(显示名/版本/时长,不含账号/IP);服务端可**强制下线**(≤5s 内退出进程,刷写中先取消、等 Idle 再退不打断写入) |
-| **操作门禁** | 每次用户操作(刷写/重启/传输/ROOT…)运行前经服务端许可(默认放行;账号封禁/停用即拒绝);操作结果与耗时按分类上传使用日志,后台可查 |
-| **操作日志** | 按级别(信息 / 成功 / 警告 / 错误)记录所有操作,`[HH:mm:ss]` 时间戳 + 消息的刷机工具式单行显示 |
-
-> 界面整合:左侧菜单按刷机链路重排,左下角账号 / 时钟 / 登出栏;固件提取 / 文件传输等主进度统一到右上角「操作进度区」;登出后优雅下线并回到登录窗口。
-
-## 技术栈
-
-- **.NET 8**(`net8.0-windows`)、**WPF**、MVVM
-- **CommunityToolkit.Mvvm** 8.4 —— `[ObservableProperty]` / `[RelayCommand]`
-- **HandyControl** 3.5.1 —— UI 控件库
-- **SharpCompress** 0.37.2、**ZstdSharp.Port** 0.8.1 —— 压缩 / zstd 解压
-- **xunit** + **FluentAssertions** —— 单元测试(当前 **397** 个应用用例全绿)
-
-## 目录结构
-
-```
+```text
 VivoKsu 工具/
-├─ VivoKsu.slnx                     # 解决方案
-├─ src/
-│  ├─ VivoKsu.App/
-│  │  ├─ Models/                    # 领域模型(AppPage、分区、payload、设备快照…)
-│  │  ├─ Services/                  # 业务服务与基础设施
-│  │  ├─ ViewModels/                # 各页面 MVVM 视图模型
-│  │  ├─ MainWindow.xaml            # 单窗口多页面导航与全部 XAML
-│  │  ├─ apk/                       # KernelSU 安装包(外置,仅开发/测试随包)
-│  │  ├─ payload-tools/             # payload_dumper.exe(外置,仅开发/测试随包)
-│  │  ├─ platform-tools/            # adb / fastboot(随包)
-│  │  ├─ root-tools/                # magiskboot.so(随包)
-│  │  └─ scrcpy/                    # scrcpy(外置,仅开发/测试随包)
-│  └─ VivoKsu.Bootstrapper/          # 原生 AOT 引导器(.NET 运行时首启检测/静默装)
-├─ cloudflare/                      # Cloudflare Worker:Nwflash ROM 代理(api.nwflash.cc.cd)
-├─ tests/
-│  └─ VivoKsu.App.Tests/            # 桌面应用单元测试
-├─ scripts/
-│  ├─ Publish-Release.ps1           # 一键发布 framework-dependent + AOT 引导器版本
-│  ├─ Upload-Resources.ps1          # 历史资源发布辅助脚本
-│  └─ verify-*.ps1                  # UI 自动化验证脚本(启动→UIA 导航→截图)
+├─ src/Nwflash.Desktop/                 # 活跃 React + Tauri + Rust 客户端
+│  ├─ src/                              # React 页面、组件、状态与 IPC DTO
+│  ├─ src/assets/                       # 前端自有品牌资源
+│  ├─ src-tauri/crates/                 # Rust domain/application/infrastructure/windows/tauri
+│  └─ src-tauri/resources/              # 唯一活跃发布资源
+├─ cloudflare/                           # Workers、D1、后台、用户门户和官网
+├─ packaging/release/                   # Tauri 发布资源清单
+├─ scripts/                              # 活跃 Tauri 构建、签名、发布和验证脚本
+├─ docs/                                 # 活跃产品、架构和验收文档
+└─ archive/csharp/                      # 已冻结的 C# / WPF 历史版本
 ```
 
-## 架构与关键设计
+## 开发与验证
 
-### 组合根与依赖注入
+在仓库根目录运行：
 
-无第三方 DI 容器,`Services/AppComposition.cs` 手写组合根:构建后端 → 会话 → 协调器 → 各页面 VM → 组装 `MainViewModel`,并注册跨页面回调(固件提取 / Root 产物一键映射到快速刷写)。
+```powershell
+# React 单元/组件测试与生产前端构建
+npm run test --prefix src/Nwflash.Desktop
+npm run build --prefix src/Nwflash.Desktop
 
-### 设备监视(DeviceMonitorService)
+# Rust workspace 测试
+cargo test --manifest-path src/Nwflash.Desktop/src-tauri/Cargo.toml --workspace
 
-后台 `PeriodicTimer`(默认 3 秒)轮询设备状态。**关键设计**:心跳轮询只在设备身份(连接状态 / 串号)发生变化时才触发下游 `DeviceRefreshed`。**可视刷写的分区表只在用户点击「读取分区表」时读取**——设备接入 / 断开 / 切换、操作完成后的补偿刷新都不会触发重读,避免分区表被反复读取打断操作;`DeviceRefreshed` 仅用于设备概览 / 镜像协调等与分区表无关的更新。
+# Tauri 二进制构建（不打安装包）
+npm run tauri --prefix src/Nwflash.Desktop -- build --no-bundle
 
-### 分区传输抽象
-
-`IPartitionTransport` 封装两种通道,可视刷写按连接状态自动选择:
-
-- `FastbootPartitionTransport` —— fastboot `getvar` / `flash` / `erase`
-- `AdbRootPartitionTransport` —— adb root + `dd` 读写,失败时杀进程树并合并 stderr
-
-`PartitionExecutionService` 依序执行每个选中分区,经 `OperationCoordinator` 上报进度(100ms 节流)。
-
-### 固件提取
-
-格式检测(`FirmwareFormatDetector`)按魔数分流:
-
-- **标准 OTA zip**(`PK` 魔数)→ `payload_dumper`(内置二进制)走 **HTTP Range 只读所需 blob**,远程源不落地整包
-- **Vivo 专用格式**(`1f8b` gzip)→ `VivoFirmwareExtractor` **流式解压 gzip→tar**,直接列出 / 提取分区镜像
-
-**实时进度(重点)**:payload_dumper 不输出流式进度,且其网络读取(Rust reqwest 走 IOCP/AFD)不计入进程 `ReadTransferCount`;实际验证可靠信号是**进程写入字节数 `WriteTransferCount`** —— 后台每 200ms 采样 `GetProcessIoCounters`,按分区 `size_in_bytes` 作分母,得到真实连续的进度条与速度。Vivo gzip 路径则以已解压字节 / gzip 总量直接报连续进度。
-
-### VIVO 线刷(安全刷写)
-
-一键刷机链路(详见 [docs/safeflash-ota.md](docs/safeflash-ota.md)):
-
-- **OTA 下载** `OtaDownloadService`:bezzad/Downloader 多分片,含 1 字节 bug / 失败假成功 / 磁盘预检等修复;staging 优先系统 SSD。
-- **解压解包** `FirmwarePartitionExtractor`:自动分流 payload OTA(PD2417)/ 直接镜像 zip(PD2057)/ firmware-update 镜像,过滤 `preloader*` 与 `lk`。
-- **刷写** `FastbootCliRunner`:调唯一 `platform-tools/fastboot.exe`(35.0.2-eng,带连续进度 + 可读错误),`adb reboot fastboot` 进 fastbootd,`getvar partition-type` 预检跳过设备缺失分区,逐个 flash 后 `fastboot reboot`。
-- 操作日志按 `[HH:mm:ss] 消息` 单行等宽显示刷机进度,自动滚动。
-
-### UI 现代化
-
-参考 taste-skill 审美原则迭代:统一 teal 配色、圆角卡片分区列表(固件提取与可视刷写同款)、表单式页面头部。2026-08-15 界面整合:
-
-- **右上角统一「操作进度」区**:DEVICE STATUS 卡片内五块按操作运行显示(快速刷写 / 可视刷写 / VIVO 线刷 / 固件提取 / 设备操作通用),全部空闲显示「无进行中的操作」;固件提取页与文件管理页的重复进度条已移除。
-- **左下角账号栏**:登录账号 + 当前时间 + 登出按钮;登出走**同进程优雅下线**(心跳 goodbye / 上传使用日志 / 停监视)→ 回到登录窗口,无重启闪烁;刷写中登出按钮禁用防打断。
-- **文件管理「传出文件到电脑」弹保存位置对话框**,成功后本地目录跟随。
-- **左侧菜单按刷机链路分组**(概览/文件/投屏 ‖ 刷写/提取/ROOT ‖ 在线/软件)。
-
-## 服务端(Cloudflare —— api.nwflash.cc.cd / web.nwflash.cc.cd)
-
-**整个后端全部托管在 Cloudflare,无自有服务器**:API(Worker `nwflash-rom`)、后台管理(Worker,`web.nwflash.cc.cd`)、数据库(D1 `nwflash-db`)都在 Cloudflare Edge。桌面应用只连 `api.nwflash.cc.cd`;上游 [VOTA API](https://api.otau.cc.cd) 完全不动。
-
-| 端点 | 说明 |
-| --- | --- |
-| `GET /health` | 健康检查,返回 `{status, source}` |
-| `GET /api/rom?pd=PD2417&version=16.2.12.0.W10.V000L1` | 按 PD + 版本号返回 OTA 下载链接 |
-| `POST /api/heartbeat` | 在线会话心跳(每 5s;检测强制下线 / 封禁 / 426) |
-| `GET /api/online` | 在线用户列表(显示名/版本/时长,不含账号/IP) |
-| `POST /api/operation/authorize` | 操作许可门禁(每个操作运行前询问;默认放行、封禁/停用拒绝) |
-| `POST /api/usage/logs` | 使用日志批量上传(按操作分类存储) |
-
-**凭据隔离**:VOTA API Token 以 Worker 机密(`wrangler secret put VOTA_API_TOKEN`)存在 `api.nwflash.cc.cd` 上,**不进入 Nwflash 桌面端**。Nwflash 代码里没有任何 `api.otau.cc.cd` / token 信息,只连 `api.nwflash.cc.cd`。
-
-**计费**:上游 VOTA 的信用点由**运营方**(Worker 所持 token 账户)承担,**不对用户扣点计费** —— 用户登录即可查询,不限制次数。
-
-**代码**:`cloudflare/`(TypeScript Worker + wrangler.toml),worker 名 `nwflash-rom`。非机密项在 `wrangler.toml [vars]`:`VOTA_BASE_URL`(默认 `https://api.otau.cc.cd`)、`VOTA_ACTION`(`resolve_url` OTA / `resolve_flash_url` 线刷)、`VOTA_VER`(`0.1.0`)。
-
-**部署**:
-
-```bash
-cd cloudflare
-npm install
-npx wrangler login                    # 浏览器登录 Cloudflare 账户
-npx wrangler secret put VOTA_API_TOKEN   # 粘贴 VOTA 的 API Token(机密,不进代码)
-npx wrangler deploy                   # 部署并绑定自定义域 api.nwflash.cc.cd
-```
-
-**错误映射**:`NOT_FOUND`/`not found`→404、`AUTH_FAIL`→401、`INSUFFICIENT_CREDITS`→402、`FORBIDDEN`→403、`RATE_LIMITED`→429、其它→502。
-
-**已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁、**在线会话(心跳 / 在线状态 / 强制下线)**、**操作许可门禁 + 使用日志分类上传**,均已在 Cloudflare 上。
-
-> 早期自建 .NET 服务端(`src/Nwflash.Server/`)已整体删除 —— 线上后端 100% 跑在 Cloudflare Workers(仅支持 JavaScript/TypeScript)+ D1,桌面端直连 `api.nwflash.cc.cd`;VOTA 凭据只存在 Worker 机密里,不再有自托管代码。
-
-## 构建与测试
-
-```bash
-# 构建(Debug)
-dotnet build src/VivoKsu.App/VivoKsu.App.csproj -c Debug
-
-# 运行全部测试
-dotnet test tests/VivoKsu.App.Tests/VivoKsu.App.Tests.csproj -c Debug
-
-# 运行应用
-./src/VivoKsu.App/bin/Debug/net8.0-windows/VivoKsu.App.exe
+# 发布契约与安装器验证
+powershell -ExecutionPolicy Bypass -File scripts/Test-TauriRelease.ps1
+powershell -ExecutionPolicy Bypass -File scripts/Verify-TauriRelease.ps1 -ReleaseRoot artifacts/tauri-release
 ```
 
 ## 发布
 
-### Tauri/Rust Windows 发布物
+正式发布由 `scripts/Publish-TauriRelease.ps1` 生成。它以
+`packaging/release/tauri-resources.json` 的精确 allowlist 从 Tauri 自有资源目录取文件、校验 SHA-256，并生成每用户 NSIS 安装器。发布后使用 `scripts/Verify-TauriRelease.ps1` 验证 release root；该验证器只读取和校验已生成的清单，不覆盖清单。
 
-Tauri 迁移发布物由 `scripts/Publish-TauriRelease.ps1` 生成。它首先复制并校验固定设备资源，构建
-`nwflash-desktop.exe` 和每用户 NSIS 安装器，然后将受保护、已签名产物暂存到
-`artifacts/tauri-release/`：根目录仅包含 EXE、一个 `*-setup.exe` 和 `SHA256SUMS.txt`，固定资源位于
-`resources/`。目录由 `.nwflash-tauri-release` 标记为脚本可重建的生成目录；未标记的非空目录会被拒绝。
-NSIS 使用 `currentUser` 安装模式和内嵌 WebView2 bootstrapper；Tauri EXE 不携带 .NET runtime。发布阶段自动执行
-VMProtect、EXE/安装器签名、安装卸载测试和清单校验；缺少受控保护或签名配置时直接失败。开发调试若确实需要
-未签名产物，必须显式传入 `-DevelopmentUnsigned`，该产物不得发布。
+ROOT 管理器 APK、payload_dumper、platform-tools、驱动、root-tools 和 scrcpy 的发布输入均在 `src/Nwflash.Desktop/src-tauri/resources/`，不依赖 C# 目录。
 
-```powershell
-./scripts/Publish-TauriRelease.ps1
-./scripts/Verify-TauriRelease.ps1 -ReleaseRoot artifacts/tauri-release
-./scripts/Test-TauriRelease.ps1
-```
+## 文档
 
-`Verify-TauriRelease.ps1` 只读取并核验已生成的 `SHA256SUMS.txt`，不会覆盖清单；正式产物还必须通过
-`scripts/Verify-ProtectedRelease.ps1` 的签名身份校验。
-
-验证器要求所有固定运行时资源同包：platform-tools、Vivo 驱动、magiskboot、完整 scrcpy、ROOT
-管理器 APK 与 `payload_dumper`。资源分类的唯一发布清单是
-`src/Nwflash.Desktop/src-tauri/resources/README.md`。
-
-最终下载包还必须经过 `docs/release/tauri-vmp-signing-runbook.md` 的 VMP 和 Authenticode 门禁。保护与签名脚本
-只从受控发布环境读取 `NWFLASH_VMP_PATH`、`NWFLASH_VMP_ARGUMENTS`、`NWFLASH_SIGNTOOL_PATH` 与
-`NWFLASH_CERT_THUMBPRINT`；这些值、证书和任何生产凭据均不进入仓库。
-
-```powershell
-./scripts/Publish-Release.ps1
-```
-
-产出 **framework-dependent** `win-x64` 版本(不内嵌 .NET 运行时):
-
-- `artifacts/release/VivoKsu-win-x64/` —— 可分发目录
-- `artifacts/release/VivoKsu-win-x64.zip` + `.sha256`
-- `SHA256SUMS.txt` —— 目录内每个文件的 SHA-256 清单
-
-**发布体积**:解压约 **24MB** / zip 约 **11MB**(较改造前的 self-contained 约 205MB / 95MB 缩减约 90%)。
-
-**首次启动**:入口为原生 AOT 引导器 `VivoKsu.Launcher.exe`(≈5MB,不依赖任何运行时)。
-机器缺少 .NET 8 桌面运行时 → 引导器从微软直链下载 ~56MB 静默安装(一次 UAC)后拉起
-`VivoKsu.App.exe`;已装则直接启动。检测逻辑见 `DotNetRuntimeDetector`。
-
-**固定运行时资源**:scrcpy、ROOT 管理器 APK 与 payload_dumper 均随包发布，并在使用前校验。
-资源缺失或校验失败时，应用提示重新安装，不会按需下载。
-
-**内置组件检查窗(登录后检测)**:登录后校验固定资源；资源缺失时显示检查窗和错误信息，软件页可重新检查。
-
-## 内置组件
-
-| 组件 | 随包 | 来源 | 用途 |
-| --- | --- | --- | --- |
-| `platform-tools/`(adb、fastboot) | **随包** | Android SDK Platform Tools | 设备连接、刷写 |
-| `drivers/vivo-usb-driver.7z` | **随包** | vivo 官方 | 驱动提醒窗静默安装 |
-| `root-tools/magiskboot.so` | **随包** | Magisk | vendor_boot 补丁处理 |
-| `scrcpy/` | **随包** | scrcpy | 屏幕镜像 |
-| `apk/KSU.APK`、`apk/KernelSU.apk` | **随包** | KernelSU | ROOT 管理器安装包 |
-| `payload-tools/payload_dumper.exe` | **随包** | payload-dumper-rust | OTA payload 解包 |
-
-## 已知限制
-
-- **payload 分区内部百分比无法测量**:payload_dumper 预分配输出文件且不流式输出进度,分区内的进度条按进程写入字节驱动(真实但以分区为单位),分区内更细的百分比受工具二进制限制无法获得。
-- **分区操作有真实设备风险**:写入 / 擦除会修改设备分区,执行前有确认弹窗,任务在首个失败处分区停止。
-- **脚本编码**:发布 / 验证用的 `.ps1` 必须保持纯 ASCII(本机无 BOM 的 UTF-8 脚本被按 GBK 读取会乱码)。
-- **唯一 fastboot.exe 待真机验证**:fastboot 35.0.2-eng 在 vivo fastbootd 逐个刷分区是唯一未真机实测环节。
-- **下载盘需 ~25GB 空闲且最好是 SSD**:bezzad 多分片随机写在 HDD 会停滞(staging 自动优先系统盘)。
-
-## 相关文档
-
-> 📚 **项目索引**:[docs/index.md](docs/index.md) —— 所有文档 / 代码 / 服务 / 数据的导航地图,从此出发。
-
-- [docs/architecture.md](docs/architecture.md) —— **项目架构文档**(系统总览 / 桌面端模块 / Worker / D1 / 数据流 / 设计决策)。
-- [docs/safeflash-ota.md](docs/safeflash-ota.md) —— VIVO 线刷(安全刷写)流程、OTA 格式、下载/刷写内部细节与踩坑。
-- [cloudflare/API.md](cloudflare/API.md) —— **api.nwflash.cc.cd 接口契约**(端点、参数、响应、错误码、计费、功能记录)。
-- [cloudflare/README.md](cloudflare/README.md) —— Cloudflare Worker(api.nwflash.cc.cd)部署说明。
-- [cloudflare/web/README.md](cloudflare/web/README.md) —— **web.nwflash.cc.cd 后台管理**(登录/版本控制/用户/日志/安全)。
+- [当前项目架构](docs/project-architecture.md)
+- [Rust/Tauri 客户端架构](src/Nwflash.Desktop/docs/rust-tauri-architecture.md)
+- [API 契约](cloudflare/API.md)
+- [文档索引](docs/index.md)
+- [C# / WPF 归档说明](archive/csharp/README.md)

@@ -69,10 +69,7 @@ fn bundled_driver_archive_extracts_inf_files_before_pnputil_can_run() {
     let archive = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("..")
-        .join("..");
-    let archive = archive
-        .join("VivoKsu.App")
+        .join("resources")
         .join("drivers")
         .join("vivo-usb-driver.7z");
 

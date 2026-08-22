@@ -8,7 +8,7 @@ import { ModalLayer } from './ModalLayer';
 import { OperationLogPanel } from './OperationLogPanel';
 import { OperationProgressPanel } from './OperationProgressPanel';
 import { Sidebar } from './Sidebar';
-import logoUrl from '../../../VivoKsu.App/Assets/logo.jpg';
+import logoUrl from '../assets/logo.jpg';
 
 type AppShellProps = {
   appTitle: string;

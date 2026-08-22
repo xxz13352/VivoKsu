@@ -1,5 +1,5 @@
 import { FC, useState } from 'react';
-import loginBrandLogo from '../../../VivoKsu.App/Assets/logo.jpg';
+import loginBrandLogo from '../assets/logo.jpg';
 
 type LoginScreenProps = {
   username: string;
