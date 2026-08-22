@@ -1348,13 +1348,8 @@
 .nw-firmware-extract-heading > div > p:last-child { margin:7px 0 0; color:var(--nw-text-subtle); font-size:12px; }
 .nw-firmware-tool-chip { display:inline-flex; align-items:center; gap:8px; border:1px solid #cde1de; border-radius:16px; color:var(--nw-accent); padding:5px 10px; font-size:11px; }
 .nw-firmware-tool-chip i { width:7px; height:7px; border-radius:50%; background:var(--nw-accent); }
-.nw-firmware-extract-workbench { display:grid; grid-template-rows:152px 46px 236px; overflow:hidden; border:1px solid var(--nw-border); border-radius:8px; background:var(--nw-surface); }
+.nw-firmware-extract-workbench { display:grid; grid-template-rows:104px 46px 236px; overflow:hidden; border:1px solid var(--nw-border); border-radius:8px; background:var(--nw-surface); }
 .nw-firmware-source-fields { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:10px; row-gap:10px; border-bottom:1px solid #d8e8e5; background:#f6fafa; padding:14px 18px; }
-.nw-firmware-source-mode { display:flex; grid-column:1 / -1; gap:0; }
-.nw-firmware-source-mode button { border-radius:0; }
-.nw-firmware-source-mode button:first-child { border-radius:5px 0 0 5px; }
-.nw-firmware-source-mode button:last-child { border-left:0; border-radius:0 5px 5px 0; }
-.nw-firmware-source-mode button[aria-pressed="true"] { border-color:#087a70; background:#087a70; color:#fff; }
 .nw-firmware-source-fields label { display:grid; grid-template-columns:68px minmax(0,1fr); align-items:center; gap:12px; min-width:0; color:var(--nw-text-primary); font-size:11px; font-weight:600; }
 .nw-firmware-source-fields input { box-sizing:border-box; min-width:0; height:30px; border:1px solid var(--nw-border); border-radius:4px; background:#fff; color:var(--nw-text-primary); padding:0 10px; font-family:Consolas,monospace; font-size:11px; }
 .nw-firmware-source-fields input[readonly] { color:var(--nw-text-subtle); background:#fcfdfe; }

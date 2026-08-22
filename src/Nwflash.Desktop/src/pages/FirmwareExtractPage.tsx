@@ -58,7 +58,6 @@ export const FirmwareExtractPage: FC = () => {
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [remoteUrl, setRemoteUrl] = useState('');
   const [outputDirectory, setOutputDirectory] = useState<string | null>(null);
-  const [sourceKind, setSourceKind] = useState<'local' | 'remote'>('local');
   const [format, setFormat] = useState('');
   const [entries, setEntries] = useState<FirmwareEntry[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -70,6 +69,7 @@ export const FirmwareExtractPage: FC = () => {
     { artifactId: string; confirmation: FirmwareArtifactConfirmation } | null
   >(null);
   const [progress, setProgress] = useState<FirmwareProgress | null>(null);
+  const hasSource = Boolean(sourcePath) || Boolean(remoteUrl.trim());
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -100,37 +100,13 @@ export const FirmwareExtractPage: FC = () => {
       return;
     }
 
-    setIsWorking(true);
-    try {
-      const inspection = await invoke<FirmwareInspection>('firmware_inspect_local', {
-        sourcePath: selected,
-      });
-      setSourcePath(selected);
-      setSourceKind('local');
-      setFormat(inspection.format);
-      setEntries(inspection.entries);
-      setSelectedIds(new Set());
-      setExtractedImages([]);
-      setPendingArtifact(null);
-      setProgress(null);
-      setStatusText(`${formatLabel(inspection.format)}，已发现 ${inspection.entries.length} 个分区。`);
-    } catch {
-      setSourcePath(null);
-      setSourceKind('local');
-      setFormat('');
-      setEntries([]);
-      setSelectedIds(new Set());
-      setExtractedImages([]);
-      setPendingArtifact(null);
-      setProgress(null);
-      setErrorText('固件检查失败，请确认文件格式。');
-    } finally {
-      setIsWorking(false);
-    }
+    setSourcePath(selected);
+    setRemoteUrl('');
+    clearInspection();
+    setStatusText('已选择本地固件，点击读取信息查看分区。');
   };
 
   const clearInspection = () => {
-    setSourcePath(null);
     setFormat('');
     setEntries([]);
     setSelectedIds(new Set());
@@ -139,26 +115,18 @@ export const FirmwareExtractPage: FC = () => {
     setProgress(null);
   };
 
-  const selectSourceKind = (kind: 'local' | 'remote') => {
-    if (sourceKind === kind) {
-      return;
-    }
-    setSourceKind(kind);
-    clearInspection();
-    setErrorText('');
-    setStatusText(kind === 'remote' ? '请输入 HTTP 或 HTTPS 固件地址' : '未加载 payload');
-  };
-
-  const inspectRemote = async () => {
+  const inspectSource = async () => {
     const url = remoteUrl.trim();
-    if (!/^https?:\/\/[^\s/]+/i.test(url)) {
-      setErrorText('请输入有效的 HTTP 或 HTTPS 固件地址。');
+    if (!sourcePath && !/^https?:\/\/[^\s/]+/i.test(url)) {
+      setErrorText('请输入有效的 HTTP 或 HTTPS 固件地址，或选择本地固件。');
       return;
     }
     setErrorText('');
     setIsWorking(true);
     try {
-      const inspection = await invoke<FirmwareInspection>('firmware_inspect_remote', { url });
+      const inspection = sourcePath
+        ? await invoke<FirmwareInspection>('firmware_inspect_local', { sourcePath })
+        : await invoke<FirmwareInspection>('firmware_inspect_remote', { url });
       setFormat(inspection.format);
       setEntries(inspection.entries);
       setSelectedIds(new Set());
@@ -168,7 +136,7 @@ export const FirmwareExtractPage: FC = () => {
       setStatusText(`${formatLabel(inspection.format)}，已发现 ${inspection.entries.length} 个分区。`);
     } catch {
       clearInspection();
-      setErrorText('远程固件检查失败，请确认 HTTP 或 HTTPS 地址和文件格式。');
+      setErrorText(sourcePath ? '固件检查失败，请确认文件格式。' : '远程固件检查失败，请确认 HTTP 或 HTTPS 地址和文件格式。');
     } finally {
       setIsWorking(false);
     }
@@ -221,7 +189,7 @@ export const FirmwareExtractPage: FC = () => {
 
     setIsWorking(true);
     try {
-      const extraction = sourceKind === 'remote'
+      const extraction = !sourcePath
         ? await invoke<FirmwareExtraction>('firmware_extract_remote', {
             url: remoteUrl.trim(),
             selectedIds: [...selectedIds],
@@ -303,72 +271,34 @@ export const FirmwareExtractPage: FC = () => {
 
       <section className="nw-firmware-extract-workbench">
         <header className="nw-firmware-source-fields">
-          <div className="nw-firmware-source-mode" role="group" aria-label="固件来源类型">
-            <button
-              type="button"
-              className="nw-test-firmware-source-local"
-              aria-pressed={sourceKind === 'local'}
-              onClick={() => selectSourceKind('local')}
+          <label>
+            <span>固件来源</span>
+            <input
+              aria-label="固件来源"
+              className="nw-test-firmware-source"
+              type="text"
+              inputMode="url"
+              value={sourcePath ? '已选择本地固件' : remoteUrl}
+              readOnly={Boolean(sourcePath)}
+              onChange={(event) => {
+                setSourcePath(null);
+                setRemoteUrl(event.target.value);
+                clearInspection();
+                setErrorText('');
+                setStatusText('请输入 HTTP 或 HTTPS 固件地址后读取信息。');
+              }}
+              placeholder="输入 http:// 或 https:// 地址，或选择本地固件"
               disabled={isWorking}
-            >
-              本地文件
-            </button>
-            <button
-              type="button"
-              className="nw-test-firmware-source-remote"
-              aria-pressed={sourceKind === 'remote'}
-              onClick={() => selectSourceKind('remote')}
-              disabled={isWorking}
-            >
-              HTTP(S) 地址
-            </button>
-          </div>
-          {sourceKind === 'remote' ? (
-            <>
-              <label>
-                <span>HTTP(S) 固件地址</span>
-                <input
-                  aria-label="HTTP(S) 固件地址"
-                  className="nw-test-firmware-remote-url"
-                  type="url"
-                  value={remoteUrl}
-                  onChange={(event) => {
-                    setRemoteUrl(event.target.value);
-                    clearInspection();
-                  }}
-                  placeholder="http://... 或 https://..."
-                  disabled={isWorking}
-                />
-              </label>
-              <button
-                type="button"
-                className="nw-test-firmware-remote-inspect"
-                onClick={() => void inspectRemote()}
-                disabled={isWorking || !remoteUrl.trim()}
-              >
-                检查地址
-              </button>
-            </>
-          ) : (
-            <>
-              <label>
-                <span>固件来源</span>
-                <input
-                  aria-label="固件来源"
-                  value={sourcePath ? '已选择本地固件' : '请选择本地固件'}
-                  readOnly
-                />
-              </label>
-              <button
-                type="button"
-                className="nw-test-firmware-select"
-                onClick={() => void chooseSource()}
-                disabled={isWorking}
-              >
-                选择固件
-              </button>
-            </>
-          )}
+            />
+          </label>
+          <button
+            type="button"
+            className="nw-test-firmware-select"
+            onClick={() => void chooseSource()}
+            disabled={isWorking}
+          >
+            选择本地文件
+          </button>
           <label>
             <span>输出路径</span>
             <input
@@ -429,11 +359,19 @@ export const FirmwareExtractPage: FC = () => {
         <div className="nw-firmware-actions">
           <button
             type="button"
+            className="nw-test-firmware-inspect"
+            onClick={() => void inspectSource()}
+            disabled={isWorking || !hasSource}
+          >
+            读取信息
+          </button>
+          <button
+            type="button"
             className="nw-test-firmware-extract"
             onClick={() => void extractSelected()}
-            disabled={isWorking || selectedIds.size === 0}
+            disabled={isWorking || !format || selectedIds.size === 0}
           >
-            提取镜像
+            提取文件
           </button>
           <button
             type="button"

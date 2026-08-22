@@ -41,6 +41,23 @@ const renderFirmwareExtract = () => {
   });
 };
 
+const inspectSelectedLocalSource = async () => {
+  (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
+  await waitUntil(() => (
+    (host.querySelector('.nw-test-firmware-source') as HTMLInputElement | null)?.value === '已选择本地固件'
+  ));
+  (host.querySelector('.nw-test-firmware-inspect') as HTMLButtonElement).click();
+  await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+};
+
+const inspectRemoteSource = async (url: string) => {
+  const input = host.querySelector('.nw-test-firmware-source') as HTMLInputElement;
+  setInputValue(input, url);
+  await waitUntil(() => input.value === url);
+  (host.querySelector('.nw-test-firmware-inspect') as HTMLButtonElement).click();
+  await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+};
+
 describe('FirmwareExtractPage', () => {
   beforeEach(() => {
     host = document.createElement('div');
@@ -67,6 +84,35 @@ describe('FirmwareExtractPage', () => {
     expect(host.textContent ?? '').not.toContain('C:\\private');
   });
 
+  test('选择本地来源后由读取信息按钮再发起检查', async () => {
+    const dialog = open as unknown as ReturnType<typeof vi.fn>;
+    const command = invoke as unknown as ReturnType<typeof vi.fn>;
+    dialog.mockResolvedValue('C:\\private\\firmware\\vivo_ota.gz');
+    command.mockResolvedValue({ format: 'vivoGzipTar', entries: [{ id: '0', name: 'boot.img', sizeBytes: 4 }] });
+
+    renderFirmwareExtract();
+    (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
+    await waitUntil(() => (
+      (host.querySelector('.nw-test-firmware-source') as HTMLInputElement | null)?.value === '已选择本地固件'
+    ));
+
+    expect(command).not.toHaveBeenCalled();
+    (host.querySelector('.nw-test-firmware-inspect') as HTMLButtonElement).click();
+    await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+    expect(command).toHaveBeenCalledWith('firmware_inspect_local', {
+      sourcePath: 'C:\\private\\firmware\\vivo_ota.gz',
+    });
+  });
+
+  test('操作栏始终提供读取信息、提取文件和停止操作', () => {
+    renderFirmwareExtract();
+
+    expect(host.querySelector('.nw-test-firmware-inspect')?.textContent).toBe('读取信息');
+    expect(host.querySelector('.nw-test-firmware-extract')?.textContent).toBe('提取文件');
+    expect(host.querySelector('.nw-test-firmware-cancel')?.textContent).toBe('停止操作');
+    expect((host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).disabled).toBe(true);
+  });
+
   test('选择本地固件后只展示路径安全的分区元数据', async () => {
     const dialog = open as unknown as ReturnType<typeof vi.fn>;
     const command = invoke as unknown as ReturnType<typeof vi.fn>;
@@ -77,9 +123,7 @@ describe('FirmwareExtractPage', () => {
     });
 
     renderFirmwareExtract();
-    (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
-
-    await waitUntil(() => host.textContent?.includes('boot.img') ?? false);
+    await inspectSelectedLocalSource();
 
     expect(command).toHaveBeenCalledWith('firmware_inspect_local', {
       sourcePath: 'C:\\private\\firmware\\vivo_ota.gz',
@@ -119,8 +163,7 @@ describe('FirmwareExtractPage', () => {
       .mockResolvedValueOnce({ images: [{ name: 'boot.img', sizeBytes: 4 }] });
 
     renderFirmwareExtract();
-    (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
-    await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+    await inspectSelectedLocalSource();
     (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
     (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
 
@@ -157,14 +200,7 @@ describe('FirmwareExtractPage', () => {
     });
 
     renderFirmwareExtract();
-    flushSync(() => {
-      (host.querySelector('.nw-test-firmware-source-remote') as HTMLButtonElement).click();
-    });
-    const urlInput = host.querySelector('.nw-test-firmware-remote-url') as HTMLInputElement;
-    setInputValue(urlInput, 'https://firmware.example.test/ota.zip?token=secret');
-    (host.querySelector('.nw-test-firmware-remote-inspect') as HTMLButtonElement).click();
-
-    await waitUntil(() => host.textContent?.includes('boot') ?? false);
+    await inspectRemoteSource('https://firmware.example.test/ota.zip?token=secret');
 
     expect(command).toHaveBeenCalledWith('firmware_inspect_remote', {
       url: 'https://firmware.example.test/ota.zip?token=secret',
@@ -184,13 +220,7 @@ describe('FirmwareExtractPage', () => {
       .mockResolvedValueOnce({ images: [{ name: 'boot.img', sizeBytes: 4 }] });
 
     renderFirmwareExtract();
-    flushSync(() => {
-      (host.querySelector('.nw-test-firmware-source-remote') as HTMLButtonElement).click();
-    });
-    const urlInput = host.querySelector('.nw-test-firmware-remote-url') as HTMLInputElement;
-    setInputValue(urlInput, 'https://firmware.example.test/ota.zip');
-    (host.querySelector('.nw-test-firmware-remote-inspect') as HTMLButtonElement).click();
-    await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+    await inspectRemoteSource('https://firmware.example.test/ota.zip');
     (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
     (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
 
@@ -215,13 +245,7 @@ describe('FirmwareExtractPage', () => {
       .mockResolvedValueOnce({ images: [{ name: 'vendor.img', sizeBytes: 8 }] });
 
     renderFirmwareExtract();
-    flushSync(() => {
-      (host.querySelector('.nw-test-firmware-source-remote') as HTMLButtonElement).click();
-    });
-    const urlInput = host.querySelector('.nw-test-firmware-remote-url') as HTMLInputElement;
-    setInputValue(urlInput, 'https://firmware.example.test/payload.bin?sig=abc');
-    (host.querySelector('.nw-test-firmware-remote-inspect') as HTMLButtonElement).click();
-    await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+    await inspectRemoteSource('https://firmware.example.test/payload.bin?sig=abc');
     (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
     (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
 
@@ -238,26 +262,19 @@ describe('FirmwareExtractPage', () => {
     command.mockResolvedValue({ format: 'payload', entries: [{ id: '0', name: 'boot', sizeBytes: 4 }] });
 
     renderFirmwareExtract();
-    flushSync(() => {
-      (host.querySelector('.nw-test-firmware-source-remote') as HTMLButtonElement).click();
-    });
-    const urlInput = host.querySelector('.nw-test-firmware-remote-url') as HTMLInputElement;
-    setInputValue(urlInput, 'http://firmware.example.test/ota.zip');
-    (host.querySelector('.nw-test-firmware-remote-inspect') as HTMLButtonElement).click();
-
-    await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+    await inspectRemoteSource('http://firmware.example.test/ota.zip');
     expect(command).toHaveBeenCalledWith('firmware_inspect_remote', {
       url: 'http://firmware.example.test/ota.zip',
     });
   });
 
-  test('切换回本地模式会清除远程分区缓存', () => {
+  test('统一来源输入会保留单一来源控件和空分区状态', () => {
     renderFirmwareExtract();
 
-    (host.querySelector('.nw-test-firmware-source-remote') as HTMLButtonElement).click();
-    (host.querySelector('.nw-test-firmware-source-local') as HTMLButtonElement).click();
+    const source = host.querySelector('.nw-test-firmware-source') as HTMLInputElement;
+    setInputValue(source, 'https://firmware.example.test/ota.zip');
 
-    expect(host.querySelector('.nw-test-firmware-remote-url')).toBeNull();
+    expect(source.value).toBe('https://firmware.example.test/ota.zip');
     expect(host.querySelector('.nw-firmware-partition-empty strong')?.textContent).toBe('尚未读取分区');
   });
 
@@ -275,8 +292,7 @@ describe('FirmwareExtractPage', () => {
       .mockResolvedValueOnce({ images: [{ name: 'boot.img', sizeBytes: 4 }] });
 
     renderFirmwareExtract();
-    (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
-    await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+    await inspectSelectedLocalSource();
     (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
     (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
 
@@ -304,8 +320,7 @@ describe('FirmwareExtractPage', () => {
       .mockResolvedValueOnce({ images: [{ name: 'boot.img', sizeBytes: 9 }] });
 
     renderFirmwareExtract();
-    (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
-    await waitUntil(() => host.textContent?.includes('payload 固件') ?? false);
+    await inspectSelectedLocalSource();
     (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
     (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
 
@@ -327,6 +342,10 @@ describe('FirmwareExtractPage', () => {
 
     renderFirmwareExtract();
     (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
+    await waitUntil(() => (
+      (host.querySelector('.nw-test-firmware-source') as HTMLInputElement | null)?.value === '已选择本地固件'
+    ));
+    (host.querySelector('.nw-test-firmware-inspect') as HTMLButtonElement).click();
     await waitUntil(
       () => !(host.querySelector('.nw-test-firmware-cancel') as HTMLButtonElement).disabled,
     );
@@ -355,8 +374,7 @@ describe('FirmwareExtractPage', () => {
       .mockResolvedValueOnce({});
 
     renderFirmwareExtract();
-    (host.querySelector('.nw-test-firmware-select') as HTMLButtonElement).click();
-    await waitUntil(() => host.querySelector('.nw-test-firmware-entry') !== null);
+    await inspectSelectedLocalSource();
     (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
     (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
     await waitUntil(() => host.querySelector('.nw-test-firmware-flash') !== null);
