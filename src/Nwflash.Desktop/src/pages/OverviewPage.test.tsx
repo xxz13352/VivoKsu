@@ -66,6 +66,10 @@ describe('OverviewPage', () => {
     expect(host.textContent).toContain('ADB 已连接');
     expect(host.textContent).toContain('V2318A');
     expect(host.textContent).toContain('78%');
+    expect(host.querySelector('.nw-overview-identity .nw-page-eyebrow')?.textContent).toBe(
+      '已连接设备',
+    );
+    expect(host.querySelectorAll('.nw-device-indicator.is-connected')).toHaveLength(2);
   });
 
   test('使用 WPF 设备档案和启动控制结构呈现断开连接的空闲状态', async () => {
@@ -88,6 +92,10 @@ describe('OverviewPage', () => {
     expect(host.textContent).toContain('连接信息、引导状态与系统标识');
     expect(host.textContent).toContain('设备参数由 ADB / Fastboot 会话实时读取');
     expect(host.textContent).toContain('REBOOT CONTROL');
+    expect(host.querySelector('.nw-overview-identity .nw-page-eyebrow')?.textContent).toBe(
+      '未检测到设备',
+    );
+    expect(host.querySelector('.nw-device-indicator.is-connected')).toBeNull();
     expect(host.querySelector('[aria-label="重启设备"]')?.textContent).toBe('重启');
     expect(host.querySelector('[aria-label="进入 Bootloader"]')?.textContent).toBe('进入');
     expect(host.querySelector('[aria-label="进入 Fastboot"]')?.textContent).toBe('进入');
@@ -124,6 +132,7 @@ describe('OverviewPage', () => {
 
     const button = host.querySelector('[aria-label="进入 Bootloader"]') as HTMLButtonElement;
     expect(button.disabled).toBe(false);
+    expect(host.querySelectorAll('.nw-device-indicator.is-connected')).toHaveLength(2);
     button.click();
 
     await waitUntil(() => (invoke as unknown as ReturnType<typeof vi.fn>).mock.calls.length === 2);

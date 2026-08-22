@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { AppShell } from './AppShell';
 import { NWFLASH_APP_PAGES } from '../app/pageManifest';
 import type { BusyOperationItem } from '../app/window-state';
+import type { DeviceSnapshotPayload } from '../app/ipc-events';
 
 type RootHandle = ReturnType<typeof createRoot>;
 
@@ -12,7 +13,11 @@ let root: RootHandle;
 
 const renderShell = (
   operations: readonly BusyOperationItem[],
-  extra: { isBusyAction?: boolean; onRefreshDevice?: () => void } = {},
+  extra: {
+    isBusyAction?: boolean;
+    onRefreshDevice?: () => void;
+    deviceSnapshot?: DeviceSnapshotPayload;
+  } = {},
 ) => {
   const shellProps = {
     appTitle: '奶蛙Flash',
@@ -25,6 +30,7 @@ const renderShell = (
     currentTime: '12:00:00',
     isLoggedIn: true,
     onLogout: vi.fn(),
+    ...(extra.deviceSnapshot ? { deviceSnapshot: extra.deviceSnapshot } : {}),
     ...(extra.onRefreshDevice ? { onRefreshDevice: extra.onRefreshDevice } : {}),
   };
 
@@ -107,6 +113,34 @@ describe('AppShell', () => {
 
     (host.querySelector('[aria-label="刷新设备"]') as HTMLButtonElement).click();
     expect(onRefreshDevice).toHaveBeenCalledOnce();
+  });
+
+  test('仅在 ADB 或 Fastboot 已连接时将全局设备状态点显示为绿色', () => {
+    renderShell([], {
+      deviceSnapshot: {
+        connection_state: 'AdbConnected',
+        serial: 'RF8T123',
+        connection_label: 'ADB 已连接',
+        model: 'V2318A',
+        android_version: '15',
+        battery_level: '78%',
+      },
+    });
+
+    expect(host.querySelectorAll('.nw-device-indicator.is-connected')).toHaveLength(2);
+
+    renderShell([], {
+      deviceSnapshot: {
+        connection_state: 'Disconnected',
+        serial: '--',
+        connection_label: '等待连接',
+        model: '未检测到设备',
+        android_version: '--',
+        battery_level: '--',
+      },
+    });
+
+    expect(host.querySelector('.nw-device-indicator.is-connected')).toBeNull();
   });
 
   test('无边框窗口标题栏提供拖动区域且窗口按钮不属于拖动区域', () => {

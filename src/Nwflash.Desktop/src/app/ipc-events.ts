@@ -85,6 +85,12 @@ export interface DeviceSnapshotPayload {
   readonly battery_level: string;
 }
 
+export const isConnectedDeviceSnapshot = (
+  snapshot?: DeviceSnapshotPayload | null,
+): boolean =>
+  snapshot?.connection_state === 'AdbConnected' ||
+  snapshot?.connection_state === 'FastbootConnected';
+
 export type IpcPayloadByName = {
   [IPC_EVENTS.operationSnapshot]: OperationSnapshotPayload;
   [IPC_EVENTS.modalState]: ModalStatePayload;

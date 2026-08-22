@@ -360,8 +360,8 @@
   font-weight: 600;
 }
 
-.nw-overview-connection > span,
-.nw-overview-connection-chip > span {
+.nw-overview-connection > .nw-device-indicator,
+.nw-overview-connection-chip > .nw-device-indicator {
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -428,7 +428,7 @@
   font-size: 11px;
 }
 
-.nw-overview-connection-chip > span {
+.nw-overview-connection-chip > .nw-device-indicator {
   width: 7px;
   height: 7px;
 }

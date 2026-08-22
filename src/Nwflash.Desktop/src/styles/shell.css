@@ -48,12 +48,16 @@
   font-weight: 600;
 }
 
-.nw-titlebar-connection span,
-.nw-device-status-connection span {
+.nw-titlebar-connection .nw-device-indicator,
+.nw-device-status-connection .nw-device-indicator {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: #8399a4;
+}
+
+.nw-device-indicator.is-connected {
+  background: #16a34a;
 }
 
 .nw-titlebar-controls {

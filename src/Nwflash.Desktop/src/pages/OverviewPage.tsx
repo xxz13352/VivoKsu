@@ -1,6 +1,7 @@
 import { errorMessage } from '../app/error';
 import { FC, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { isConnectedDeviceSnapshot } from '../app/ipc-events';
 import type { DeviceSnapshotPayload } from '../app/ipc-events';
 
 export type { DeviceSnapshotPayload } from '../app/ipc-events';
@@ -40,9 +41,6 @@ const normalizeDeviceSnapshot = (value: unknown): DeviceSnapshotPayload => {
   };
 };
 
-const isConnectedSnapshot = (snapshot: DeviceSnapshotPayload): boolean =>
-  snapshot.connection_state === 'AdbConnected' || snapshot.connection_state === 'FastbootConnected';
-
 export const OverviewPage: FC<{ snapshot?: DeviceSnapshotPayload | null }> = ({ snapshot }) => {
   const initialSnapshot = snapshot ? normalizeDeviceSnapshot(snapshot) : disconnectedSnapshot();
   const [deviceSnapshot, setDeviceSnapshot] = useState<DeviceSnapshotPayload>(initialSnapshot);
@@ -69,7 +67,7 @@ export const OverviewPage: FC<{ snapshot?: DeviceSnapshotPayload | null }> = ({ 
     } catch (error) {
       if (
         requestRevision !== snapshotRevisionRef.current ||
-        isConnectedSnapshot(deviceSnapshotRef.current)
+        isConnectedDeviceSnapshot(deviceSnapshotRef.current)
       ) {
         return;
       }
@@ -110,10 +108,11 @@ export const OverviewPage: FC<{ snapshot?: DeviceSnapshotPayload | null }> = ({ 
   }, [snapshot]);
 
   const canReboot =
-    (deviceSnapshot.connection_state === 'AdbConnected' ||
-      deviceSnapshot.connection_state === 'FastbootConnected') &&
+    isConnectedDeviceSnapshot(deviceSnapshot) &&
     !loading &&
     !rebooting;
+  const isConnected = isConnectedDeviceSnapshot(deviceSnapshot);
+  const deviceIndicatorClassName = `nw-device-indicator${isConnected ? ' is-connected' : ''}`;
   const deviceDetails = [
     ['当前槽位', '--', 'nw-overview-detail-slot'],
     ['引导加载器', '--', 'nw-overview-detail-bootloader'],
@@ -132,7 +131,7 @@ export const OverviewPage: FC<{ snapshot?: DeviceSnapshotPayload | null }> = ({ 
           <p className="nw-overview-subtitle">连接信息、引导状态与系统标识</p>
         </div>
         <p className="nw-overview-connection">
-          <span aria-hidden="true" />当前连接状态
+          <span className={deviceIndicatorClassName} aria-hidden="true" />当前连接状态
         </p>
       </header>
 
@@ -141,11 +140,14 @@ export const OverviewPage: FC<{ snapshot?: DeviceSnapshotPayload | null }> = ({ 
 
       <section className="nw-overview-device-profile" aria-label="只读设备档案">
         <div className="nw-overview-identity">
-          <p className="nw-page-eyebrow">已连接设备</p>
+          <p className="nw-page-eyebrow">{isConnected ? '已连接设备' : '未检测到设备'}</p>
           <p className="nw-overview-identity-label">设备身份</p>
           <strong>{deviceSnapshot.model}</strong>
           <p className="nw-overview-serial">SERIAL&nbsp;&nbsp;{deviceSnapshot.serial}</p>
-          <p className="nw-overview-connection-chip"><span aria-hidden="true" />{deviceSnapshot.connection_label}</p>
+          <p className="nw-overview-connection-chip">
+            <span className={deviceIndicatorClassName} aria-hidden="true" />
+            {deviceSnapshot.connection_label}
+          </p>
         </div>
         <dl className="nw-overview-details">
           {deviceDetails.map(([label, value, className]) => (

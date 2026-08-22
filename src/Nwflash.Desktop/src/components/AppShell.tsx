@@ -1,5 +1,6 @@
 import { FC, ReactNode } from 'react';
 import { AppPageId, PageNavGroup } from '../app/pageManifest';
+import { isConnectedDeviceSnapshot } from '../app/ipc-events';
 import type { DeviceSnapshotPayload, OperationSnapshotPayload } from '../app/ipc-events';
 import { BusyOperationItem, isShellBusy, resolveProgressText } from '../app/window-state';
 import { DeviceStatusPanel } from './DeviceStatusPanel';
@@ -56,6 +57,9 @@ export const AppShell: FC<AppShellProps> = ({
 }) => {
   const progressText = resolveProgressText(operations);
   const isBusy = isShellBusy(operations) || Boolean(isBusyAction);
+  const deviceIndicatorClassName = `nw-device-indicator${
+    isConnectedDeviceSnapshot(deviceSnapshot) ? ' is-connected' : ''
+  }`;
 
   return (
     <div className="nw-shell">
@@ -68,7 +72,7 @@ export const AppShell: FC<AppShellProps> = ({
           </div>
         </div>
         <div className="nw-titlebar-connection" data-tauri-drag-region>
-          <span aria-hidden="true" data-tauri-drag-region />
+          <span className={deviceIndicatorClassName} aria-hidden="true" data-tauri-drag-region />
           {deviceSnapshot?.connection_label || '等待连接'}
         </div>
         <button
