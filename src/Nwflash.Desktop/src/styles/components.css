@@ -261,9 +261,24 @@
   padding: 10px 12px;
 }
 
-.nw-sidebar-account > div {
+.nw-sidebar-account-profile {
   display: flex;
   gap: 6px;
+  min-width: 0;
+  align-items: center;
+}
+
+.nw-sidebar-avatar {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--nw-border);
+}
+
+.nw-sidebar-account-info {
+  display: grid;
   min-width: 0;
   font-size: 10px;
 }

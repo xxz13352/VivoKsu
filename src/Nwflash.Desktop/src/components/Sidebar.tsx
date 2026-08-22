@@ -1,5 +1,6 @@
 import { FC } from 'react';
 import { AppPageId, PageNavGroup } from '../app/pageManifest';
+import defaultAvatarUrl from '../assets/default-avatar.jpg';
 
 type SidebarProps = {
   navGroups: ReadonlyArray<PageNavGroup>;
@@ -43,7 +44,10 @@ export const Sidebar: FC<SidebarProps> = ({
       ))}
     </nav>
     <div className="nw-sidebar-account">
-      <div><span>账号</span><strong>{username}</strong></div>
+      <div className="nw-sidebar-account-profile">
+        <img className="nw-sidebar-avatar" src={defaultAvatarUrl} alt="默认头像" />
+        <div className="nw-sidebar-account-info"><span>账号</span><strong>{username}</strong></div>
+      </div>
       <time>{currentTime}</time>
       <button
         type="button"

@@ -191,4 +191,13 @@ describe('AppShell', () => {
     expect(host.querySelector('.nw-status-rail [data-role="operation-log-panel"]')).not.toBeNull();
     expect(host.querySelector('.nw-shell-side-tools > .nw-logout-button')).toBeNull();
   });
+
+  test('账号区显示不可编辑的固定头像', () => {
+    renderShell([]);
+
+    const avatar = host.querySelector('img[alt="默认头像"]') as HTMLImageElement;
+    expect(avatar).not.toBeNull();
+    expect(avatar.classList.contains('nw-sidebar-avatar')).toBe(true);
+    expect(host.querySelector('input[type="file"]')).toBeNull();
+  });
 });
