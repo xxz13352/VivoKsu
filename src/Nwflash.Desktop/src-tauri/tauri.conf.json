@@ -36,7 +36,11 @@
       "resources/platform-tools/fastboot.exe",
       "resources/platform-tools/PLATFORM_TOOLS.SHA256",
       "resources/drivers/vivo-usb-driver.7z",
-      "resources/root-tools/magiskboot.so"
+      "resources/root-tools/magiskboot.so",
+      "resources/scrcpy",
+      "resources/apk/KSU.APK",
+      "resources/apk/KernelSU.apk",
+      "resources/payload-tools/payload_dumper.exe"
     ],
     "windows": {
       "webviewInstallMode": {

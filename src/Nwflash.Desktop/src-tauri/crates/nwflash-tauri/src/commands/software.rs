@@ -23,13 +23,8 @@ pub fn software_status() -> SoftwareStatusDto {
     // the executable itself.
     let app_root = nwflash_windows::bundled_resource_root();
     let drivers = detect_drivers(&DriverDetectionPaths::default_windows());
-    let scrcpy_ready = ScrcpyProvisioner::new().is_installed();
-    let payload_dumper_ready = PayloadDumperProvisioner::new(
-        nwflash_infrastructure::RemoteAssetDownloader::default(),
-        None,
-        None,
-    )
-    .is_available();
+    let scrcpy_ready = ScrcpyProvisioner::bundled(app_root.clone()).is_installed();
+    let payload_dumper_ready = PayloadDumperProvisioner::bundled(app_root.clone()).is_available();
 
     software_status_from_app_root(&app_root, drivers, scrcpy_ready, payload_dumper_ready)
 }

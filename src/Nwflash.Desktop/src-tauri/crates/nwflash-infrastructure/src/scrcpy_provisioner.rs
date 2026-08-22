@@ -44,6 +44,8 @@ pub enum ScrcpyProvisionError {
     Integrity(String),
     #[error("下载失败: {0}")]
     Download(#[from] ResourceDownloadError),
+    #[error("内置 scrcpy 资源缺失或校验失败，请重新安装应用。")]
+    BundledResourceMissing,
     #[error("IO: {0}")]
     Io(String),
     #[error("ZIP 解析失败: {0}")]
@@ -52,23 +54,38 @@ pub enum ScrcpyProvisionError {
 
 #[derive(Debug)]
 pub struct ScrcpyProvisioner {
-    downloader: RemoteAssetDownloader,
+    downloader: Option<RemoteAssetDownloader>,
     installation_root: PathBuf,
+    bundled_root: Option<PathBuf>,
     provisioning_lock: tokio::sync::Mutex<()>,
 }
 
 impl ScrcpyProvisioner {
     pub fn new() -> Self {
         Self::with_options(
-            RemoteAssetDownloader::default(),
+            Some(RemoteAssetDownloader::default()),
             resource_root().join("scrcpy"),
+            None,
         )
     }
 
-    fn with_options(downloader: RemoteAssetDownloader, installation_root: PathBuf) -> Self {
+    pub fn bundled(bundle_root: PathBuf) -> Self {
+        Self::with_options(
+            None,
+            resource_root().join("scrcpy"),
+            Some(bundle_root.join("scrcpy")),
+        )
+    }
+
+    fn with_options(
+        downloader: Option<RemoteAssetDownloader>,
+        installation_root: PathBuf,
+        bundled_root: Option<PathBuf>,
+    ) -> Self {
         Self {
             downloader,
             installation_root,
+            bundled_root,
             provisioning_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -150,6 +167,8 @@ impl ScrcpyProvisioner {
         validate_pinned_scrcpy_asset(asset_spec)?;
 
         self.downloader
+            .as_ref()
+            .ok_or(ScrcpyProvisionError::BundledResourceMissing)?
             .download_to_file(asset_spec, archive_path, progress, cancellation_token)
             .await?;
 
@@ -167,6 +186,9 @@ impl ScrcpyProvisioner {
     }
 
     fn find_bundled_executable(&self) -> Option<PathBuf> {
+        if let Some(root) = &self.bundled_root {
+            return self.find_verified_executable(root, false);
+        }
         let root = std::env::current_exe()
             .ok()?
             .parent()?
@@ -782,6 +804,22 @@ mod tests {
         assert!(verify_published_package(&root).is_ok());
 
         std::fs::remove_dir_all(root).expect("temporary package should be removed");
+    }
+
+    #[test]
+    fn bundled_scrcpy_provisioner_uses_the_explicit_resource_tree() {
+        let root = std::env::temp_dir().join(format!("nwflash-scrcpy-bundle-{}", unique_suffix()));
+        let package = root.join("scrcpy");
+        let executable = package.join("scrcpy.exe");
+        std::fs::create_dir_all(&package).expect("bundle package should exist");
+        std::fs::write(&executable, b"scrcpy fixture").expect("bundle executable should exist");
+        write_published_manifest(&executable).expect("bundle manifest should be written");
+
+        let provisioner = ScrcpyProvisioner::bundled(root.clone());
+
+        assert!(provisioner.downloader.is_none());
+        assert_eq!(provisioner.installed_executable(), Some(executable));
+        std::fs::remove_dir_all(root).expect("bundle fixture should be removed");
     }
 
     #[test]

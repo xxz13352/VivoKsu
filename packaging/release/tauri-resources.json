@@ -24,7 +24,7 @@
     {
       "source": "src/VivoKsu.App/platform-tools/PLATFORM_TOOLS.SHA256",
       "destination": "platform-tools/PLATFORM_TOOLS.SHA256",
-      "sha256": "ba3ba3c3105d4f6a86b627839b48e00ca2ffef23c3bd41d5ae925931d9e40d11"
+      "sha256": "dc26640e163aa66a57616aac1a80f91ec2a967770606a7f89924d444c9a92051"
     },
     {
       "source": "src/VivoKsu.App/drivers/vivo-usb-driver.7z",
@@ -35,6 +35,111 @@
       "source": "src/VivoKsu.App/root-tools/magiskboot.so",
       "destination": "root-tools/magiskboot.so",
       "sha256": "d7440e2cd89899426e809554bf793baef9804ccbe5a52ce34a8b6242725d3c77"
+    },
+    {
+      "source": "src/VivoKsu.App/apk/KSU.APK",
+      "destination": "apk/KSU.APK",
+      "sha256": "43ebb3e3cbc885285bd824f351e5cca2169a4435c8bd0268584ad3c9d7248d4a"
+    },
+    {
+      "source": "src/VivoKsu.App/apk/KernelSU.apk",
+      "destination": "apk/KernelSU.apk",
+      "sha256": "dca1cf72a6f6cff4a116242fbe940a161099bafbd9d74ca4518756eaad5c8c03"
+    },
+    {
+      "source": "src/VivoKsu.App/payload-tools/payload_dumper.exe",
+      "destination": "payload-tools/payload_dumper.exe",
+      "sha256": "031b404609e804cd620fb10efdfce577b633f8b0ad8029fbd7170be3bc4cbe82"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/adb.exe",
+      "destination": "scrcpy/adb.exe",
+      "sha256": "957e46b8615f7af5b7292a2ddabe98d2e61940c3fb2b0545756507f080613e71"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/AdbWinApi.dll",
+      "destination": "scrcpy/AdbWinApi.dll",
+      "sha256": "120bef587119c6cb926b86b9be90fdfbce38937588eae28cd91a94ce63c7b965"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/AdbWinUsbApi.dll",
+      "destination": "scrcpy/AdbWinUsbApi.dll",
+      "sha256": "6ca69a2ca0e31309c087d288f058977d421ad03500e4c3e1dbd981241a069c60"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/avcodec-62.dll",
+      "destination": "scrcpy/avcodec-62.dll",
+      "sha256": "893237890f744ea1eb447f56e8ac9d803deb48170bb456a11a10edf8c08a1eaa"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/avformat-62.dll",
+      "destination": "scrcpy/avformat-62.dll",
+      "sha256": "d46e9b99b27c743b8ae73eacfd76004fba218b65eba5a1ce9cdf494a7030a4a4"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/avutil-60.dll",
+      "destination": "scrcpy/avutil-60.dll",
+      "sha256": "2933c61bd5c3f0c2bec22310de8b9a22969030fb1ee204eae1a4948e7599f59d"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/disconnected.png",
+      "destination": "scrcpy/disconnected.png",
+      "sha256": "e394873cd3e2cc3ab0cca6212b10ed2a8a0fad11a05675c8a9fa6f26f3ae12c0"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/libusb-1.0.dll",
+      "destination": "scrcpy/libusb-1.0.dll",
+      "sha256": "5c0f67a78e47cb61cffff62876e35c10178525d0dcaf68c780d37592057397d3"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/LICENSE",
+      "destination": "scrcpy/LICENSE",
+      "sha256": "01c12035bf35af37241298dc7ad538eb2a07e5c940437bc6876feeaa9d1951d0"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/open_a_terminal_here.bat",
+      "destination": "scrcpy/open_a_terminal_here.bat",
+      "sha256": "843758795a84d0d035a7d277ad29cc1ff1702048b4b61ae74b9e3439ae683423"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/runtime-manifest.json",
+      "destination": "scrcpy/runtime-manifest.json",
+      "sha256": "ae1c96a35179f1612cbb1a2ea2652f52138789cf68a2baa8b99e39cf6e47ba4d"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/scrcpy-files.sha256",
+      "destination": "scrcpy/scrcpy-files.sha256",
+      "sha256": "0bb2be2bd089acecf2497d3e6df40a1028b7f5cd3cc73c0c9904c1be2f2183e9"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/scrcpy-noconsole.vbs",
+      "destination": "scrcpy/scrcpy-noconsole.vbs",
+      "sha256": "3ccda94c161f18cef07c50d4d3c4913eb883d4b0fe3b939c35fae52784fb1d2b"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/scrcpy-server",
+      "destination": "scrcpy/scrcpy-server",
+      "sha256": "84924bd564a1eb6089c872c7521f968058977f91f5ff02514a8c74aff3210f3a"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/scrcpy.exe",
+      "destination": "scrcpy/scrcpy.exe",
+      "sha256": "894fd12f5b66fe73009c37c5e2520dde400730869722df11c1f144ac74deeeb2"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/scrcpy.png",
+      "destination": "scrcpy/scrcpy.png",
+      "sha256": "8e8ca237898faa16014cdd118396af53405b423f3db0508c50cc3edce08eb313"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/SDL3.dll",
+      "destination": "scrcpy/SDL3.dll",
+      "sha256": "f8bb1698f618949498ac517a0766eaa91972ecc818d80deb00634e197ee923cf"
+    },
+    {
+      "source": "src/VivoKsu.App/scrcpy/swresample-6.dll",
+      "destination": "scrcpy/swresample-6.dll",
+      "sha256": "91c2595781581c61144262fc596dcdbdca7f72b6315d28e31becc67d35b2cf59"
     }
   ]
 }

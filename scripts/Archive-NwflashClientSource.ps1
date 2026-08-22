@@ -10,6 +10,16 @@ $stageRoot = Join-Path $tempRoot ("nwflash-client-source-archive-" + [Guid]::New
 $stageClient = Join-Path $stageRoot 'Nwflash.Desktop'
 $compileExit = 0
 
+function Get-SourceRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $rootUri = [Uri](($Root.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar))
+    return [Uri]::UnescapeDataString($rootUri.MakeRelativeUri([Uri]$Path).ToString()).Replace('/', '\')
+}
+
 try {
     if (Test-Path -LiteralPath $archivePath) {
         throw "Refusing to overwrite an existing archive: $archivePath"
@@ -44,13 +54,13 @@ try {
                     continue
                 }
 
-                $relativeDirectory = [IO.Path]::GetRelativePath($sourceRoot, $entry.FullName)
+                $relativeDirectory = Get-SourceRelativePath -Root $sourceRoot -Path $entry.FullName
                 [IO.Directory]::CreateDirectory((Join-Path $stageClient $relativeDirectory)) | Out-Null
                 $directories.Push($entry.FullName)
                 continue
             }
 
-            $relativeFile = [IO.Path]::GetRelativePath($sourceRoot, $entry.FullName)
+            $relativeFile = Get-SourceRelativePath -Root $sourceRoot -Path $entry.FullName
             $destination = Join-Path $stageClient $relativeFile
             [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
             Copy-Item -LiteralPath $entry.FullName -Destination $destination

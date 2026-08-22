@@ -263,7 +263,7 @@ describe('登录态界面', () => {
     (host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).click();
 
     await waitUntil(
-      () => host.querySelector('[role="dialog"][aria-label="组件安装"]') !== null,
+      () => host.querySelector('[role="dialog"][aria-label="内置组件检查"]') !== null,
     );
     let commands = invokeMock.mock.calls.map(([command]) => command);
     expect(commands).toContain('session_start');

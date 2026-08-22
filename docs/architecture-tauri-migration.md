@@ -2,7 +2,7 @@
 
 ## Windows release boundary
 
-`scripts/Publish-TauriRelease.ps1` 默认生成受保护、已签名的 Tauri NSIS 发布物，并在发布前运行 Rust、前端、原生 E2E、安装验证和清单校验；`scripts/Verify-TauriRelease.ps1` 读取并核验发布树及 SHA-256 清单。只有显式传入 `-DevelopmentUnsigned` 才生成未签名开发暂存。每用户安装器嵌入 WebView2 bootstrapper。当前发布白名单随包提供 platform-tools、Vivo 驱动和 root-tools；scrcpy 通常由组件安装入口供应，Rust provisioner 也支持经过完整清单校验的 `resources/scrcpy/scrcpy.exe` 随包资源。
+`scripts/Publish-TauriRelease.ps1` 默认生成受保护、已签名的 Tauri NSIS 发布物，并在发布前运行 Rust、前端、原生 E2E、安装验证和清单校验；`scripts/Verify-TauriRelease.ps1` 读取并核验发布树及 SHA-256 清单。只有显式传入 `-DevelopmentUnsigned` 才生成未签名开发暂存。每用户安装器嵌入 WebView2 bootstrapper。当前发布白名单随包提供 platform-tools、Vivo 驱动、root-tools、完整 scrcpy、KSU/KernelSU APK 和 payload_dumper。
 
 > 本文档记录在 `5.3codex` 流水线下，当前以源码为准的 Rust 迁移架构。用于替代新增需求前的实现边界核对，确保不引入无依据的行为变更。
 
@@ -137,8 +137,8 @@ flowchart LR
 
 - `MirrorPage` 使用 WPF 的 `ADB / SCREENCAST` 三行控制台布局：SCRCPY 会话头、手动/自动投屏控制和设备传输/镜像进程状态。会话 ID、token 状态和操作日志不再作为该页面的可见内容。
 - 页面启动保留既有 `session_state` 与 `operation_logs_snapshot` 的兼容读取，且开始/结束/自动投屏仍只调用固定的 `mirror_start`、`mirror_stop`、`mirror_set_auto` command。浏览器不能提供二进制路径、serial、shell 文本或进程参数。
-- scrcpy 资源解析顺序固定为发布目录内置资源、带匹配 `scrcpy-files.sha256` 清单的已安装包；两者都缺失时，用户只能在“组件安装”中使用固定的 `scrcpy` 资源键。Rust 只从固定的 Genymobile scrcpy v4.1 官方 ZIP 地址下载，校验 `11,305,298` 字节和 SHA-256 `5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db` 后发布；不调用 GitHub release API，镜像启动不会隐式联网下载。
-- `resource_inventory` 将内置 scrcpy 和已验证安装包都报告为就绪；`resource_install(["scrcpy"])` 是唯一的下载入口。前端不接受 scrcpy 路径，也不增加文件选择按钮。
+- scrcpy 位于发布目录内置资源，必须匹配 `scrcpy-files.sha256` 完整清单；缺失或校验失败时，镜像启动会拒绝并提示重新安装应用。Rust 不下载 scrcpy、不接受用户路径，也不回退到用户 `PATH`。
+- `resource_inventory` 报告内置 scrcpy 状态；`resource_install(["scrcpy"])` 只执行校验，不进行下载。前端不接受 scrcpy 路径，也不增加文件选择按钮。
 - 原生视觉规格固定控制台总高 `356px` 和源 XAML 的 `88/184/82` 分行，输出 `tauri-adbactions-idle.png` 与 WPF 空闲截图配对。
 
 ## 6.6 Quick Flash 与可视刷写页面边界（2026-08-17）
@@ -543,7 +543,5 @@ flowchart LR
 - Bearer token 只保存在 Rust `AppState.session_token` 中。`AuthSessionDto` 与 TypeScript `AuthSessionPayload` 只包含 `username` 和 `name`；React 不接收或持久化 token。
 - `run_app` 注册的公开 Tauri handler 不包含原始 Quick Flash plan 执行入口或通用 ROM/固件解析 command。`FirmwareExtractPage` 只可把用户输入的 HTTP(S) 固件 URL 提交给受限的 `firmware_inspect_remote`/`firmware_extract_remote`；Rust 复核 scheme 与 host，提取时还要求 URL 与已检查来源一致，并只接受该次检查生成的不透明分区 ID。服务端解析的 ROM/OTA URL 仍只留在 Rust runtime。浏览器不能提交任意程序、命令数组、shell 文本或 Rust 管理的未校验资源路径；本地/HTTP(S) 固件检查提取，以及受约束的 Safe Flash/Quick Flash prepare/execute 工作流仍可用。
 - 产品每次启动只作用于当前发现的一台设备。设备输出解析在发现多台设备时返回 `MultipleDevices` 拒绝态，`DeviceRuntime` 保存最新 `DeviceSnapshot`；该 Rust DTO 与 TypeScript `DeviceSnapshotPayload` 包含 serial 供界面显示，但浏览器不能提交、选择或伪造执行 serial。Rust 在每个执行边界从当前唯一 transport 派生实际 ADB/Fastboot 命令目标，不以历史/预检 serial 匹配作为工件消费或阶段推进门禁。没有跨启动保存的多设备选择或浏览器设备选择器。
-- scrcpy 发布元数据不再从 GitHub `releases/latest` API 读取。资源规格固定为 Genymobile scrcpy v4.1 Windows ZIP、官方直链、大小 `11,305,298` 字节和 SHA-256 `5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db`，下载器会在 staging 中同时校验长度和摘要；解压后的 payload 先生成完整文件清单并发布，再清理 staging。组件安装不接受用户自定义 scrcpy 路径，进程也不回退到用户 `PATH`。
-- ROOT 管理器候选在选择前验证非空文件、可选 SHA-256 与包含 `AndroidManifest.xml` 的 APK ZIP 结构。按 bundle、cache 顺序选择首个有效候选，因此 bundle 无效而 cache 有效时会采用 cache。
-- `PayloadDumperProvisioner::is_available` 与 `ensure_installed` 都按预期 SHA-256 验证 `payload_dumper.exe`。损坏的缓存 executable 会先删除，再进入带校验的重新下载、解压和安装尝试。
+- scrcpy、ROOT 管理器 APK 与 `payload_dumper.exe` 都是发布包内置资源。scrcpy 通过完整文件清单校验，ROOT 管理器验证 APK ZIP 结构，payload_dumper 验证固定摘要；组件检查不下载资源，缺失或损坏时要求重新安装应用。进程不接受用户自定义资源路径，也不回退到用户 `PATH`。
 - 进程 stdout/stderr 在子进程运行期间由独立 reader 并发排空；正常完成会在构造输出前回收 reader，取消或超时会在终止并回收子进程后回收 reader。大输出与 reader 失败回归测试覆盖该边界。ROOT 镜像/修补工件不再记录或复核运行时 SHA-256/fingerprint；路径、格式、大小、不透明 ID、session epoch 和 staging 所有权校验保留。

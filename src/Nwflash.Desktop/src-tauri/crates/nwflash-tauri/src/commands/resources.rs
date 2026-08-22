@@ -1,7 +1,7 @@
 use nwflash_application::result_to_domain_error;
 use nwflash_domain::{DomainError, OperationKind};
 use nwflash_infrastructure::{
-    PayloadDumperProvisioner, RemoteAssetDownloader, ScrcpyProvisioner, VivoRootResourceService,
+    PayloadDumperProvisioner, ScrcpyProvisioner, VivoRootResourceService,
 };
 use serde::Serialize;
 use tauri::State;
@@ -54,45 +54,44 @@ pub async fn resource_install(
         .operation_coordinator
         .run_async(
             OperationKind::Installing,
-            "安装外置组件",
+            "校验内置组件",
             move |context, cancellation| async move {
-                let downloader = RemoteAssetDownloader::default();
-                let scrcpy = ScrcpyProvisioner::new();
-                let payload = PayloadDumperProvisioner::new(downloader.clone(), None, None);
-                let managers = VivoRootResourceService::new(app_root, Some(downloader));
+                let scrcpy = ScrcpyProvisioner::bundled(app_root.clone());
+                let payload = PayloadDumperProvisioner::bundled(app_root.clone());
+                let managers = VivoRootResourceService::new(app_root, None);
                 let total = selected.len();
 
                 for (index, resource) in selected.into_iter().enumerate() {
                     if cancellation.is_cancelled() {
-                        return Err(DomainError::UserCancelled("用户取消组件安装。".to_string()));
+                        return Err(DomainError::UserCancelled("用户取消内置组件校验。".to_string()));
                     }
 
                     let label = match resource {
                         ResourceKey::Scrcpy => {
-                            context.report_stage("下载 scrcpy");
+                            context.report_stage("校验内置 scrcpy");
                             scrcpy.ensure_installed(&cancellation, None).await.map_err(
                                 |error| {
                                     DomainError::ExternalTool(format!(
-                                        "scrcpy 组件下载失败：{error}"
+                                        "内置 scrcpy 校验失败：{error}"
                                     ))
                                 },
                             )?;
                             "scrcpy"
                         }
                         ResourceKey::Payload => {
-                            context.report_stage("下载 payload_dumper");
+                            context.report_stage("校验内置 payload_dumper");
                             payload
                                 .ensure_installed(&cancellation, None)
                                 .await
                                 .map_err(|error| {
                                     DomainError::ExternalTool(format!(
-                                        "payload_dumper 组件下载失败：{error}"
+                                        "内置 payload_dumper 校验失败：{error}"
                                     ))
                                 })?;
                             "payload"
                         }
                         ResourceKey::KsuManager => {
-                            context.report_stage("下载 KSU 管理器");
+                            context.report_stage("校验内置 KSU 管理器");
                             let manager = managers
                                 .resolve_manager("KSU")
                                 .map_err(|error| DomainError::ExternalTool(error.to_string()))?;
@@ -101,13 +100,13 @@ pub async fn resource_install(
                                 .await
                                 .map_err(|error| {
                                     DomainError::ExternalTool(format!(
-                                        "KSU 管理器下载失败：{error}"
+                                        "内置 KSU 管理器校验失败：{error}"
                                     ))
                                 })?;
                             "manager-KSU"
                         }
                         ResourceKey::OfficialKsuManager => {
-                            context.report_stage("下载 KernelSU 管理器");
+                            context.report_stage("校验内置 KernelSU 管理器");
                             let manager = managers
                                 .resolve_manager("OfficialKsu")
                                 .map_err(|error| DomainError::ExternalTool(error.to_string()))?;
@@ -116,7 +115,7 @@ pub async fn resource_install(
                                 .await
                                 .map_err(|error| {
                                     DomainError::ExternalTool(format!(
-                                        "KernelSU 管理器下载失败：{error}"
+                                        "内置 KernelSU 管理器校验失败：{error}"
                                     ))
                                 })?;
                             "manager-OfficialKsu"
@@ -157,10 +156,9 @@ pub struct ResourceInventoryItemDto {
 #[tauri::command]
 pub fn resource_inventory() -> Vec<ResourceInventoryItemDto> {
     let app_root = nwflash_windows::bundled_resource_root();
-    let downloader = RemoteAssetDownloader::default();
-    let managers = VivoRootResourceService::new(app_root, Some(downloader.clone()));
-    let scrcpy_ready = ScrcpyProvisioner::new().is_installed();
-    let payload_ready = PayloadDumperProvisioner::new(downloader, None, None).is_available();
+    let managers = VivoRootResourceService::new(app_root.clone(), None);
+    let scrcpy_ready = ScrcpyProvisioner::bundled(app_root.clone()).is_installed();
+    let payload_ready = PayloadDumperProvisioner::bundled(app_root).is_available();
 
     build_resource_inventory(
         scrcpy_ready,

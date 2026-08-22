@@ -28,7 +28,12 @@ function Get-SafeRelativePath {
 function Get-ReleaseRelativePath {
     param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][string]$Path)
 
-    return (Get-SafeRelativePath ([IO.Path]::GetRelativePath($Root, $Path)))
+    $rootPath = ([IO.Path]::GetFullPath($Root)).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $relative = [Uri]::UnescapeDataString(([Uri]$rootPath).MakeRelativeUri([Uri]([IO.Path]::GetFullPath($Path))).ToString())
+    if ($relative.StartsWith('../') -or $relative -eq '..') {
+        throw "Release manifest file escapes root: $Path"
+    }
+    return (Get-SafeRelativePath $relative)
 }
 
 function Get-ResourceEntries {

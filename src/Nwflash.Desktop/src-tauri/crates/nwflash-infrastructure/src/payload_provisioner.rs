@@ -39,7 +39,7 @@ pub enum PayloadProvisionError {
 
 #[derive(Debug)]
 pub struct PayloadDumperProvisioner {
-    downloader: RemoteAssetDownloader,
+    downloader: Option<RemoteAssetDownloader>,
     installation_root: PathBuf,
     bundled_executable_path: Option<PathBuf>,
     expected_sha256: String,
@@ -47,6 +47,20 @@ pub struct PayloadDumperProvisioner {
 }
 
 impl PayloadDumperProvisioner {
+    pub fn bundled(resource_root: PathBuf) -> Self {
+        Self {
+            downloader: None,
+            installation_root: resource_root.join("payload-dumper-cache"),
+            bundled_executable_path: Some(
+                resource_root
+                    .join("payload-tools")
+                    .join(PAYLOAD_DUMPER_EXECUTABLE_NAME),
+            ),
+            expected_sha256: PAYLOAD_DUMPER_SHA256.to_string(),
+            provisioning_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
     pub fn new(
         downloader: RemoteAssetDownloader,
         installation_root: Option<PathBuf>,
@@ -67,7 +81,7 @@ impl PayloadDumperProvisioner {
         expected_sha256: impl Into<String>,
     ) -> Self {
         Self {
-            downloader,
+            downloader: Some(downloader),
             installation_root: installation_root
                 .unwrap_or_else(|| resource_root().join("payload-dumper")),
             bundled_executable_path,
@@ -135,6 +149,10 @@ impl PayloadDumperProvisioner {
             .map_err(|error| PayloadProvisionError::Io(error.to_string()))?;
 
         let result = async {
+            let downloader = self
+                .downloader
+                .as_ref()
+                .ok_or(PayloadProvisionError::MissingDownloader)?;
             let zip_path = staging_root.join(PAYLOAD_DUMPER_ASSET_NAME);
             // `PAYLOAD_DUMPER_SHA256` is the digest of the *extracted*
             // `payload_dumper.exe`, not of the zip.  Pinning it onto the zip
@@ -145,7 +163,7 @@ impl PayloadDumperProvisioner {
                 "payload_dumper",
                 github_download_url(PAYLOAD_DUMPER_ASSET_NAME),
             );
-            self.downloader
+            downloader
                 .download_to_file(&spec, &zip_path, progress, cancellation_token)
                 .await?;
             extract_archive_safely(&zip_path, &staging_root)?;
@@ -432,5 +450,19 @@ mod tests {
             .expect("corrupt cache should be removable"));
         assert!(!cached.exists());
         std::fs::remove_dir_all(root).expect("cache root should be removed");
+    }
+
+    #[test]
+    fn bundled_payload_provisioner_prefers_the_explicit_resource_tree() {
+        let root = temporary_payload_fixture_root();
+        let provisioner = PayloadDumperProvisioner::bundled(root.clone());
+
+        assert!(provisioner.downloader.is_none());
+        assert_eq!(
+            provisioner.bundled_executable_path(),
+            Some(root.join("payload-tools").join(PAYLOAD_DUMPER_EXECUTABLE_NAME).as_path())
+        );
+
+        std::fs::remove_dir_all(root).expect("fixture root should be removed");
     }
 }

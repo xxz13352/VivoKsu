@@ -147,7 +147,7 @@ sequenceDiagram
 - 固件工件、prepared dual-slot、ROOT 和 Safe Flash 使用 Rust-owned runtime/capability 保存准备产物，确认执行时按各自契约重新解析或一次性消费。
 - 公开 `quick_flash_prepare_boot_image`/`quick_flash_prepare_preset_image` 仍返回 `QuickFlashPlanDto`，其中含 serial 和 Rust 生成的 `ProcessCommandDto` 程序/参数预览。这是当前/遗留 API 限制，不能据此声称原始命令或 flash plan 从不跨入浏览器；浏览器仍不能把任意程序、命令数组或 shell 文本提交为执行计划。
 - ROOT 的服务器 OTA 来源由 `root_ota_check` 在 Rust 内使用当前 ADB 设备的 PD/版本和内存 token 解析；私有 `RootOtaRuntime` 保存来源元数据和 session epoch，不把手机 serial 作为绑定字段。`root_ota_extract_images` 不接收浏览器 serial，只在需要当前 ADB 命令时临时取得目标，不做提取前后 serial 等值比较；产物以 session epoch 和不透明 ID 约束。该流程使用 HTTP Range 处理 payload OTA 或直接镜像 ZIP，仅取得 `init_boot`（或 `boot` 回退）和 `vendor_boot`；实际 boot 分区名贯穿 Vivo KSU 修补和刷写。ROOT OTA 的 URL、PD、版本和 staging 不进入 React；独立 `DeviceSnapshot` 中的 serial 仍只用于界面显示。
-- platform-tools、驱动和 root-tools 作为 release resources 随包，并由 `packaging/release/tauri-resources.json` 的精确白名单和 SHA-256 固定；scrcpy、ROOT 管理器 APK 和 payload_dumper 作为受控按需组件。下载统一使用 staging、长度和 SHA-256 校验，页面不接触下载路径。
+- platform-tools、驱动、root-tools、完整 scrcpy、ROOT 管理器 APK 和 payload_dumper 都作为 release resources 随包，并由 `packaging/release/tauri-resources.json` 的精确白名单和 SHA-256 固定。固定工具资源只从 bundle 校验和使用；ROM/OTA 内容仍按请求读取，页面不接触资源路径。
 
 ### 近期实现约定
 
@@ -156,7 +156,7 @@ sequenceDiagram
 - **操作日志**：日志只显示当前会话的实际设备操作，按时间戳从旧到新排列，最新记录固定在底部。常规的连接服务器、请求服务和检测服务器探测不写入面板；历史 OTA 文案在显示边界统一为服务器/固件，避免重复刷屏和暴露内部服务实现名。
 - **在线固件请求**：服务器固件检查和提取仍由 Rust 使用内存会话令牌完成，React 只接收可用状态、显示标签和安全结果，不接收上游 URL。界面文案使用“请求服务器”“在线固件”等通用名称，不把内部 OTA 服务名当作用户操作日志。
 - **HTTP(S) 固件提取**：`FirmwareExtractPage` 支持本地来源和用户粘贴的 HTTP 或 HTTPS 地址，UI 通常通过原生目录对话框选择输出目录；但公开 `firmware_extract_remote` 当前接受 `output_directory: String` 并直接转为提取所用 `PathBuf`，command 边界不能证明该目录来自对话框。Rust 仍校验 URL scheme/host、已检查来源等值、不透明分区 ID 和归档成员；远程 ZIP 只 Range 读取所需成员，先写 `.partial`、核对大小再原子重命名，payload 结果也经受控 partial/发布流程。目录 provenance 是当前架构限制和后续 hardening 边界。
-- **scrcpy 供应**：页面不提供 scrcpy 文件选择按钮。发布包若包含已验证的 `resources/scrcpy` 就直接使用；否则组件安装入口调用 Rust provisioner，从固定的 Genymobile scrcpy v4.1 官方 ZIP 地址下载，要求文件大小 `11,305,298` 字节且 SHA-256 为 `5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db`，并校验解压后每个文件的清单。流程不调用 GitHub release API，也不回退到用户 `PATH`。
+- **scrcpy 供应**：页面不提供 scrcpy 文件选择按钮。发布包内置 `resources/scrcpy` 及 `scrcpy-files.sha256`，Rust 在启动前校验完整文件清单；不回退到用户 `PATH`，资源缺失或校验失败时提示重新安装应用。
 
 ## 7. 服务端边界
 
@@ -190,7 +190,7 @@ npm --prefix src/Nwflash.Desktop run tauri -- build --no-bundle
 ./scripts/Test-TauriRelease.ps1
 ```
 
-正式 Windows 发布物使用每用户 NSIS 安装器和嵌入式 WebView2 bootstrapper。`Publish-TauriRelease.ps1` 默认执行 Rust/前端/原生 E2E 检查、受控 VMProtect、证书 thumbprint 校验、EXE 与安装器签名、安装验证和精确 SHA-256 清单；只有显式传入 `-DevelopmentUnsigned` 才允许生成未签名开发暂存，不能作为正式发布物。`Verify-TauriRelease.ps1` 只读取并核验既有清单，且拒绝额外文件和被错误打包的按需资源。发布 staging 目录由脚本标记和校验；构建缓存 `node_modules/`、`dist/`、`src-tauri/target/` 和临时测试输出不属于源码归档。
+正式 Windows 发布物使用每用户 NSIS 安装器和嵌入式 WebView2 bootstrapper。`Publish-TauriRelease.ps1` 默认执行 Rust/前端/原生 E2E 检查、受控 VMProtect、证书 thumbprint 校验、EXE 与安装器签名、安装验证和精确 SHA-256 清单；只有显式传入 `-DevelopmentUnsigned` 才允许生成未签名开发暂存，不能作为正式发布物。`Verify-TauriRelease.ps1` 只读取并核验既有清单，拒绝额外文件且要求所有内置工具资源存在并匹配清单。发布 staging 目录由脚本标记和校验；构建缓存 `node_modules/`、`dist/`、`src-tauri/target/` 和临时测试输出不属于源码归档。
 
 ## 9. 临时文件与生命周期
 

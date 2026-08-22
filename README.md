@@ -2,18 +2,16 @@
 
 > Tauri/Rust Windows release verification uses `scripts/Verify-TauriRelease.ps1`; it validates the per-user NSIS layout, bundled dependencies and SHA-256 manifest.
 
-Vivo 手机刷机 / Root 工具箱 —— **商业付费工具**,Windows WPF 桌面应用(.NET 8)。**客户端统一显示「奶蛙Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**。
+Vivo 手机刷机 / Root 工具箱。**客户端统一显示「奶蛙Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**。
 
 提供 ADB / Fastboot 设备检测、分区可视刷写、快速刷写(KernelSU)、payload 解包与云端提取、ADB 投屏、文件管理等能力,全程中文界面、teal 主题。
 
-## 项目定位与商业模式
+## 项目定位与账号访问
 
-Nwflash 是**商业付费工具**:
+Nwflash 使用账号登录和服务端访问控制：
 
 - **登录授权**:桌面端启动必须用后台创建的账号登录,未登录不可进入主界面(登录门禁)。账号由 `web.nwflash.cc.cd` 后台「用户管理」创建。
 - **服务端全在 Cloudflare,零自有服务器**:API `api.nwflash.cc.cd`(Worker `nwflash-rom`)+ 后台 `web.nwflash.cc.cd`(Worker `nwflash-web`)+ 数据库 D1 `nwflash-db`,认证、版本授权、审计、后台管理全在 Cloudflare Edge。
-- **商业模式 = 账号授权制**:用户登录即可使用,**不对用户按次扣点 / 限制次数**。拿 ROM 的链路是 `api.nwflash.cc.cd` 从上游 VOTA 取链接返回给工具,中间不涉及对用户账号的任何扣点计费。
-- **上游信用点 = 运营方成本**:VOTA 的信用点扣的是 Worker 所持 token 账户(运营方),由开发者承担,不进客户端、不向用户收。
 - **授权与控制**:版本在后台「版本号控制」启用才可查(未启用 → 404);封禁 / 停用即时生效(登录 401 / 查询 403);每次查询按用户记入访问日志。客户端每 5s 心跳保持在线,后台「在线状态」可实时查看会话并**强制下线**(≤5s 内客户端退出进程)。**每次用户操作运行前经服务端许可**(默认放行,封禁/停用即拒绝),操作结果与耗时按分类上传使用日志。
 
 ## 功能页面
@@ -64,7 +62,7 @@ VivoKsu 工具/
 │  └─ VivoKsu.App.Tests/            # 桌面应用单元测试
 ├─ scripts/
 │  ├─ Publish-Release.ps1           # 一键发布 framework-dependent + AOT 引导器版本
-│  ├─ Upload-Resources.ps1          # 上传外置资源(scrcpy 之外的 APK/payload_dumper)到 GitHub Release
+│  ├─ Upload-Resources.ps1          # 历史资源发布辅助脚本
 │  └─ verify-*.ps1                  # UI 自动化验证脚本(启动→UIA 导航→截图)
 ```
 
@@ -145,7 +143,7 @@ npx wrangler deploy                   # 部署并绑定自定义域 api.nwflash.
 
 **错误映射**:`NOT_FOUND`/`not found`→404、`AUTH_FAIL`→401、`INSUFFICIENT_CREDITS`→402、`FORBIDDEN`→403、`RATE_LIMITED`→429、其它→502。
 
-**已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁、**在线会话(心跳 / 在线状态 / 强制下线)**、**操作许可门禁 + 使用日志分类上传**,均已在 Cloudflare 上。**商业模型**:账号授权制 —— 登录即用,不对用户按次扣点 / 限制次数;上游 VOTA 信用点为运营方成本。
+**已实现**:登录系统(桌面端门禁 + `/api/login`)、后台管理(`web.nwflash.cc.cd`)、按用户审计与封禁、**在线会话(心跳 / 在线状态 / 强制下线)**、**操作许可门禁 + 使用日志分类上传**,均已在 Cloudflare 上。
 
 > 早期自建 .NET 服务端(`src/Nwflash.Server/`)已整体删除 —— 线上后端 100% 跑在 Cloudflare Workers(仅支持 JavaScript/TypeScript)+ D1,桌面端直连 `api.nwflash.cc.cd`;VOTA 凭据只存在 Worker 机密里,不再有自托管代码。
 
@@ -183,9 +181,9 @@ VMProtect、EXE/安装器签名、安装卸载测试和清单校验；缺少受�
 `Verify-TauriRelease.ps1` 只读取并核验已生成的 `SHA256SUMS.txt`，不会覆盖清单；正式产物还必须通过
 `scripts/Verify-ProtectedRelease.ps1` 的签名身份校验。
 
-验证器要求 `adb.exe`、`fastboot.exe`、Vivo 驱动压缩包和 `magiskboot.so` 同包，并拒绝 `scrcpy`、ROOT
-管理器 APK 与 `payload_dumper`。这些按需资源仍由 Rust 的受校验 provisioner 下载；资源分类的唯一发布
-清单是 `src/Nwflash.Desktop/src-tauri/resources/README.md`。
+验证器要求所有固定运行时资源同包：platform-tools、Vivo 驱动、magiskboot、完整 scrcpy、ROOT
+管理器 APK 与 `payload_dumper`。资源分类的唯一发布清单是
+`src/Nwflash.Desktop/src-tauri/resources/README.md`。
 
 最终下载包还必须经过 `docs/release/tauri-vmp-signing-runbook.md` 的 VMP 和 Authenticode 门禁。保护与签名脚本
 只从受控发布环境读取 `NWFLASH_VMP_PATH`、`NWFLASH_VMP_ARGUMENTS`、`NWFLASH_SIGNTOOL_PATH` 与
@@ -207,27 +205,21 @@ VMProtect、EXE/安装器签名、安装卸载测试和清单校验；缺少受�
 机器缺少 .NET 8 桌面运行时 → 引导器从微软直链下载 ~56MB 静默安装(一次 UAC)后拉起
 `VivoKsu.App.exe`;已装则直接启动。检测逻辑见 `DotNetRuntimeDetector`。
 
-**外置资源(不随包,首次使用按需下载)**:scrcpy、ROOT 管理器 APK、payload_dumper。
-托管在 GitHub 公开仓库 Release(owner/repo/tag 在 `RemoteAssetCatalog` 一处可改),下载按
-直连 → gh-proxy.com → ghfast.top → ghproxy.net 顺序自动 failover,全部失败给出手动下载链接。
-上传资源:装好 `gh` CLI 后运行 `./scripts/Upload-Resources.ps1`(或手动建 Release 上传);
-APK 的 SHA-256 已 pin 在 `VivoRootResourceService.ManagerApkSha256`,payload_dumper 的 pin 在
-`RemoteAssetCatalog.PayloadDumperSha256`。
+**固定运行时资源**:scrcpy、ROOT 管理器 APK 与 payload_dumper 均随包发布，并在使用前校验。
+资源缺失或校验失败时，应用提示重新安装，不会按需下载。
 
-**组件安装窗(登录后检测)**:登录后扫描 4 项外置资源就绪状态,有缺失即弹「组件安装」液态玻璃
-模态窗——可勾选 / 全部安装 / 跳过(跳过不阻塞,资源仍是首次使用时按需下载);四项并行下载、
-每项独立进度;软件页「安装组件」按钮可随时重开补装。落盘固定 `C:\nwflash`(不可写回退用户目录)。
+**内置组件检查窗(登录后检测)**:登录后校验固定资源；资源缺失时显示检查窗和错误信息，软件页可重新检查。
 
 ## 内置组件
 
-| 组件 | 随包/外置 | 来源 | 用途 |
+| 组件 | 随包 | 来源 | 用途 |
 | --- | --- | --- | --- |
 | `platform-tools/`(adb、fastboot) | **随包** | Android SDK Platform Tools | 设备连接、刷写 |
 | `drivers/vivo-usb-driver.7z` | **随包** | vivo 官方 | 驱动提醒窗静默安装 |
 | `root-tools/magiskboot.so` | **随包** | Magisk | vendor_boot 补丁处理 |
-| `scrcpy/` | **外置**按需 | scrcpy | 屏幕镜像 |
-| `apk/KSU.APK`、`apk/KernelSU.apk` | **外置**按需 | KernelSU | ROOT 管理器安装包 |
-| `payload-tools/payload_dumper.exe` | **外置**按需 | payload-dumper-rust | OTA payload 解包 |
+| `scrcpy/` | **随包** | scrcpy | 屏幕镜像 |
+| `apk/KSU.APK`、`apk/KernelSU.apk` | **随包** | KernelSU | ROOT 管理器安装包 |
+| `payload-tools/payload_dumper.exe` | **随包** | payload-dumper-rust | OTA payload 解包 |
 
 ## 已知限制
 

@@ -19,7 +19,7 @@
 
 ## 登录与授权
 
-Nwflash 是商业工具,桌面端启动须登录。VIVO 线刷页查 ROM 走 `OtaApiClient`(登录后已注入 token,请求带 `Authorization: Bearer`),`/api/rom` **强制登录**:无 token → 401「请先登录」、封禁 → 403、版本未在后台启用 → 404。上游 VOTA 信用点由运营方承担,**不对用户扣点计费**。
+VIVO 线刷页查 ROM 走 `OtaApiClient`(登录后已注入 token,请求带 `Authorization: Bearer`),`/api/rom` **强制登录**:无 token → 401「请先登录」、封禁 → 403、版本未在后台启用 → 404。
 
 ## 设备版本读取
 

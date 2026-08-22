@@ -580,7 +580,7 @@ protected override void OnStartup(StartupEventArgs eventArgs)
 {
     base.OnStartup(eventArgs);
 
-    // 崩溃日志(商业工具排查):记录未捕获异常到本地文件。
+    // 崩溃日志:记录未捕获异常到本地文件。
     DispatcherUnhandledException += (_, e) =>
     {
         if (e.Exception is UpdateRequiredException update)

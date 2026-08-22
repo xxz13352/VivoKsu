@@ -76,7 +76,12 @@ function Get-ReleaseManifest {
 
 function Get-ReleaseRelativePath {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return ([IO.Path]::GetRelativePath($root, $Path)).Replace('\', '/')
+    $rootPath = $root.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $relative = [Uri]::UnescapeDataString(([Uri]$rootPath).MakeRelativeUri([Uri]([IO.Path]::GetFullPath($Path))).ToString())
+    if ($relative.StartsWith('../') -or $relative -eq '..') {
+        throw "Release file escapes root: $Path"
+    }
+    return $relative
 }
 
 if (-not (Test-Path -LiteralPath $root -PathType Container)) {
@@ -91,11 +96,6 @@ if ($installers.Count -ne 1) {
     throw 'Release NSIS installer is missing or ambiguous.'
 }
 
-foreach ($forbidden in @('scrcpy', 'payload_dumper', 'KSU.APK', 'KernelSU.apk')) {
-    if (Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object { $_.Name -like "*$forbidden*" }) {
-        throw "On-demand resource was bundled: $forbidden"
-    }
-}
 foreach ($dotnetArtifact in @('*.runtimeconfig.json', '*.deps.json', 'hostfxr.dll', 'hostpolicy.dll', 'coreclr.dll')) {
     if (Get-ChildItem -LiteralPath $root -Recurse -File -Filter $dotnetArtifact) {
         throw "Release contains a .NET runtime artifact: $dotnetArtifact"

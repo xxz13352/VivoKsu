@@ -120,7 +120,7 @@ export const MirrorPage: FC = () => {
       <section className="nw-mirror-console" aria-label="投屏控制">
         <header><div><p>SCRCPY SESSION</p><h2>屏幕镜像控制台</h2></div><span>scrcpy 资源</span></header>
         <div className="nw-mirror-controls">
-          <article><h3>手动投屏</h3><p>发布包内置时直接使用；未内置时请先在“组件安装”中下载 scrcpy。</p><div><button type="button" className="nw-test-mirror-start" onClick={() => void runMirrorCommand('mirror_start')}>开始投屏</button><button type="button" className="nw-test-mirror-stop" onClick={() => void runMirrorCommand('mirror_stop')}>结束投屏</button></div></article>
+          <article><h3>手动投屏</h3><p>发布包已内置 scrcpy；如组件校验失败，请重新安装应用。</p><div><button type="button" className="nw-test-mirror-start" onClick={() => void runMirrorCommand('mirror_start')}>开始投屏</button><button type="button" className="nw-test-mirror-stop" onClick={() => void runMirrorCommand('mirror_stop')}>结束投屏</button></div></article>
           <article><h3>自动投屏</h3><p>检测到 ADB 设备后自动开启；请先准备 scrcpy，会话意外关闭时自动恢复。</p><label className="nw-mirror-switch"><input type="checkbox" checked={mirrorStatus?.auto_mirror_enabled ?? false} onChange={(event) => void runMirrorCommand('mirror_set_auto', event.target.checked)} /><span aria-hidden="true" /></label></article>
         </div>
         <footer><div><span>设备传输</span><strong>等待连接</strong></div><div><span>镜像进程</span><strong>{mirrorStatus?.is_mirroring ? '投屏运行中' : '投屏未启动'}</strong></div></footer>

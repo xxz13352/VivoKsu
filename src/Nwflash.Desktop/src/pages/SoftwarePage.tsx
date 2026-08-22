@@ -237,7 +237,7 @@ export const SoftwarePage: FC = () => {
             </button>
           </article>
           <article className="nw-software-status-row nw-software-tool-row">
-            <div><strong>scrcpy 投屏工具</strong><small>投屏所需 scrcpy.exe（发布内置 / 组件安装）</small></div>
+            <div><strong>scrcpy 投屏工具</strong><small>投屏所需 scrcpy.exe（发布内置）</small></div>
             <em className={softwareStatus.scrcpy_ready ? 'nw-software-ready' : 'nw-software-missing'}>
               {formatReadiness(softwareStatus.scrcpy_ready, 'scrcpy 已就绪', '未检测到 scrcpy.exe')}
             </em>
@@ -294,7 +294,7 @@ export const SoftwarePage: FC = () => {
       </ModalLayer>
       <ModalLayer
         isVisible={resourceDialogOpen}
-        title="组件安装"
+        title="内置组件检查"
         onClose={() => void closeResourceDialog()}
       >
         <ResourceDownloadPage

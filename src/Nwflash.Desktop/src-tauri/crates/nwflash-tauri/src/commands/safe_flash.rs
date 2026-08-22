@@ -514,10 +514,8 @@ pub async fn safe_flash_prepare_online(
                     return Err(DomainError::UserCancelled("线刷预检已取消。".to_string()));
                 }
                 context.report_stage("正在准备 payload 提取工具");
-                let provisioner = nwflash_infrastructure::PayloadDumperProvisioner::new(
-                    nwflash_infrastructure::RemoteAssetDownloader::default(),
-                    None,
-                    None,
+                let provisioner = nwflash_infrastructure::PayloadDumperProvisioner::bundled(
+                    nwflash_windows::bundled_resource_root(),
                 );
                 let payload_dumper = provisioner
                     .ensure_installed(&cancellation, None)
@@ -639,10 +637,8 @@ async fn prepare_local_safe_flash_from_path(
                 })??;
                 let prepared_source = if payload_source {
                     context.report_stage("正在准备 payload 提取工具");
-                    let provisioner = nwflash_infrastructure::PayloadDumperProvisioner::new(
-                        nwflash_infrastructure::RemoteAssetDownloader::default(),
-                        None,
-                        None,
+                    let provisioner = nwflash_infrastructure::PayloadDumperProvisioner::bundled(
+                        nwflash_windows::bundled_resource_root(),
                     );
                     let executable = provisioner
                         .ensure_installed(&cancellation, None)

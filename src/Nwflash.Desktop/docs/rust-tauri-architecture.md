@@ -86,12 +86,12 @@ ROOT 页可以在已登录且连接 ADB 设备时调用 `root_ota_check`。命�
 
 ## 资源供应与完整性
 
-`nwflash-infrastructure` 的 provisioner 负责外部工具和 ROOT 管理器资源，下载器在写入缓存前校验长度和 SHA-256，并用 staging 文件避免半成品覆盖目标。
+`nwflash-infrastructure` 的 provisioner 负责校验内置工具和 ROOT 管理器资源，并用 staging 文件保护 ROM/OTA 等运行时内容，不把固定工具资源下载到本地缓存。
 
-- **scrcpy**：资源规格固定为 Genymobile scrcpy v4.1 Windows ZIP 官方直链、`11,305,298` 字节和 SHA-256 `5b12172b3264b2889f4583ee64752ce832e29bc8b1089dca81093459697165db`，不调用 GitHub `releases/latest` API。下载器可按固定顺序尝试镜像，但镜像不能改变固定 URL、长度或摘要；解压后先递归发布 payload 并生成完整 `scrcpy-files.sha256` 清单，再删除 staging 目录。安装不接受用户自定义路径，也不回退到用户 `PATH`。
-- **ROOT manager APK**：bundle 和 cache 候选逐个执行非空检查、可选 SHA-256、ZIP 可读性和 `AndroidManifest.xml` 检查。有效 cache 可以替代无效 bundle；无有效候选时才进入受校验的下载路径。
-- **payload_dumper**：bundle/cache readiness 和安装路径都使用固定的 executable SHA-256。检测到损坏的 cached executable 后先删除，再进行新的下载、解压和校验。
-- **随包资源**：platform-tools、驱动和 root-tools 由 Tauri release resources 配置打包；按需资源仍由 Rust provisioner 管理，React 不获得资源绝对路径。
+- **scrcpy**：发布包内置完整 `resources/scrcpy` 目录及 `scrcpy-files.sha256`；Rust 校验每个文件后使用，不接受用户自定义路径，也不回退到用户 `PATH`。
+- **ROOT manager APK**：KSU 和 KernelSU APK 均在 bundle 中执行非空、SHA-256、ZIP 可读性和 `AndroidManifest.xml` 检查。
+- **payload_dumper**：bundle executable 使用固定 SHA-256 校验；缺失或损坏时提示重新安装应用。
+- **随包资源**：platform-tools、驱动、root-tools、scrcpy、ROOT APK 和 payload_dumper 都由 Tauri release resources 配置打包；React 不获得资源绝对路径。
 
 ## 构建、测试与发布
 

@@ -31,7 +31,11 @@ $expectedResources = @(
     'resources/platform-tools/fastboot.exe',
     'resources/platform-tools/PLATFORM_TOOLS.SHA256',
     'resources/drivers/vivo-usb-driver.7z',
-    'resources/root-tools/magiskboot.so'
+    'resources/root-tools/magiskboot.so',
+    'resources/scrcpy',
+    'resources/apk/KSU.APK',
+    'resources/apk/KernelSU.apk',
+    'resources/payload-tools/payload_dumper.exe'
 )
 $configuredResources = @($config.bundle.resources)
 Assert-ReleaseCondition ($configuredResources.Count -eq $expectedResources.Count) 'Tauri bundle resources must be an exact allowlist.'
@@ -81,7 +85,7 @@ try {
 
     Assert-ReleaseCondition (Test-Path (Join-Path $releaseRoot 'nwflash-desktop.exe')) 'Staged release executable is missing.'
     Assert-ReleaseCondition ((Get-ChildItem $releaseRoot -File -Filter '*-setup.exe').Count -eq 1) 'Staged NSIS installer is missing.'
-    foreach ($resource in @('resources\platform-tools\adb.exe', 'resources\platform-tools\fastboot.exe', 'resources\drivers\vivo-usb-driver.7z', 'resources\root-tools\magiskboot.so')) {
+    foreach ($resource in @('resources\platform-tools\adb.exe', 'resources\platform-tools\fastboot.exe', 'resources\drivers\vivo-usb-driver.7z', 'resources\root-tools\magiskboot.so', 'resources\scrcpy\scrcpy.exe', 'resources\apk\KSU.APK', 'resources\apk\KernelSU.apk', 'resources\payload-tools\payload_dumper.exe')) {
         Assert-ReleaseCondition (Test-Path (Join-Path $releaseRoot $resource)) "Staged required resource is missing: $resource"
     }
     Assert-ReleaseCondition (Test-Path (Join-Path $releaseRoot 'SHA256SUMS.txt')) 'Staged SHA-256 manifest is missing.'
@@ -95,7 +99,7 @@ try {
         Assert-ReleaseCondition ($installation.ExitCode -eq 0) 'NSIS installation failed.'
         $installedApp = Join-Path $installRoot 'nwflash-desktop.exe'
         Assert-ReleaseCondition (Test-Path $installedApp) 'Installed Tauri executable is missing.'
-        foreach ($resource in @('resources\platform-tools\adb.exe', 'resources\platform-tools\fastboot.exe', 'resources\drivers\vivo-usb-driver.7z', 'resources\root-tools\magiskboot.so')) {
+        foreach ($resource in @('resources\platform-tools\adb.exe', 'resources\platform-tools\fastboot.exe', 'resources\drivers\vivo-usb-driver.7z', 'resources\root-tools\magiskboot.so', 'resources\scrcpy\scrcpy.exe', 'resources\apk\KSU.APK', 'resources\apk\KernelSU.apk', 'resources\payload-tools\payload_dumper.exe')) {
             Assert-ReleaseCondition (Test-Path (Join-Path $installRoot $resource)) "Installed required resource is missing: $resource"
         }
 
@@ -110,14 +114,7 @@ try {
         }
     }
 
-    Set-Content -Encoding ASCII (Join-Path $releaseRoot 'resources\scrcpy.exe') 'test-only forbidden resource'
-    $forbiddenRejected = $false
-    try {
-        & (Join-Path $PSScriptRoot 'Verify-TauriRelease.ps1') -ReleaseRoot $releaseRoot
-    } catch {
-        $forbiddenRejected = $_.Exception.Message -like '*On-demand resource was bundled*'
-    }
-    Assert-ReleaseCondition $forbiddenRejected 'Release verifier must reject on-demand resources.'
+    & (Join-Path $PSScriptRoot 'Verify-TauriRelease.ps1') -ReleaseRoot $releaseRoot
 } finally {
     if (Test-Path $releaseRoot) {
         Remove-Item -LiteralPath $releaseRoot -Recurse -Force

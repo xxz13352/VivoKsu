@@ -138,7 +138,7 @@ describe('SoftwarePage', () => {
     expect(components.textContent).toContain('手机 USB 驱动');
     expect(components.textContent).toContain('任缺一类启动即提醒');
     expect(components.textContent).toContain('scrcpy 投屏工具');
-    expect(components.textContent).toContain('投屏所需 scrcpy.exe（发布内置 / 组件安装）');
+    expect(components.textContent).toContain('投屏所需 scrcpy.exe（发布内置）');
     expect(components.textContent).toContain('scrcpy 已就绪');
     expect(components.textContent).toContain('payload_dumper 解包工具');
     expect(host.textContent).not.toContain('从 version_check 与操作日志构建软件页真实状态面板。');

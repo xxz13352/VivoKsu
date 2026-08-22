@@ -226,7 +226,7 @@ export const App: FC = () => {
         return;
       }
     } catch (error) {
-      console.debug('组件就绪检查失败，按需下载仍可用:', error);
+      console.debug('内置组件就绪检查失败:', error);
     }
 
     await showDriverReminderIfNeeded();
@@ -673,7 +673,7 @@ export const App: FC = () => {
         onMaximize={toggleMaximizeWindow}
         onClose={closeWindow}
         modalOpen={readinessDialog !== null}
-        modalTitle={readinessDialog === 'resources' ? '组件安装' : 'USB 驱动提醒'}
+        modalTitle={readinessDialog === 'resources' ? '内置组件检查' : 'USB 驱动提醒'}
         modalChildren={readinessDialog === 'resources' ? (
           <ResourceDownloadPage
             embedded

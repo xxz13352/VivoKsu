@@ -36,7 +36,7 @@ describe('ResourceDownloadPage', () => {
     vi.clearAllMocks();
   });
 
-  test('缺失资源默认选中且已就绪资源不选中', async () => {
+  test('缺失内置资源默认选中且已就绪资源不选中', async () => {
     (invoke as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(inventory);
     flushSync(() => root.render(<ResourceDownloadPage />));
 
@@ -45,24 +45,24 @@ describe('ResourceDownloadPage', () => {
     expect(invoke).toHaveBeenCalledWith('resource_inventory');
     expect((host.querySelector('[data-resource-key="scrcpy"]') as HTMLInputElement).checked).toBe(true);
     expect((host.querySelector('[data-resource-key="payload"]') as HTMLInputElement).checked).toBe(false);
-    expect(host.textContent).toContain('安装所选 (2)');
+    expect(host.textContent).toContain('校验所选 (2)');
   });
 
-  test('安装只提交被选中的固定资源键', async () => {
+  test('校验只提交被选中的固定资源键', async () => {
     (invoke as unknown as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(inventory)
       .mockResolvedValueOnce(['scrcpy', 'manager-KSU'])
       .mockResolvedValueOnce(inventory);
     flushSync(() => root.render(<ResourceDownloadPage />));
 
-    await waitUntil(() => (host.textContent ?? '').includes('安装所选 (2)'));
+    await waitUntil(() => (host.textContent ?? '').includes('校验所选 (2)'));
     (host.querySelector('.nw-test-resource-install') as HTMLButtonElement).click();
 
     await waitUntil(() => (invoke as unknown as ReturnType<typeof vi.fn>).mock.calls.length >= 2);
     expect(invoke).toHaveBeenCalledWith('resource_install', { keys: ['scrcpy', 'manager-KSU'] });
   });
 
-  test('安装并刷新清单后通知宿主刷新组件状态', async () => {
+  test('校验并刷新清单后通知宿主刷新组件状态', async () => {
     const onCompleted = vi.fn();
     (invoke as unknown as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(inventory)
@@ -70,14 +70,14 @@ describe('ResourceDownloadPage', () => {
       .mockResolvedValueOnce(inventory);
     flushSync(() => root.render(<ResourceDownloadPage onCompleted={onCompleted} />));
 
-    await waitUntil(() => (host.textContent ?? '').includes('安装所选 (2)'));
+    await waitUntil(() => (host.textContent ?? '').includes('校验所选 (2)'));
     (host.querySelector('.nw-test-resource-install') as HTMLButtonElement).click();
 
     await waitUntil(() => onCompleted.mock.calls.length === 1);
     expect(onCompleted).toHaveBeenCalledTimes(1);
   });
 
-  test('安装中关闭会请求取消当前受控操作', async () => {
+  test('校验中关闭会请求取消当前受控操作', async () => {
     const onRequestClose = vi.fn();
     (invoke as unknown as ReturnType<typeof vi.fn>).mockImplementation((command: string) => {
       if (command === 'resource_inventory') return Promise.resolve(inventory);
@@ -87,9 +87,9 @@ describe('ResourceDownloadPage', () => {
     });
     flushSync(() => root.render(<ResourceDownloadPage onRequestClose={onRequestClose} />));
 
-    await waitUntil(() => (host.textContent ?? '').includes('安装所选 (2)'));
+    await waitUntil(() => (host.textContent ?? '').includes('校验所选 (2)'));
     (host.querySelector('.nw-test-resource-install') as HTMLButtonElement).click();
-    await waitUntil(() => (host.textContent ?? '').includes('取消下载'));
+    await waitUntil(() => (host.textContent ?? '').includes('取消校验'));
     (host.querySelector('.nw-test-resource-close') as HTMLButtonElement).click();
 
     await waitUntil(() =>

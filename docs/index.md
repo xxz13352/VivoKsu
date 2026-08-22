@@ -5,7 +5,7 @@
 
 ## 一、这是什么
 
-**奶蛙Flash(代码名 NWflash)** —— Vivo 手机刷机 / Root 商业付费工具。当前桌面端是 **React + Tauri + Rust**，后端为 **100% Cloudflare 托管**(Workers + D1,零自有服务器)；WPF 目录仅保留迁移历史与视觉基线。
+**奶蛙Flash(代码名 NWflash)** —— Vivo 手机刷机 / Root 工具。当前桌面端是 **React + Tauri + Rust**，后端为 **100% Cloudflare 托管**(Workers + D1,零自有服务器)；WPF 目录仅保留迁移历史与视觉基线。
 
 > **命名约定**:客户端 UI 统一显示 **「奶蛙Flash」**;代码 / 工程 / 服务名用 **NWflash**,缩写 **NWF**,域名 `nwflash.cc.cd`,API 版本头 `X-Nwflash-Version`。详见 [架构文档 §命名约定](architecture.md#命名约定2026-08-14定稿)。
 
@@ -17,7 +17,7 @@
 
 | 文档 | 看什么 | 入口 |
 | --- | --- | --- |
-| **项目总览** | 功能页面、技术栈、构建 / 发布 / 部署、商业模式 | [../README.md](../README.md) |
+| **项目总览** | 功能页面、技术栈、构建 / 发布 / 部署、账号访问 | [../README.md](../README.md) |
 | **当前项目架构** | 当前 Tauri/Rust 分层、前端、IPC、安全边界、服务端、测试和发布 | [project-architecture.md](project-architecture.md) |
 | **历史架构文档** | WPF 历史实现、Worker / D1 背景和迁移前设计记录 | [architecture.md](architecture.md) |
 | **Tauri/Rust 迁移架构快照** | 当前 `5.3codex` 迁移阶段的 crate 分层、命令/event 边界与验收口径 | [architecture-tauri-migration.md](architecture-tauri-migration.md) |
@@ -41,7 +41,7 @@ VivoKsu 工具/
 │  ├─ Models/                # 领域模型(AppPage / 分区 / payload / 快照 / 日志)
 │  ├─ ViewModels/            # 各页面 MVVM 视图模型
 │  ├─ Services/              # 组合根 AppComposition + 业务服务 / 基础设施
-│  ├─ apk/ platform-tools/ payload-tools/ root-tools/ scrcpy/   # 内置组件(apk/payload/scrcpy 发布外置)
+│  ├─ apk/ platform-tools/ payload-tools/ root-tools/ scrcpy/   # 内置组件
 ├─ src/VivoKsu.Bootstrapper/ # 原生 AOT 引导器(.NET 首启检测/静默装)入口
 ├─ src/Nwflash.Desktop/      # Tauri/Rust 桌面客户端(React + Rust workspace)
 │  ├─ src/                    # React 页面与路径安全 IPC DTO
@@ -67,7 +67,7 @@ VivoKsu 工具/
 - Bearer token 只保存在 Rust `AppState.session_token`；登录返回的 `AuthSessionDto` 与 TypeScript session payload 只含身份信息。
 - 公开 handler 不接受原始 Quick Flash plan/命令数组、未经 HTTP(S) 校验的任意 ROM/固件 URL 或 Rust 资源路径。固件提取支持受 HTTP(S)、Range 读取和 opaque ID 约束的远程命令；payload URL 直接交给支持 Range 的提取工具，按所选分区读取；本地固件检查/提取、受约束的 Safe Flash 与 Quick Flash 工作流仍可用。
 - 产品每次启动只作用于当前发现的一台设备；同时发现多台设备会被拒绝。`DeviceSnapshot` 和 TypeScript `DeviceSnapshotPayload` 包含 serial 供界面显示，但浏览器不能提交、选择或伪造执行 serial。Rust 在每个执行边界从当前唯一设备派生 ADB/Fastboot 命令目标；Quick Flash 会在构造 flash、切槽和重启命令前用该 serial 覆盖计划中的瞬态预览值，不因预检与执行期间 serial 改变而拒绝。
-- scrcpy Windows archive 使用固定的 Genymobile v4.1 官方直链、`11,305,298` 字节和固定 SHA-256，下载器同时校验长度与摘要，发布 payload 后才清 staging；不调用 `releases/latest` API，也不接受用户路径或 PATH 回退。ROOT 管理器在 bundle/cache 候选中验证非空、可选 SHA-256 和 APK 结构；payload_dumper readiness 校验预期 SHA-256，损坏 cache 会先删除再尝试校验重装。
+- scrcpy、ROOT 管理器 APK 与 `payload_dumper.exe` 均随桌面发布包内置；运行时只校验发布目录中的固定资源，不从网络下载、不接受用户路径或 PATH 回退。ROOT 管理器验证 APK 结构；payload_dumper 与 scrcpy 均由内置清单验证，缺失或损坏时提示重新安装应用。
 - 进程 stdout/stderr 在子进程运行期间由独立 reader 并发排空；正常完成会在构造输出前回收 reader，取消或超时会在终止并回收子进程后回收 reader。大输出与 reader 失败回归测试覆盖该边界。ROOT 镜像/修补工件保留路径、格式、非空/大小、不透明 ID 和 session epoch 约束，不再使用运行时 byte fingerprint 或 SHA-256 拒绝后续消费。
 
 ## 四、服务与数据

@@ -53,7 +53,7 @@ export const ResourceDownloadPage: FC<ResourceDownloadPageProps> = ({
     } catch (error) {
       setItems([]);
       setSelected(new Set());
-      setErrorText(errorMessage(error, '资源状态读取失败'));
+      setErrorText(errorMessage(error, '内置资源状态读取失败'));
       return false;
     } finally {
       setLoading(false);
@@ -75,7 +75,7 @@ export const ResourceDownloadPage: FC<ResourceDownloadPageProps> = ({
         onCompleted?.();
       }
     } catch (error) {
-      setErrorText(errorMessage(error, '资源安装失败'));
+      setErrorText(errorMessage(error, '内置资源校验失败'));
     } finally {
       setInstalling(false);
       onInstallingChange?.(false);
@@ -102,7 +102,7 @@ export const ResourceDownloadPage: FC<ResourceDownloadPageProps> = ({
 
   return (
     <section className={embedded ? 'nw-resource-download-content' : 'nw-card'}>
-      {!embedded ? <h2>组件安装</h2> : null}
+      {!embedded ? <h2>内置组件检查</h2> : null}
       {loading ? <p>正在检测组件...</p> : null}
       {errorText ? <p className="nw-error-text">{errorText}</p> : null}
       <ul className="nw-resource-list">
@@ -123,7 +123,7 @@ export const ResourceDownloadPage: FC<ResourceDownloadPageProps> = ({
                   });
                 }}
               />
-              {item.display_name}：{item.is_ready ? '已就绪' : '待下载'}
+              {item.display_name}：{item.is_ready ? '已就绪' : '内置缺失'}
             </label>
           </li>
         ))}
@@ -135,11 +135,11 @@ export const ResourceDownloadPage: FC<ResourceDownloadPageProps> = ({
           disabled={loading || installing || selectedMissingCount === 0}
           onClick={() => void installSelected()}
         >
-          {installing ? '安装中...' : `安装所选 (${selectedMissingCount})`}
+          {installing ? '校验中...' : `校验所选 (${selectedMissingCount})`}
         </button>
         {onRequestClose ? (
           <button type="button" className="nw-test-resource-close" onClick={() => void requestClose()}>
-            {installing ? '取消下载' : '关闭'}
+            {installing ? '取消校验' : '关闭'}
           </button>
         ) : null}
       </div>

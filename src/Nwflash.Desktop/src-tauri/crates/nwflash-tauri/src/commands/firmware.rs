@@ -1852,10 +1852,8 @@ fn unique_firmware_suffix() -> u128 {
 }
 
 fn default_payload_provisioner() -> nwflash_infrastructure::PayloadDumperProvisioner {
-    nwflash_infrastructure::PayloadDumperProvisioner::new(
-        nwflash_infrastructure::RemoteAssetDownloader::default(),
-        None,
-        None,
+    nwflash_infrastructure::PayloadDumperProvisioner::bundled(
+        nwflash_windows::bundled_resource_root(),
     )
 }
 

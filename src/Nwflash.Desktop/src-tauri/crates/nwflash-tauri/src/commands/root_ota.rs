@@ -10,7 +10,7 @@ use nwflash_application::{result_to_domain_error, RootOtaExtractOptions, RootOta
 use nwflash_domain::{DomainError, FlashImageInfo, OperationKind};
 use nwflash_infrastructure::{
     remote_firmware::{probe_remote_kind, RemoteFirmwareError, RemoteFirmwareKind},
-    PayloadDumperProvisioner, RemoteAssetDownloader,
+    PayloadDumperProvisioner,
 };
 use serde::Serialize;
 use tauri::State;
@@ -364,10 +364,8 @@ pub async fn root_ota_extract_images(
 
                     let payload_dumper = if needs_payload_dumper(remote_kind) {
                         context.report_stage("正在准备 payload 提取工具");
-                        let provisioner = PayloadDumperProvisioner::new(
-                            RemoteAssetDownloader::default(),
-                            None,
-                            None,
+                        let provisioner = PayloadDumperProvisioner::bundled(
+                            nwflash_windows::bundled_resource_root(),
                         );
                         Some(
                             provisioner

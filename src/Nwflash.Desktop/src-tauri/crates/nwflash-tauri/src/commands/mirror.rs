@@ -138,7 +138,7 @@ pub fn build_start_plan(
 }
 
 async fn installed_paths() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    let provisioner = ScrcpyProvisioner::new();
+    let provisioner = ScrcpyProvisioner::bundled(nwflash_windows::bundled_resource_root());
     let scrcpy = require_installed_scrcpy(provisioner.installed_executable())?;
     Ok((
         scrcpy,
@@ -149,7 +149,7 @@ async fn installed_paths() -> Result<(std::path::PathBuf, std::path::PathBuf), S
 fn require_installed_scrcpy(
     path: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, String> {
-    path.ok_or_else(|| "未检测到 scrcpy.exe，请先在“组件安装”中安装 scrcpy。".to_string())
+    path.ok_or_else(|| "未检测到内置 scrcpy.exe，请重新安装应用。".to_string())
 }
 
 pub async fn start_plan(
@@ -337,7 +337,7 @@ mod tests {
     fn missing_scrcpy_requires_component_installation() {
         let error = require_installed_scrcpy(None).expect_err("missing scrcpy should be reported");
 
-        assert!(error.contains("组件安装"));
+        assert!(error.contains("重新安装应用"));
         assert!(error.contains("scrcpy"));
     }
 }

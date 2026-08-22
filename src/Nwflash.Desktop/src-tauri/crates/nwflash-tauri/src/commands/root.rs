@@ -18,8 +18,7 @@ use nwflash_domain::{
     SafeFlashSlotMode,
 };
 use nwflash_infrastructure::{
-    resolve_vendor_boot_module_directories, validate_patched_root_image, RemoteAssetDownloader,
-    VivoRootResourceService,
+    resolve_vendor_boot_module_directories, validate_patched_root_image, VivoRootResourceService,
 };
 use nwflash_windows::{bundled_platform_tool, process::run_command_with_cancel, ProcessCommand};
 use serde::{Deserialize, Serialize};
@@ -1405,7 +1404,7 @@ async fn install_root_manager_core(
 ) -> Result<RootManagerInstallDto, DomainError> {
     let manager_label = manager.label();
     context.report_stage(format!("正在准备 {manager_label} 管理器"));
-    let resources = VivoRootResourceService::new(app_root, Some(RemoteAssetDownloader::default()));
+    let resources = VivoRootResourceService::new(app_root, None);
     let requested = resources
         .resolve_manager(manager_resource_key(manager))
         .map_err(|_| DomainError::InvalidOperation("ROOT 管理器资源不可用。".to_string()))?;
@@ -1486,7 +1485,7 @@ async fn patch_vivo_ksu_core(
     };
 
     context.report_stage("正在准备 ROOT 修补资源");
-    let resources = VivoRootResourceService::new(app_root, Some(RemoteAssetDownloader::default()));
+    let resources = VivoRootResourceService::new(app_root, None);
     let requested = resources
         .resolve_manager(manager_resource_key(manager))
         .map_err(|_| DomainError::InvalidOperation("ROOT 管理器资源不可用。".to_string()))?;

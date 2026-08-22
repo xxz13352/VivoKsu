@@ -141,7 +141,11 @@ function Assert-ExpectedResourceTree {
         throw "$Description root is missing: $Root"
     }
     foreach ($file in @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force)) {
-        $relative = [IO.Path]::GetRelativePath($Root, $file.FullName).Replace('\', '/')
+        $rootPath = ([IO.Path]::GetFullPath($Root)).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        $relative = [Uri]::UnescapeDataString(([Uri]$rootPath).MakeRelativeUri([Uri]([IO.Path]::GetFullPath($file.FullName))).ToString()).Replace('/', '/')
+        if ($relative.StartsWith('../') -or $relative -eq '..') {
+            throw "Path escapes root: $($file.FullName)"
+        }
         if ($IgnoredPaths -contains $relative) {
             continue
         }

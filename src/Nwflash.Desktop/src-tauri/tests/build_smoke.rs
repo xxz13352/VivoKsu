@@ -58,6 +58,33 @@ fn windows_build_generates_tauri_resource_metadata() {
 }
 
 #[test]
+fn tauri_bundle_declares_every_runtime_tool_resource() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let tauri_conf = fs::read_to_string(manifest_dir.join("tauri.conf.json"))
+        .expect("tauri.conf.json should exist in workspace root");
+    let required_resources = [
+        "resources/platform-tools/adb.exe",
+        "resources/drivers/vivo-usb-driver.7z",
+        "resources/root-tools/magiskboot.so",
+        "resources/scrcpy",
+        "resources/apk/KSU.APK",
+        "resources/apk/KernelSU.apk",
+        "resources/payload-tools/payload_dumper.exe",
+    ];
+
+    for resource in required_resources {
+        assert!(
+            tauri_conf.contains(resource),
+            "tauri bundle must declare runtime resource: {resource}"
+        );
+        assert!(
+            manifest_dir.join(resource).exists(),
+            "runtime resource must be present in the Tauri resource tree: {resource}"
+        );
+    }
+}
+
+#[test]
 fn windows_tauri_ipc_sources_are_allowed_by_the_content_security_policy() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let tauri_conf = fs::read_to_string(manifest_dir.join("tauri.conf.json"))

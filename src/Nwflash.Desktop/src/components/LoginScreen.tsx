@@ -49,7 +49,7 @@ export const LoginScreen: FC<LoginScreenProps> = ({
         <div className="nw-login-heading">
           <p>SECURE SIGN IN</p>
           <h1>登录 奶蛙Flash</h1>
-          <span>商业工具授权。使用后台分配的账号登录后进入主界面。</span>
+          <span>使用后台分配的账号登录后进入主界面。</span>
         </div>
 
         <label className="nw-login-field">

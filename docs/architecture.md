@@ -37,7 +37,7 @@
 
 ## 1. 系统总览
 
-**商业定位**:Nwflash 是**商业付费工具** —— 桌面端启动必须用后台创建的账号登录(付费授权),未登录不可进入主界面;**登录后即可使用,不做按次扣点 / 配额计费**(上游 VOTA 的信用点由运营方承担,见 §4.5);每次 ROM 查询按用户审计。**服务端 100% 托管在 Cloudflare**(Workers + D1),**零自有服务器**:认证、版本授权、计费、审计与后台管理全部在 Cloudflare Edge。
+**访问控制**:桌面端启动必须用后台创建的账号登录，未登录不可进入主界面；每次 ROM 查询按用户审计。**服务端 100% 托管在 Cloudflare**(Workers + D1),**零自有服务器**:认证、版本授权、审计与后台管理全部在 Cloudflare Edge。
 
 系统分三层,**上游 VOTA 凭据只在 Worker 上,从不进入桌面端**:
 
@@ -149,7 +149,7 @@ flowchart TD
 - **启动版本门禁**:启动时先发起 `/api/app/version` 版本检查；若返回 `update_required=true/force_update=true`，前端进入更新提示态并阻止登录入口，避免在版本不符状态继续创建会话。
 - **同进程登出(2026-08-15 新增)**:点「登出」→ `MainViewModel.LogoutCommand`(`CanExecute = !Coordinator.IsBusy`,刷写/传输运行中禁用,防打断设备操作,与 force-exit「刷写中先取消等 Idle 再退」一致)→ `AppComposition.OnLogoutAsync`(`StopAsync` 优雅下线后抛 `LogoutRequested` 事件)→ App 关主窗 → `OnMainWindowClosed` 识别登出态(`isLogout`)重入 `RunApplicationLoop` 弹登录窗。旧 composition 已 `StopAsync`(`stopped` 幂等守卫,登出后 OnExit 直接返回),新登录全新构造,无状态残留。
 - **退出清理**:`OnExit` 用 `DispatcherFrame` 泵消息最多 5s 等 `composition.StopAsync()` 完成 —— 清理下载的 Vivo 临时 gzip 与各盘 `Nwflash\safe-flash` staging,并停监视/镜像进程。
-- **崩溃日志**:未捕获异常写 `%LOCALAPPDATA%\Nwflash\crash.log`(商业工具排查用)。
+- **崩溃日志**:未捕获异常写 `%LOCALAPPDATA%\Nwflash\crash.log`，用于排查。
 - **登录后程序消失修复**:`ShowDialog` 关闭触发 `OnLastWindowClose` 退出 —— 改为主窗口显式 `Closed` 处理器(登出重入循环 / 否则 `Shutdown()`),并设 `ShutdownMode = OnExplicitShutdown`。
 
 ### 3.2 组合根与依赖组装(无第三方 DI)
@@ -408,7 +408,7 @@ src/Nwflash.Desktop/
 
 - 当前公开 Tauri handler 不暴露原始 Quick Flash plan/执行 helper、未经约束的任意 ROM 解析、未经 HTTP(S) 校验的固件 URL、命令数组或 Rust 管理的资源路径。固件提取另有受 HTTP(S)、Range 读取和 opaque ID 约束的远程命令；payload URL 直接交给支持 Range 的提取工具，按所选分区读取；本地固件检查/提取与受约束的 Safe Flash/Quick Flash prepare/execute 工作流仍可用。
 - 当前设备模型是一次启动操作一台已发现设备：多设备同时发现会进入拒绝状态，`DeviceRuntime` 只保存最新设备快照。serial 仅作为界面显示和当前 ADB/Fastboot 命令目标；Rust 瞬态计划/预览可以携带 serial，但执行会在构造命令前从当前唯一设备重新解析并覆盖它，不做跨步骤等值绑定。这一运行时哈希/serial 边界遵循 [产品决策](product-decisions.md)；发行与资源完整性不受影响。
-- Rust 资源 provisioner 的完整性边界：scrcpy 使用固定的 Genymobile v4.1 Windows ZIP 官方直链、`11,305,298` 字节和固定 SHA-256，不调用 GitHub `releases/latest` API；下载器同时校验长度与摘要，发布 payload 后才清理 staging。ROOT 管理器在 bundle/cache 候选间验证非空、可选 SHA-256 与 APK manifest 结构，有效 cache 可替代无效 bundle；payload_dumper availability 校验预期 SHA-256，损坏 cache 在校验下载重装前删除。
+- Rust 资源 provisioner 的完整性边界：scrcpy、ROOT 管理器 APK 与 `payload_dumper.exe` 全部作为发布资源内置。scrcpy 必须通过完整文件清单校验，ROOT 管理器验证 APK manifest 结构，payload_dumper 验证固定摘要；运行时不下载、不写入持久缓存，缺失或损坏时要求重新安装应用。
 - 进程 stdout/stderr 在子进程运行期间由独立 reader 并发排空；正常完成会在构造输出前回收 reader，取消或超时会在终止并回收子进程后回收 reader。大输出与 reader 失败回归测试覆盖该边界。运行时 ROOT 镜像/工件 byte fingerprint 门禁已移除，路径、格式、大小、不透明 ID 和 session epoch 校验保留。
 
 这一层保持“前端仅渲染、Rust 执行”边界：前端不持久化 token，不拼接 shell 命令，不发起 Cloudflare 直接请求。
@@ -470,11 +470,11 @@ flowchart TD
 | `RATE_LIMITED` | 429 | 请求过频 |
 | 其它 / 连不上上游 | 502 | 上游异常 |
 
-### 4.5 上游计费 / 信用点(运营方成本)
+### 4.5 上游服务限制
 
-每次成功 `resolve_url` 扣 **1 信用点**;`resolve_flash_url`(线刷)扣 **3 信用点**。信用点归属 **Worker 所持 VOTA token 的账户(运营方)**。这是 Nwflash 运营方在上游 VOTA 的成本,**不对 Nwflash 用户做任何扣点 / 按次计费** —— 用户只要登录即可查询;`record not found` / 参数错误不扣点。
+`resolve_url` 与 `resolve_flash_url` 依赖 Worker 持有的上游 VOTA 凭据；上游拒绝或额度不足时，客户端会收到对应的服务端错误。`record not found` / 参数错误不会继续请求上游。
 
-### 4.6 商业运营闭环
+### 4.6 账号访问与审计
 
 ```mermaid
 flowchart LR
@@ -482,8 +482,7 @@ flowchart LR
     API -->|登录门禁| DESK["桌面端登录"]
     DESK -->|"/api/rom 带 token"| API
     API -->|每次查询| AUDIT["access_logs 按用户审计"]
-    API -->|扣上游信用点| BILL["VOTA 账户计费(运营方成本)"]
-    BILL -->|额度不足 402| DESK
+    API -->|上游拒绝或额度不足 402| DESK
     API -->|版本过低 426| DESK
     API -->|封禁 403| DESK
 ```
@@ -491,7 +490,7 @@ flowchart LR
 - **授权载体**:`api_users` 账号 = 登录凭证 + API token + `enabled`/`banned`。桌面端登录拿 token,ROM 查询凭 token。
 - **版本授权**:`app_versions` 表登记 Nwflash 客户端版本,启用的最高版本为当前策略;客户端低于 `min_version` → 服务端 426 强制更新,后台可随时开关。
 - **审计闭环**:每次查询写 `access_logs`,后台可查谁在何时查了哪个版本、成功与否。
-- **用户不按次计费**:Nwflash 用户登录即可查询、不限次数;上游扣的是运营方账户的信用点(§4.5),`402` = 运营方上游余额不足,客户端提示「服务端信用点不足」。
+- **上游错误投影**:`402` 表示上游服务额度不足，客户端提示「服务端信用点不足」。
 - **处罚通道**:后台封禁 / 停用 → 登录 `401`、查询 `403`,**即时生效**——token 无本地缓存,天然可吊销。
 
 ---
