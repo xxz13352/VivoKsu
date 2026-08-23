@@ -45,6 +45,7 @@ interface StoredSessionLease {
   build_id: string;
   process_nonce: string;
   sequence: number;
+  last_heartbeat_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -251,6 +252,21 @@ class FakeD1PreparedStatement {
     if (sql.includes("from online_sessions where session_id = ?")) {
       return (this.db.sessions.get(String(this.values[0])) ?? null) as T | null;
     }
+    if (sql.includes("from session_leases sl left join online_sessions os")) {
+      const lease = this.db.sessionLeases.get(String(this.values[0]));
+      if (!lease) return null;
+      const online = this.db.sessions.get(String(this.values[0]));
+      const userHeartbeats = [...this.db.sessionLeases.values()]
+        .filter((candidate) => candidate.user_id === lease.user_id && candidate.last_heartbeat_at !== null)
+        .map((candidate) => candidate.last_heartbeat_at as number);
+      return {
+        ...lease,
+        user_last_heartbeat_at: userHeartbeats.length > 0 ? Math.max(...userHeartbeats) : null,
+        online_user_id: online?.user_id ?? null,
+        force_exit_at: online?.force_exit_at ?? null,
+        force_exit_reason: online?.force_exit_reason ?? null,
+      } as T;
+    }
     if (sql.includes("from session_leases where session_id = ?")) {
       return (this.db.sessionLeases.get(String(this.values[0])) ?? null) as T | null;
     }
@@ -270,6 +286,7 @@ class FakeD1PreparedStatement {
         build_id: String(buildId),
         process_nonce: String(processNonce),
         sequence: 1,
+        last_heartbeat_at: null,
         created_at: Number(createdAt),
         updated_at: Number(updatedAt),
       };
@@ -278,21 +295,44 @@ class FakeD1PreparedStatement {
     }
     if (sql.startsWith("update session_leases")) {
       await this.db.waitBeforeSessionCas();
-      const [nextSequence, updatedAt, sessionId, userId, username, clientVersion, buildId, processNonce, previousSequence] = this.values;
+      const [
+        nextSequence,
+        updatedAt,
+        lastHeartbeatAt,
+        sessionId,
+        userId,
+        username,
+        clientVersion,
+        buildId,
+        processNonce,
+        previousSequence,
+        heartbeatCutoff,
+      ] = this.values;
       const lease = this.db.sessionLeases.get(String(sessionId));
       const online = this.db.sessions.get(String(sessionId));
+      const recentUserHeartbeat = lease === undefined
+        ? null
+        : [...this.db.sessionLeases.values()]
+          .filter((candidate) => candidate.user_id === lease.user_id)
+          .some((candidate) => (
+            candidate.last_heartbeat_at !== null
+            && candidate.last_heartbeat_at > Number(heartbeatCutoff)
+          ));
       if (
         !lease
         || online?.force_exit_at != null
+        || (online !== undefined && online.user_id !== lease.user_id)
         || lease.user_id !== Number(userId)
         || lease.username !== String(username)
         || lease.client_version !== String(clientVersion)
         || lease.build_id !== String(buildId)
         || lease.process_nonce !== String(processNonce)
         || lease.sequence !== Number(previousSequence)
+        || recentUserHeartbeat
       ) return null;
       lease.sequence = Number(nextSequence);
       lease.updated_at = Number(updatedAt);
+      lease.last_heartbeat_at = Number(lastHeartbeatAt);
       return { sequence: lease.sequence } as T;
     }
     throw new Error(`Unhandled D1 first(): ${this.query}`);
@@ -844,7 +884,8 @@ describe("signed lease routes", () => {
     const response = await withTimeout(heartbeatPromise, "heartbeat response after CAS release");
     const body = await response.json() as Record<string, unknown>;
 
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, force_exit: true, reason: "force-exit race" });
     expect(body).not.toHaveProperty("lease_payload");
     expect(body).not.toHaveProperty("lease_signature");
     expect(db.sessionLeases.get("session-abc")?.sequence).toBe(1);
@@ -915,6 +956,7 @@ describe("signed lease routes", () => {
       build_id: "build-2026-08-23",
       process_nonce: "nonce-goodbye",
       sequence: 4,
+      last_heartbeat_at: Math.floor(FIXED_NOW_MS / 1000),
       created_at: Math.floor(FIXED_NOW_MS / 1000),
       updated_at: Math.floor(FIXED_NOW_MS / 1000),
     });

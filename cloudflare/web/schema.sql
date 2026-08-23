@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS session_leases (
   build_id TEXT NOT NULL,
   process_nonce TEXT NOT NULL,
   sequence INTEGER NOT NULL CHECK (sequence >= 1),
+  last_heartbeat_at INTEGER,               -- 该会话最近一次成功活动心跳;CAS 关联同 user_id 执行全局最小间隔
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

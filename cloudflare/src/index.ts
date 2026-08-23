@@ -403,24 +403,10 @@ function isClientVersion(value: string): boolean {
 /* 绝不触碰 connected_at/user_id(时长基准与归属)。                          */
 /* ------------------------------------------------------------------ */
 
-/** per-token 心跳最小间隔(ms):换 sessionId 刷 D1 写配额的 DoS 防线。内存 Map,按 isolate 共享(Cloudflare 通常粘性路由)。 */
-const HEARTBEAT_MIN_INTERVAL_MS = 3_000;
-const HEARTBEAT_LIMIT_MAP_CAP = 10_000;
-const heartbeatLimits = new Map<string, number>();
+/** 每个 API 用户的活动心跳最小间隔。由 session_leases 的关联 D1 CAS 谓词全局执行。 */
+const HEARTBEAT_MIN_INTERVAL_SECONDS = 3;
 /** 请求路径内联清理的 per-isolate 节流;真正的兜底是 scheduled() Cron。 */
 let lastPurgeAt = 0;
-
-/** 在 CAS 前只读检查限速;仅 CAS 成功后记录,避免并发同序号请求绕过数据库竞争。 */
-function heartbeatRateLimited(token: string): boolean {
-  const now = Date.now();
-  const last = heartbeatLimits.get(token);
-  return last !== undefined && now - last < HEARTBEAT_MIN_INTERVAL_MS;
-}
-
-function markHeartbeatAccepted(token: string): void {
-  heartbeatLimits.set(token, Date.now());
-  if (heartbeatLimits.size > HEARTBEAT_LIMIT_MAP_CAP) heartbeatLimits.clear();
-}
 
 /** 清理 stale 会话(超过在线窗口未心跳)。带 force_exit 的会话保留 24h,保证「踢后离线再回来」仍能收到 kick。 */
 async function purgeStaleSessions(env: Env, force = false): Promise<void> {
@@ -484,43 +470,8 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
     return json({ error: "sequence 不合法。" }, 400);
   }
 
-  const lease = await env.DB.prepare(
-    `SELECT user_id, username, client_version, build_id, process_nonce, sequence
-     FROM session_leases WHERE session_id = ?`,
-  )
-    .bind(sessionId)
-    .first<{
-      user_id: number;
-      username: string;
-      client_version: string;
-      build_id: string;
-      process_nonce: string;
-      sequence: number;
-    }>();
-  if (
-    !lease
-    || lease.user_id !== auth.id
-    || lease.username !== auth.username
-    || lease.client_version !== clientVersion
-    || lease.build_id !== buildId
-    || lease.process_nonce !== processNonce
-    || lease.sequence !== sequence
-  ) return leaseConflict();
-
-  const online = await env.DB.prepare(
-    "SELECT user_id, last_seen_at, force_exit_at, force_exit_reason FROM online_sessions WHERE session_id = ?",
-  )
-    .bind(sessionId)
-    .first<{ user_id: number; last_seen_at: number; force_exit_at: number | null; force_exit_reason: string | null }>();
-  if (online && online.user_id !== auth.id) return leaseConflict();
-  if (online?.force_exit_at) {
-    return json({ ok: true, force_exit: true, reason: online.force_exit_reason || "已被服务端强制下线。" }, 200);
-  }
-
   const header = request.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (heartbeatRateLimited(token)) return json({ error: "心跳过于频繁。" }, 429);
-
   const issuedAt = Math.floor(Date.now() / 1000);
   const nextSequence = sequence + 1;
   const claims: LeaseClaims = {
@@ -546,21 +497,81 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
   }
 
   const advanced = await env.DB.prepare(
-    `UPDATE session_leases SET sequence = ?, updated_at = ?
+    `UPDATE session_leases SET sequence = ?, updated_at = ?, last_heartbeat_at = ?
      WHERE session_id = ? AND user_id = ? AND username = ?
        AND client_version = ? AND build_id = ? AND process_nonce = ? AND sequence = ?
        AND NOT EXISTS (
-         SELECT 1 FROM online_sessions
-         WHERE online_sessions.session_id = session_leases.session_id AND force_exit_at IS NOT NULL
+         SELECT 1 FROM session_leases recent_heartbeat
+         WHERE recent_heartbeat.user_id = session_leases.user_id
+           AND recent_heartbeat.last_heartbeat_at > ?
+       )
+       AND NOT EXISTS (
+          SELECT 1 FROM online_sessions
+          WHERE online_sessions.session_id = session_leases.session_id
+            AND (online_sessions.user_id <> session_leases.user_id OR force_exit_at IS NOT NULL)
        )
      RETURNING sequence`,
   )
-    .bind(nextSequence, issuedAt, sessionId, auth.id, auth.username, clientVersion, buildId, processNonce, sequence)
+    .bind(
+      nextSequence,
+      issuedAt,
+      issuedAt,
+      sessionId,
+      auth.id,
+      auth.username,
+      clientVersion,
+      buildId,
+      processNonce,
+      sequence,
+      issuedAt - HEARTBEAT_MIN_INTERVAL_SECONDS,
+    )
     .first<{ sequence: number }>();
-  if (!advanced) return leaseConflict();
+  if (!advanced) {
+    const state = await env.DB.prepare(
+      `SELECT sl.user_id, sl.username, sl.client_version, sl.build_id, sl.process_nonce,
+              sl.sequence,
+              (SELECT MAX(recent_heartbeat.last_heartbeat_at)
+               FROM session_leases recent_heartbeat
+               WHERE recent_heartbeat.user_id = sl.user_id) AS user_last_heartbeat_at,
+              os.user_id AS online_user_id,
+              os.force_exit_at, os.force_exit_reason
+       FROM session_leases sl
+       LEFT JOIN online_sessions os ON os.session_id = sl.session_id
+       WHERE sl.session_id = ?`,
+    )
+      .bind(sessionId)
+      .first<{
+        user_id: number;
+        username: string;
+        client_version: string;
+        build_id: string;
+        process_nonce: string;
+        sequence: number;
+        user_last_heartbeat_at: number | null;
+        online_user_id: number | null;
+        force_exit_at: number | null;
+        force_exit_reason: string | null;
+      }>();
+    const bindingMatches = state
+      && state.user_id === auth.id
+      && state.username === auth.username
+      && state.client_version === clientVersion
+      && state.build_id === buildId
+      && state.process_nonce === processNonce
+      && (state.online_user_id === null || state.online_user_id === auth.id);
+    if (!bindingMatches) return leaseConflict();
+    if (state.force_exit_at !== null) {
+      return json({ ok: true, force_exit: true, reason: state.force_exit_reason || "已被服务端强制下线。" }, 200);
+    }
+    if (state.sequence !== sequence) return leaseConflict();
+    if (
+      state.user_last_heartbeat_at !== null
+      && state.user_last_heartbeat_at > issuedAt - HEARTBEAT_MIN_INTERVAL_SECONDS
+    ) return json({ error: "心跳过于频繁。" }, 429);
+    return leaseConflict();
+  }
 
-  markHeartbeatAccepted(token);
-  await projectOnlineSession(env, request, auth, online, sessionId, clientVersion, issuedAt);
+  await projectOnlineSession(env, request, auth, sessionId, clientVersion, issuedAt);
   return json({ ok: true, force_exit: false, ...envelope }, 200);
 }
 
@@ -572,7 +583,6 @@ async function projectOnlineSession(
   env: Env,
   request: Request,
   auth: { id: number; name: string },
-  online: { last_seen_at: number } | null,
   sessionId: string,
   clientVersion: string,
   now: number,
@@ -581,6 +591,12 @@ async function projectOnlineSession(
   const sessionCap = Number(env.ONLINE_SESSION_CAP) || 3;
   const ip = request.headers.get("CF-Connecting-IP") || "";
   try {
+    const online = await env.DB.prepare(
+      "SELECT user_id, last_seen_at FROM online_sessions WHERE session_id = ?",
+    )
+      .bind(sessionId)
+      .first<{ user_id: number; last_seen_at: number }>();
+    if (online && online.user_id !== auth.id) return;
     if (!online) {
       await env.DB.prepare(
         `INSERT INTO online_sessions (session_id, user_id, user_name, client_version, ip, connected_at, last_seen_at)

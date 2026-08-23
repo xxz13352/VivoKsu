@@ -24,7 +24,7 @@ Nwflash 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 | `GET /health` | 健康检查 |
 | `POST /api/login` | 账号密码 → API token + Ed25519 签名登录租约 |
 | `GET /api/me` | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
-| `POST /api/heartbeat` | D1 完整绑定 + sequence CAS 心跳;仅 CAS 获胜返回严格递增签名租约 |
+| `POST /api/heartbeat` | D1 完整绑定 + sequence/最小间隔/force-exit 单点 CAS;仅 CAS 获胜返回严格递增签名租约 |
 | `GET /api/security/pins` | `api.nwflash.cc.cd` 的签名叶证书 + WE1 备用 SPKI pin 清单 |
 | `POST /api/integrity/report` | 匿名/鉴权最小完整性事件(4 KiB 上限、闭集字段、IP 限流、event ID 幂等) |
 | `GET /api/online` | 在线用户列表(鉴权;显示名/版本/时长,不含 username/IP) |
@@ -50,7 +50,7 @@ npm run deploy                # 预检远端签名 secret 后部署
 
 > D1(`nwflash-db`)建库 / 建表见 [web/README.md](web/README.md);`/api/rom` 依赖 D1 做版本控制与访问日志。
 > 必须先应用 `web/schema.sql` 中的 `session_leases`、`integrity_event_claims`、`integrity_events` 与 `integrity_rate_limits` 表。`npm run deploy` 缺少 `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 时失败;不要直接调用 `wrangler deploy` 绕过预检。
-> `npm test` 保留 Node + controlled D1 fake 的确定性边界测试;`npm run test:workerd` 使用 `@cloudflare/vitest-plugin` 在实际 Workerd runtime 中运行 Worker route 和隔离 D1。集成配置每次从 `web/schema.sql` 生成临时迁移并在运行时生成临时 Ed25519 key,不读取或写入生产 secret/remote D1。
+> `npm test` 保留 Node + controlled D1 fake 的确定性边界测试;`npm run test:workerd` 使用 `@cloudflare/vitest-plugin` 在实际 Workerd runtime 中运行 API Worker route、带 HTML Text module rule 的生产后台 Worker 模块和共享隔离 D1。集成配置每次从 `web/schema.sql` 生成临时迁移并在运行时生成临时 Ed25519 key,不读取或写入生产 secret/remote D1。
 
 部署后验证:
 

@@ -21,6 +21,9 @@ export default defineConfig({
       return {
         wrangler: { configPath: "./wrangler.toml" },
         miniflare: {
+          modulesRules: [
+            { type: "Text", include: ["**/*.html"], fallthrough: true },
+          ],
           bindings: {
             TEST_MIGRATIONS: migrations,
             SESSION_SIGNING_PRIVATE_KEY_PKCS8: signingSecret,

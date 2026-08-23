@@ -1,8 +1,9 @@
 import { env, exports } from "cloudflare:workers";
 import { applyD1Migrations, reset, type D1Migration } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Env as WorkerEnv } from "../src/index";
+import adminWorker from "../web/src/index";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv extends WorkerEnv {
@@ -12,11 +13,16 @@ declare module "cloudflare:workers" {
 
 const PASSWORD = "correct horse";
 const SALT = "00112233445566778899aabbccddeeff";
+const FIXED_NOW_MS = 1_787_444_800_000;
+const ADMIN_SESSION_TOKEN = "workerd-admin-session";
 
 beforeEach(async () => {
+  vi.spyOn(Date, "now").mockReturnValue(FIXED_NOW_MS);
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("actual Worker route with Workerd D1", () => {
   it("allows only one signed lease for concurrent same-sequence heartbeats", async () => {
@@ -33,38 +39,52 @@ describe("actual Worker route with Workerd D1", () => {
       "SELECT sequence FROM session_leases WHERE session_id = ?",
     ).bind("workerd-heartbeat-session").first<{ sequence: number }>();
 
-    expect(responses.filter((response) => response.status === 200)).toHaveLength(1);
-    expect(responses.filter((response) => response.status === 409 || response.status === 429)).toHaveLength(1);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
     expect(bodies.filter((body) => "lease_payload" in body)).toHaveLength(1);
     expect(state?.sequence).toBe(2);
   });
 
-  it("does not return a lease or advance sequence when concurrent force-exit wins", async () => {
-    const token = "workerd-force-exit-token";
-    const sessionId = "workerd-force-exit-session";
-    await seedUser(token);
-    expect((await postLogin(sessionId)).status).toBe(200);
-    const now = Math.floor(Date.now() / 1000);
-    await env.DB.prepare(
-      `INSERT INTO online_sessions
-         (session_id, user_id, user_name, client_version, ip, connected_at, last_seen_at)
-       VALUES (?, 7, 'Alice', '1.4.0', '', ?, ?)`,
-    ).bind(sessionId, now, now).run();
+  it("lets the production admin kick linearize before heartbeat CAS without advancing sequence", async () => {
+    const token = "workerd-kick-first-token";
+    const sessionId = "workerd-kick-first-session";
+    await establishOnlineSession(token, sessionId);
+    await seedAdminSession();
+    vi.mocked(Date.now).mockReturnValue(FIXED_NOW_MS + 4_000);
 
-    const forceExit = env.DB.prepare(
-      "UPDATE online_sessions SET force_exit_at = ?, force_exit_reason = 'integration race' WHERE session_id = ?",
-    ).bind(now + 1, sessionId).run();
-    const heartbeat = postHeartbeat(token, sessionId, 1);
-    const [, response] = await Promise.all([forceExit, heartbeat]);
+    const kick = await postAdminKick(sessionId, "kick first");
+    const response = await postHeartbeat(token, sessionId, 2);
     const body = await response.json() as Record<string, unknown>;
-    const state = await env.DB.prepare(
-      "SELECT sequence FROM session_leases WHERE session_id = ?",
-    ).bind(sessionId).first<{ sequence: number }>();
 
-    expect([200, 409]).toContain(response.status);
+    expect(kick.status).toBe(200);
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, force_exit: true, reason: "kick first" });
     expect(body).not.toHaveProperty("lease_payload");
     expect(body).not.toHaveProperty("lease_signature");
-    expect(state?.sequence).toBe(1);
+    expect(await sessionSequence(sessionId)).toBe(2);
+    expect(await scalar("SELECT COUNT(*) AS value FROM admin_audit_log WHERE target_session_id = ?", sessionId)).toBe(1);
+  });
+
+  it("lets heartbeat CAS advance once before the production admin kick blocks the next heartbeat", async () => {
+    const token = "workerd-cas-first-token";
+    const sessionId = "workerd-cas-first-session";
+    await establishOnlineSession(token, sessionId);
+    await seedAdminSession();
+    vi.mocked(Date.now).mockReturnValue(FIXED_NOW_MS + 4_000);
+
+    const advanced = await postHeartbeat(token, sessionId, 2);
+    const advancedBody = await advanced.json() as Record<string, unknown>;
+    const kick = await postAdminKick(sessionId, "CAS first");
+    const blocked = await postHeartbeat(token, sessionId, 3);
+    const blockedBody = await blocked.json() as Record<string, unknown>;
+
+    expect(advanced.status).toBe(200);
+    expect(advancedBody).toHaveProperty("lease_payload");
+    expect(kick.status).toBe(200);
+    expect(blocked.status).toBe(200);
+    expect(blockedBody).toMatchObject({ ok: true, force_exit: true, reason: "CAS first" });
+    expect(blockedBody).not.toHaveProperty("lease_payload");
+    expect(blockedBody).not.toHaveProperty("lease_signature");
+    expect(await sessionSequence(sessionId)).toBe(3);
   });
 
   it("commits one accepted event and one quota charge for concurrent duplicates", async () => {
@@ -137,6 +157,25 @@ async function seedUser(token: string): Promise<void> {
   ).bind(token, await passwordHash(PASSWORD, SALT), SALT).run();
 }
 
+async function seedAdminSession(): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO admins (id, username, salt, password_hash) VALUES (11, 'reviewer', 'unused', 'unused')",
+    ),
+    env.DB.prepare(
+      "INSERT INTO admin_sessions (admin_id, token, expires_at) VALUES (11, ?, '2999-01-01T00:00:00.000Z')",
+    ).bind(ADMIN_SESSION_TOKEN),
+  ]);
+}
+
+async function establishOnlineSession(token: string, sessionId: string): Promise<void> {
+  await seedUser(token);
+  expect((await postLogin(sessionId)).status).toBe(200);
+  expect((await postHeartbeat(token, sessionId, 1)).status).toBe(200);
+  expect(await sessionSequence(sessionId)).toBe(2);
+  expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions WHERE session_id = ?", sessionId)).toBe(1);
+}
+
 async function postLogin(sessionId: string): Promise<Response> {
   return exports.default.fetch(new Request("https://api.nwflash.cc.cd/api/login", {
     method: "POST",
@@ -168,6 +207,18 @@ async function postHeartbeat(token: string, sessionId: string, sequence: number)
       process_nonce: "nonce-workerd",
       sequence,
     }),
+  }), env);
+}
+
+async function postAdminKick(sessionId: string, reason: string): Promise<Response> {
+  return adminWorker.fetch(new Request("https://web.nwflash.cc.cd/api/online/kick", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `nwflash_session=${ADMIN_SESSION_TOKEN}`,
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    body: JSON.stringify({ sessionId, reason }),
   }), env);
 }
 
@@ -218,4 +269,8 @@ async function passwordHash(password: string, saltHex: string): Promise<string> 
 async function scalar(query: string, ...bindings: unknown[]): Promise<number> {
   const row = await env.DB.prepare(query).bind(...bindings).first<{ value: number }>();
   return Number(row?.value ?? 0);
+}
+
+async function sessionSequence(sessionId: string): Promise<number> {
+  return scalar("SELECT sequence AS value FROM session_leases WHERE session_id = ?", sessionId);
 }

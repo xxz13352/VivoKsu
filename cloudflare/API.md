@@ -226,7 +226,7 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 { "ok": true, "force_exit": true, "reason": "违规下线" }
 ```
 
-活动心跳必须与 D1 中的用户、session ID、client version、build ID、process nonce 和当前 sequence **全部精确匹配**。服务端先签名 `sequence + 1` 候选,再用完整绑定元组和旧 sequence 执行原子 compare-and-swap;CAS 同时要求 `online_sessions.force_exit_at` 仍为空,所以在读取后、CAS 前发生的强制退出也会阻止租约返回和 sequence 推进。只有 CAS 获胜才返回候选。并发同序号最多一个成功;重放、回退、跳号、绑定变更、未知 session 或跨用户 ownership 返回 `409` 且不返回签名字段。签名失败发生在 CAS 之前,因此不会推进服务端 sequence。per-token 3 秒限速返回 `429`,同样不签发、不推进。强制退出响应不创建新能力。
+活动心跳必须与 D1 中的用户、session ID、client version、build ID、process nonce 和当前 sequence **全部精确匹配**。服务端不先读取租约状态作授权:它先签名请求绑定的 `sequence + 1` 候选,再由单条 D1 compare-and-swap 同时检查完整绑定元组、旧 sequence、同一用户所有租约的 `last_heartbeat_at` 最小间隔、在线行 ownership 和 `force_exit_at IS NULL`;只有 CAS 获胜才返回候选。CAS 失败后才读取提交状态,依次分类为强制退出、绑定/重放冲突或过快心跳。并发同序号因此恰有一个 `200` 租约和一个 `409`,不会被 isolate 内存限流提前改成 `429`;重放、回退、跳号、绑定变更、未知 session 或跨用户 ownership 返回 `409` 且不返回签名字段。签名失败发生在 CAS 之前,因此不会推进服务端 sequence。每个 token/用户的 D1 3 秒最小间隔返回 `429`,同样不签发、不推进。强制退出响应不创建新能力。
 
 goodbye 只需 `sessionId` 和 `active = false`;它删除当前用户的 `session_leases` 与 `online_sessions` 行并返回 `{ "ok": true, "force_exit": false }`,不要求签名 secret,也不创建新租约。
 
@@ -237,7 +237,7 @@ goodbye 只需 `sessionId` 和 `active = false`;它删除当前用户的 `sessio
 
 **强制退出触发点**:管理端「在线状态」强制下线(下一个心跳 ≤5s 收到);账号被封禁;token 被停用/轮换(心跳返回 401/403)。kick 是**瞬态**(仅当前会话),持续封禁靠 `banned` 在登录与业务层阻断。
 
-**服务端节流/配额防护**:每个有效活动心跳必须原子写入安全 sequence;在线展示投影的 `last_seen_at` 仍至少隔 60s 更新一次,且 `connected_at` 永不被更新。per-token 最小心跳间隔 3s;被限速请求返回 429,不会收到签名租约。stale `session_leases` 随在线会话清理窗口回收。
+**服务端节流/配额防护**:每个有效活动心跳必须在同一 D1 CAS 中原子写入安全 sequence 与 `last_heartbeat_at`;在线展示投影的 `last_seen_at` 仍至少隔 60s 更新一次,且 `connected_at` 永不被更新。每个 token/用户的最小心跳间隔为 3s;被限速请求返回 429,不会收到签名租约。stale `session_leases` 随在线会话清理窗口回收。
 
 ---
 
