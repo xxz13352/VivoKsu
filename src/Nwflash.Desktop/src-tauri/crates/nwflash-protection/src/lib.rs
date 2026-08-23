@@ -5,6 +5,8 @@
 
 mod decision;
 mod lease;
+mod vmp;
 
 pub use decision::*;
 pub use lease::*;
+pub use vmp::*;

@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Synchronous signed-lease verification and protection decisions"
+build = "build.rs"
+
+[features]
+default = []
+vmp-sdk = []
 
 [dependencies]
 base64 = "0.22.1"

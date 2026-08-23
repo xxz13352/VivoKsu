@@ -7,6 +7,8 @@ use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::{build_identity_matches, MarkerBoundary, MarkerScope};
+
 /// The maximum accepted clock skew for a server-issued lease.
 pub const MAX_CLOCK_SKEW_SECONDS: i64 = 60;
 
@@ -298,6 +300,7 @@ pub fn accept_login_lease(
     binding: &LeaseBinding,
     now: i64,
 ) -> Result<SessionLease, LeaseRejection> {
+    let _marker = MarkerScope::enter(MarkerBoundary::LoginLeaseAcceptance);
     validate_lease(lease.claims(), binding, LeaseKind::Login, now, None)
 }
 
@@ -310,6 +313,7 @@ pub fn classify_heartbeat_lease(
     previous_sequence: u64,
     now: i64,
 ) -> HeartbeatDecision {
+    let _marker = MarkerScope::enter(MarkerBoundary::HeartbeatLeaseClassification);
     match validate_lease(
         lease.claims(),
         binding,
@@ -326,6 +330,7 @@ pub fn classify_heartbeat_lease(
 #[inline(never)]
 #[export_name = "nwflash_protection_admit_local_operation"]
 pub fn admit_local_operation(session: &SessionLease, now: i64) -> OperationDecision {
+    let _marker = MarkerScope::enter(MarkerBoundary::OperationAdmission);
     if session.expires_at <= now {
         OperationDecision::DenyExpired
     } else {
@@ -355,7 +360,7 @@ fn validate_lease(
     if claims.client_version != binding.client_version {
         return Err(LeaseRejection::ClientVersionMismatch);
     }
-    if claims.build_id != binding.build_id {
+    if !build_identity_matches(&binding.build_id, &claims.build_id) {
         return Err(LeaseRejection::BuildIdMismatch);
     }
     if claims.process_nonce != binding.process_nonce {
