@@ -50,7 +50,7 @@ React/WebView 只负责凭据输入和状态展示。token、租约、公钥验�
 
 ## TLS 与 CA/SPKI 固定
 
-仅 `api.nwflash.cc.cd` 使用 pinned client。固件、ROM 和其他第三方下载继续使用普通独立客户端。
+仅 `api.nwflash.cc.cd` 使用 pinned client。固件、ROM 和其他第三方下载继续使用普通独立客户端。自定义 root、pin、resolver、测试验签公钥和无 pin HTTP adapter 只在 debug/test 编译中存在，release 对外只保留精确生产 pinned 构造路径。
 
 握手顺序：
 
@@ -64,19 +64,23 @@ React/WebView 只负责凭据输入和状态展示。token、租约、公钥验�
 - 叶 SPKI：`kavrs5Bk3Tjn+0G+uPjWGBqJsXzW5kHFNPzgxuvrcKY=`，当前证书到期 2026-11-11。
 - Google Trust Services WE1 中间 SPKI：`kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=`，当前证书到期 2029-02-20。
 
-客户端保留 WebPKI 验证，不使用 `danger_accept_invalid_certs`，不信任 Cloudflare Origin CA，不允许 Windows 本地新增 CA 单独绕过 pin。Pinned client 禁用代理自动发现和 TLS key log。
+客户端保留 WebPKI 验证，不使用 `danger_accept_invalid_certs`，不信任 Cloudflare Origin CA，不允许 Windows 本地新增 CA 单独绕过 pin。Pinned client 禁用代理自动发现、自动重定向和 TLS key log；任何 3xx、跨 host 或降级到 HTTP 的响应都映射为 endpoint-policy 完整性失败。
 
 ### Pin 轮换
 
 新增公共 `/api/security/pins`，返回 Ed25519 签名的 pin 清单，字段包括 `version`、`not_before`、`expires_at`、主 pin 和备用 pin。客户端只接受：
 
 - 签名有效。
-- version 单调递增。
-- 有效期合法。
+- version 不低于 release 内置 floor，且不低于本进程已验签/安装的最高版本；同版本不得替换为不同 payload。
+- `not_before` / `expires_at` 有效，并在加载、安装和每次 API 操作前重新检查；不能因连接池复用跳过时间检查。
 - host 精确匹配。
 - 至少保留一个当前可信 pin，或由仍有效的内置 Ed25519 公钥签发。
 
-签名 pin 清单可以缓存到本地；缓存不是秘密，加载时必须重新验签。pin 失配映射为完整性事件，而不是普通网络错误。由于 pin 失配时当前 API 通道已经不可信，客户端不能保证把该事件送达同一主机；只有独立遥测 host 的 pin 仍有效时才尝试上报，否则直接退出并保留本地最小事件标记。
+签名 pin 清单可以缓存到本地；缓存不是秘密，加载时必须重新验签。客户端只持久化签名 envelope，不持久化私密状态或伪装成安全计数器。攻击者控制本机时，可以在进程启动前把缓存替换成另一个签名有效、时间有效且不低于内置 floor 的旧 envelope；仅靠该公共文件无法识别这种替换。因此“单调”明确只覆盖本进程最高已验证版本和 release 内置 floor，不宣称攻击者控制主机时存在 tamper-proof 跨启动单调存储。Task 8 发布时按需要同步提升内置 floor 和验签公钥。
+
+动态 pinset 过期或尚未生效时，普通 API 操作返回 `PinsetTime`。刷新可以使用仅含 WebPKI + 内置 bootstrap pin 的独立 pinned client 恢复新签名 pinset；该路径仍禁用代理、重定向和 key log，且不能绕过内置 pin。缓存更新使用同目录临时文件、flush/sync 和原子替换，替换失败保留旧 envelope。
+
+pin 失配映射为完整性事件，而不是普通网络错误。由于 pin 失配时当前 API 通道已经不可信，客户端不能保证把该事件送达同一主机；只有独立遥测 host 的 pin 仍有效时才尝试上报，否则直接退出并保留本地最小事件标记。
 
 ## Rust 黑盒保护模块
 

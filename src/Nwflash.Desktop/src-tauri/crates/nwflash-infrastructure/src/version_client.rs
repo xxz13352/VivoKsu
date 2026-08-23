@@ -56,6 +56,7 @@ pub struct VersionClient {
 }
 
 impl VersionClient {
+    #[cfg(debug_assertions)]
     pub fn new(base_url: impl Into<String>, app_version: impl Into<String>) -> Self {
         Self {
             client: CloudflareClient::new_injected(base_url, app_version),

@@ -1,7 +1,10 @@
 use std::{
     net::SocketAddr,
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -30,11 +33,65 @@ use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::Barrier,
     task::JoinHandle,
 };
 use tokio_rustls::TlsAcceptor;
 
 const OK_BODY: &str = r#"{"ok":true}"#;
+
+#[derive(Clone)]
+struct TestResponse {
+    status: &'static str,
+    headers: Vec<(String, String)>,
+    body: String,
+    keep_alive: bool,
+}
+
+impl TestResponse {
+    fn ok_json(body: String) -> Self {
+        Self {
+            status: "200 OK",
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body,
+            keep_alive: false,
+        }
+    }
+
+    fn keep_alive_json(body: String) -> Self {
+        Self {
+            keep_alive: true,
+            ..Self::ok_json(body)
+        }
+    }
+
+    fn redirect(location: &str) -> Self {
+        Self {
+            status: "302 Found",
+            headers: vec![("Location".to_string(), location.to_string())],
+            body: String::new(),
+            keep_alive: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ManualClock(Arc<AtomicI64>);
+
+impl ManualClock {
+    fn new(now: i64) -> Self {
+        Self(Arc::new(AtomicI64::new(now)))
+    }
+
+    fn set(&self, now: i64) {
+        self.0.store(now, Ordering::SeqCst);
+    }
+
+    fn callback(&self) -> Arc<dyn Fn() -> i64 + Send + Sync> {
+        let now = self.0.clone();
+        Arc::new(move || now.load(Ordering::SeqCst))
+    }
+}
 
 struct TestChain {
     root_der: CertificateDer<'static>,
@@ -60,8 +117,31 @@ impl Drop for TestTlsServer {
 
 impl TestTlsServer {
     async fn start(chain: TestChain, response_body: String) -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let config = ServerConfig::builder()
+        Self::start_with_response(chain, TestResponse::ok_json(response_body)).await
+    }
+
+    async fn start_with_response(chain: TestChain, response: TestResponse) -> Self {
+        Self::start_with_versions(
+            chain,
+            response,
+            &[&rustls::version::TLS13, &rustls::version::TLS12],
+        )
+        .await
+    }
+
+    async fn start_tls12(chain: TestChain, response: TestResponse) -> Self {
+        Self::start_with_versions(chain, response, &[&rustls::version::TLS12]).await
+    }
+
+    async fn start_with_versions(
+        chain: TestChain,
+        response: TestResponse,
+        versions: &[&'static rustls::SupportedProtocolVersion],
+    ) -> Self {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(versions)
+            .expect("test TLS versions should be supported")
             .with_no_client_auth()
             .with_single_cert(chain.certificates, chain.private_key)
             .expect("test TLS certificate chain should be valid");
@@ -76,32 +156,52 @@ impl TestTlsServer {
                     return;
                 };
                 let acceptor = acceptor.clone();
-                let response_body = response_body.clone();
+                let response = response.clone();
                 tokio::spawn(async move {
                     let Ok(mut stream) = acceptor.accept(stream).await else {
                         return;
                     };
-                    let mut request = Vec::new();
-                    let mut chunk = [0_u8; 1024];
                     loop {
-                        let Ok(read) = stream.read(&mut chunk).await else {
-                            return;
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 1024];
+                        loop {
+                            let Ok(read) = stream.read(&mut chunk).await else {
+                                return;
+                            };
+                            if read == 0 {
+                                return;
+                            }
+                            request.extend_from_slice(&chunk[..read]);
+                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        let headers = response
+                            .headers
+                            .iter()
+                            .map(|(name, value)| format!("{name}: {value}\r\n"))
+                            .collect::<String>();
+                        let connection = if response.keep_alive {
+                            "keep-alive"
+                        } else {
+                            "close"
                         };
-                        if read == 0 {
+                        let wire_response = format!(
+                            "HTTP/1.1 {}\r\n{}Content-Length: {}\r\nConnection: {}\r\n\r\n{}",
+                            response.status,
+                            headers,
+                            response.body.len(),
+                            connection,
+                            response.body
+                        );
+                        if stream.write_all(wire_response.as_bytes()).await.is_err() {
                             return;
                         }
-                        request.extend_from_slice(&chunk[..read]);
-                        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
+                        if !response.keep_alive {
+                            let _ = stream.shutdown().await;
+                            return;
                         }
                     }
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        response_body.len(),
-                        response_body
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    let _ = stream.shutdown().await;
                 });
             }
         });
@@ -218,6 +318,28 @@ fn policy_for(
     .expect("test API policy should be valid")
 }
 
+fn policy_for_clock(
+    server: &TestTlsServer,
+    trusted_roots: RootCertStore,
+    pins: Vec<String>,
+    verifying_key: VerifyingKey,
+    cache_path: Option<&Path>,
+    embedded_floor: u64,
+    clock: &ManualClock,
+) -> ApiTlsPolicy {
+    ApiTlsPolicy::injected_with_floor(
+        format!("https://{API_HOST}:{}", server.addr.port()),
+        trusted_roots,
+        pins,
+        verifying_key,
+        cache_path.map(Path::to_path_buf),
+        Some(server.addr),
+        embedded_floor,
+    )
+    .expect("clocked test API policy should be valid")
+    .with_clock_for_test(clock.callback())
+}
+
 fn signed_pinset(
     signing_key: &SigningKey,
     version: u64,
@@ -295,6 +417,197 @@ async fn valid_webpki_chain_accepts_a_transmitted_intermediate_spki_pin() {
 
 #[tokio::test]
 #[serial]
+async fn tls12_handshake_uses_the_delegating_webpki_signature_path() {
+    let server = TestTlsServer::start_tls12(
+        test_chain(API_HOST, false),
+        TestResponse::ok_json(OK_BODY.to_string()),
+    )
+    .await;
+    let signing_key = random_signing_key();
+    let policy = policy_for(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+    );
+
+    assert_eq!(
+        PinnedApiClient::new(policy)
+            .expect("TLS 1.2 pinned client should build")
+            .get_text("/health")
+            .await
+            .expect("TLS 1.2 WebPKI and SPKI checks should complete"),
+        OK_BODY
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn dynamic_pinset_expiry_is_checked_before_each_pooled_api_operation() {
+    let now = 1_800_000_000;
+    let clock = ManualClock::new(now);
+    let server = TestTlsServer::start_with_response(
+        test_chain(API_HOST, false),
+        TestResponse::keep_alive_json(OK_BODY.to_string()),
+    )
+    .await;
+    let signing_key = random_signing_key();
+    let policy = policy_for_clock(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+        1,
+        &clock,
+    );
+    let client = PinnedApiClient::new(policy).expect("clocked pinned client should build");
+    client
+        .install_pinset_at(
+            signed_pinset_for_host(
+                &signing_key,
+                2,
+                API_HOST,
+                now - 1,
+                now + 10,
+                &server.leaf_pin,
+                &server.intermediate_pin,
+            ),
+            now,
+        )
+        .expect("currently valid dynamic pinset should install");
+    client
+        .get_text("/health")
+        .await
+        .expect("first request should establish a pooled TLS connection");
+
+    clock.set(now + 10);
+    assert_eq!(
+        client
+            .get_text("/health")
+            .await
+            .expect_err("expired dynamic pinset must block a pooled request"),
+        CloudflareError::Integrity(IntegrityFailure::PinsetTime)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn dynamic_pinset_not_before_is_rechecked_after_a_clock_rollback() {
+    let now = 1_800_000_000;
+    let clock = ManualClock::new(now);
+    let server = TestTlsServer::start(test_chain(API_HOST, false), OK_BODY.to_string()).await;
+    let signing_key = random_signing_key();
+    let policy = policy_for_clock(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+        1,
+        &clock,
+    );
+    let client = PinnedApiClient::new(policy).expect("clocked pinned client should build");
+    client
+        .install_pinset_at(
+            signed_pinset_for_host(
+                &signing_key,
+                2,
+                API_HOST,
+                now - 1,
+                now + 3_600,
+                &server.leaf_pin,
+                &server.intermediate_pin,
+            ),
+            now,
+        )
+        .expect("currently valid dynamic pinset should install");
+
+    clock.set(now - 2);
+    assert_eq!(
+        client
+            .get_text("/health")
+            .await
+            .expect_err("not-yet-valid dynamic state must block the request"),
+        CloudflareError::Integrity(IntegrityFailure::PinsetTime)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn expired_dynamic_pinset_can_refresh_only_through_embedded_bootstrap_pins() {
+    let now = 1_800_000_000;
+    let clock = ManualClock::new(now);
+    let signing_key = random_signing_key();
+    let chain = test_chain(API_HOST, false);
+    let fresh = signed_pinset_for_host(
+        &signing_key,
+        3,
+        API_HOST,
+        now + 10,
+        now + 3_600,
+        &chain.leaf_pin,
+        &chain.intermediate_pin,
+    );
+    let server = TestTlsServer::start_with_response(
+        chain,
+        TestResponse::keep_alive_json(
+            serde_json::to_string(&fresh).expect("fresh pinset should serialize"),
+        ),
+    )
+    .await;
+    let policy = policy_for_clock(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+        1,
+        &clock,
+    );
+    let client = PinnedApiClient::new(policy).expect("clocked pinned client should build");
+    let expired_primary = STANDARD.encode([0x11_u8; 32]);
+    let expired_backup = STANDARD.encode([0x22_u8; 32]);
+    client
+        .install_pinset_at(
+            signed_pinset_for_host(
+                &signing_key,
+                2,
+                API_HOST,
+                now - 1,
+                now + 5,
+                &expired_primary,
+                &expired_backup,
+            ),
+            now,
+        )
+        .expect("short-lived dynamic pinset should install");
+
+    clock.set(now + 10);
+    assert_eq!(
+        client
+            .get_text("/health")
+            .await
+            .expect_err("expired dynamic pinset should block ordinary API requests"),
+        CloudflareError::Integrity(IntegrityFailure::PinsetTime)
+    );
+    assert_eq!(
+        client
+            .refresh_pinset()
+            .await
+            .expect("embedded bootstrap pins should recover a fresh signed pinset")
+            .version,
+        3
+    );
+    client
+        .get_text("/health")
+        .await
+        .expect("ordinary requests should resume after a fresh pinset installs");
+}
+
+#[tokio::test]
+#[serial]
 async fn injected_pinned_transport_drives_the_cloudflare_api_adapter() {
     let server = TestTlsServer::start(
         test_chain(API_HOST, false),
@@ -324,6 +637,34 @@ async fn injected_pinned_transport_drives_the_cloudflare_api_adapter() {
         .await
         .expect("normal API methods should use the pinned transport");
     assert_eq!(version.latest.as_deref(), Some("1.0.1"));
+}
+
+#[tokio::test]
+#[serial]
+async fn cloudflare_adapter_classifies_redirect_as_endpoint_integrity_failure() {
+    let server = TestTlsServer::start_with_response(
+        test_chain(API_HOST, false),
+        TestResponse::redirect("https://redirect.invalid/version"),
+    )
+    .await;
+    let signing_key = random_signing_key();
+    let policy = policy_for(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+    );
+    let client = CloudflareClient::new_pinned(policy, DEFAULT_APP_VERSION)
+        .expect("Cloudflare adapter should accept a pinned policy");
+
+    assert_eq!(
+        client
+            .check_version_policy()
+            .await
+            .expect_err("redirect response must be an endpoint integrity failure"),
+        CloudflareError::Integrity(IntegrityFailure::InvalidApiEndpoint)
+    );
 }
 
 #[tokio::test]
@@ -550,7 +891,7 @@ async fn signed_pin_rotation_refreshes_over_the_pinned_channel_and_only_caches_t
 
 #[tokio::test]
 #[serial]
-async fn tampered_signed_pinset_cache_is_rejected_on_every_load() {
+async fn tampered_signed_pinset_cache_is_rejected_when_loaded() {
     let server = TestTlsServer::start(test_chain(API_HOST, false), OK_BODY.to_string()).await;
     let signing_key = random_signing_key();
     let now = unix_now();
@@ -629,6 +970,79 @@ async fn signed_pinset_version_rollback_is_rejected() {
 
 #[tokio::test]
 #[serial]
+async fn concurrent_valid_pinset_updates_do_not_break_requests_using_shared_state() {
+    let now = 1_800_000_000;
+    let clock = ManualClock::new(now);
+    let server = TestTlsServer::start_with_response(
+        test_chain(API_HOST, false),
+        TestResponse::keep_alive_json(OK_BODY.to_string()),
+    )
+    .await;
+    let signing_key = random_signing_key();
+    let policy = policy_for_clock(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+        1,
+        &clock,
+    );
+    let client = Arc::new(PinnedApiClient::new(policy).expect("shared client should build"));
+    let barrier = Arc::new(Barrier::new(3));
+
+    let updater = {
+        let client = client.clone();
+        let barrier = barrier.clone();
+        let signing_key = signing_key.clone();
+        let leaf_pin = server.leaf_pin.clone();
+        let intermediate_pin = server.intermediate_pin.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            for version in 2..=25 {
+                client
+                    .install_pinset_at(
+                        signed_pinset_for_host(
+                            &signing_key,
+                            version,
+                            API_HOST,
+                            now - 1,
+                            now + 3_600,
+                            &leaf_pin,
+                            &intermediate_pin,
+                        ),
+                        now,
+                    )
+                    .expect("monotonic concurrent update should install");
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    let requester = {
+        let client = client.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            for _ in 0..24 {
+                assert_eq!(
+                    client
+                        .get_text("/health")
+                        .await
+                        .expect("request should observe a complete valid pin state"),
+                    OK_BODY
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    barrier.wait().await;
+    updater.await.expect("updater task should join");
+    requester.await.expect("requester task should join");
+}
+
+#[tokio::test]
+#[serial]
 async fn startup_rejects_a_valid_signed_cache_below_the_embedded_version_floor() {
     let server = TestTlsServer::start(test_chain(API_HOST, false), OK_BODY.to_string()).await;
     let signing_key = random_signing_key();
@@ -661,6 +1075,103 @@ async fn startup_rejects_a_valid_signed_cache_below_the_embedded_version_floor()
     assert_eq!(
         PinnedApiClient::new(policy).expect_err("cache below embedded floor must fail closed"),
         CloudflareError::Integrity(IntegrityFailure::PinsetRollback)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn startup_accepts_a_current_signed_cache_at_the_embedded_version_floor() {
+    let now = 1_800_000_000;
+    let clock = ManualClock::new(now);
+    let server = TestTlsServer::start(test_chain(API_HOST, false), OK_BODY.to_string()).await;
+    let signing_key = random_signing_key();
+    let envelope = signed_pinset_for_host(
+        &signing_key,
+        2,
+        API_HOST,
+        now - 60,
+        now + 3_600,
+        &server.leaf_pin,
+        &server.intermediate_pin,
+    );
+    let cache = TempDir::new().expect("cache directory should be created");
+    let cache_path = cache.path().join("pinset.json");
+    std::fs::write(
+        &cache_path,
+        serde_json::to_vec(&envelope).expect("signed envelope should serialize"),
+    )
+    .expect("signed cache should be written");
+    let policy = policy_for_clock(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        Some(&cache_path),
+        2,
+        &clock,
+    );
+
+    assert_eq!(
+        PinnedApiClient::new(policy)
+            .expect("valid cache at the embedded floor should load")
+            .get_text("/health")
+            .await
+            .expect("loaded cache should authorize the API request"),
+        OK_BODY
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn cross_host_https_redirect_is_an_endpoint_integrity_failure() {
+    let server = TestTlsServer::start_with_response(
+        test_chain(API_HOST, false),
+        TestResponse::redirect("https://redirect.invalid/steal"),
+    )
+    .await;
+    let signing_key = random_signing_key();
+    let policy = policy_for(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+    );
+
+    assert_eq!(
+        PinnedApiClient::new(policy)
+            .expect("pinned client should build")
+            .get_text("/redirect")
+            .await
+            .expect_err("cross-host redirect must be rejected without following it"),
+        CloudflareError::Integrity(IntegrityFailure::InvalidApiEndpoint)
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn https_to_http_redirect_is_an_endpoint_integrity_failure() {
+    let server = TestTlsServer::start_with_response(
+        test_chain(API_HOST, false),
+        TestResponse::redirect("http://127.0.0.1:9/downgrade"),
+    )
+    .await;
+    let signing_key = random_signing_key();
+    let policy = policy_for(
+        &server,
+        roots([server.root_der.clone()]),
+        vec![server.leaf_pin.clone()],
+        signing_key.verifying_key(),
+        None,
+    );
+
+    assert_eq!(
+        PinnedApiClient::new(policy)
+            .expect("pinned client should build")
+            .get_text("/redirect")
+            .await
+            .expect_err("HTTPS-to-HTTP redirect must be rejected without following it"),
+        CloudflareError::Integrity(IntegrityFailure::InvalidApiEndpoint)
     );
 }
 

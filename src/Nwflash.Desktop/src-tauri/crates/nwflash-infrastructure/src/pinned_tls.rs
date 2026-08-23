@@ -1,10 +1,14 @@
 use std::{
     error::Error as StdError,
     fmt::{self, Debug, Formatter},
-    fs,
+    fs::{self, OpenOptions},
+    io::{self, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -40,8 +44,10 @@ pub const EMBEDDED_PINSET_VERSION_FLOOR: u64 = 1;
 const API_BASE_URL: &str = "https://api.nwflash.cc.cd";
 const PINSET_CACHE_FILE: &str = "nwflash-api-pinset.json";
 const MAX_PINSET_CACHE_BYTES: u64 = 16 * 1024;
+static CACHE_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 type SpkiDigest = [u8; 32];
+type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum IntegrityFailure {
@@ -122,6 +128,7 @@ pub struct ApiTlsPolicy {
     cache_path: Option<PathBuf>,
     resolve_to: Option<SocketAddr>,
     embedded_version_floor: u64,
+    clock: Clock,
 }
 
 impl Debug for ApiTlsPolicy {
@@ -138,12 +145,12 @@ impl Debug for ApiTlsPolicy {
 }
 
 impl ApiTlsPolicy {
-    pub fn production() -> Result<Self, IntegrityFailure> {
+    pub(crate) fn production() -> Result<Self, IntegrityFailure> {
         let encoded_key = option_env!("NWFLASH_SESSION_VERIFY_KEY_B64")
             .ok_or(IntegrityFailure::MissingVerificationKey)?;
         let verifying_key = decode_verifying_key(encoded_key)?;
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        Self::injected_with_floor(
+        Self::build(
             API_BASE_URL,
             roots,
             vec![
@@ -157,6 +164,7 @@ impl ApiTlsPolicy {
         )
     }
 
+    #[cfg(debug_assertions)]
     pub fn injected(
         base_url: impl AsRef<str>,
         roots: RootCertStore,
@@ -178,7 +186,35 @@ impl ApiTlsPolicy {
 
     /// Explicit dependency-injected construction for local integration tests.
     /// Production callers must use [`Self::production`].
+    #[cfg(debug_assertions)]
     pub fn injected_with_floor(
+        base_url: impl AsRef<str>,
+        roots: RootCertStore,
+        initial_pins: Vec<String>,
+        verifying_key: VerifyingKey,
+        cache_path: Option<PathBuf>,
+        resolve_to: Option<SocketAddr>,
+        embedded_version_floor: u64,
+    ) -> Result<Self, IntegrityFailure> {
+        Self::build(
+            base_url,
+            roots,
+            initial_pins,
+            verifying_key,
+            cache_path,
+            resolve_to,
+            embedded_version_floor,
+        )
+    }
+
+    /// Replaces the system clock only for local debug/test integration.
+    #[cfg(debug_assertions)]
+    pub fn with_clock_for_test(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    fn build(
         base_url: impl AsRef<str>,
         roots: RootCertStore,
         initial_pins: Vec<String>,
@@ -200,6 +236,7 @@ impl ApiTlsPolicy {
             cache_path,
             resolve_to,
             embedded_version_floor,
+            clock: Arc::new(unix_now),
         })
     }
 }
@@ -208,7 +245,9 @@ impl ApiTlsPolicy {
 pub struct PinnedApiClient {
     base_url: Url,
     http: Client,
+    bootstrap_http: Client,
     pinsets: Arc<PinsetController>,
+    clock: Clock,
 }
 
 impl Debug for PinnedApiClient {
@@ -222,6 +261,7 @@ impl Debug for PinnedApiClient {
 
 impl PinnedApiClient {
     pub fn new(policy: ApiTlsPolicy) -> CloudflareResult<Self> {
+        let bootstrap_pins = policy.initial_pins.clone();
         let pinsets = Arc::new(PinsetController::new(
             policy.initial_pins,
             policy.verifying_key,
@@ -229,45 +269,27 @@ impl PinnedApiClient {
             policy.embedded_version_floor,
         ));
         pinsets
-            .load_cached(unix_now())
+            .load_cached((policy.clock)())
             .map_err(CloudflareError::Integrity)?;
-
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(
-            Arc::new(policy.roots),
-            provider.clone(),
-        )
-        .build()
-        .map_err(|_| CloudflareError::Integrity(IntegrityFailure::TlsConfiguration))?;
-        let verifier = Arc::new(SpkiServerVerifier {
-            webpki,
-            pins: pinsets.state.clone(),
-        });
-        let mut config = ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .map_err(|_| CloudflareError::Integrity(IntegrityFailure::TlsConfiguration))?
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth();
-        config.key_log = Arc::new(rustls::NoKeyLog);
-        debug_assert!(!config.key_log.will_log("CLIENT_RANDOM"));
-
-        let mut builder = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .no_proxy()
-            .https_only(true)
-            .use_preconfigured_tls(config);
-        if let Some(address) = policy.resolve_to {
-            builder = builder.resolve(API_HOST, address);
-        }
-        let http = builder
-            .build()
-            .map_err(|_| CloudflareError::Integrity(IntegrityFailure::TlsConfiguration))?;
+        let http = build_http_client(
+            policy.roots.clone(),
+            pinsets.state.clone(),
+            policy.resolve_to,
+        )?;
+        let bootstrap_state = Arc::new(RwLock::new(PinState {
+            version: policy.embedded_version_floor,
+            payload: None,
+            pins: bootstrap_pins,
+            validity: None,
+        }));
+        let bootstrap_http = build_http_client(policy.roots, bootstrap_state, policy.resolve_to)?;
 
         Ok(Self {
             base_url: policy.base_url,
             http,
+            bootstrap_http,
             pinsets,
+            clock: policy.clock,
         })
     }
 
@@ -275,22 +297,36 @@ impl PinnedApiClient {
         self.base_url.as_str().trim_end_matches('/')
     }
 
+    #[cfg(debug_assertions)]
     pub async fn get_text(&self, relative_path: &str) -> CloudflareResult<String> {
         let response = self.get(relative_path).await?;
         response.text().await.map_err(classify_reqwest_error)
     }
 
+    #[cfg(debug_assertions)]
     pub async fn get(&self, relative_path: &str) -> CloudflareResult<Response> {
+        self.ensure_active()?;
         let url = self.url(relative_path)?;
-        self.http
+        let response = self
+            .http
             .get(url)
             .send()
             .await
-            .map_err(classify_reqwest_error)
+            .map_err(classify_reqwest_error)?;
+        self.validate_response(&response)?;
+        Ok(response)
     }
 
     pub async fn refresh_pinset_at(&self, now: i64) -> CloudflareResult<PinsetClaims> {
-        let body = self.get_text("/api/security/pins").await?;
+        let url = self.url("/api/security/pins")?;
+        let http = match self.pinsets.ensure_active_at(now) {
+            Ok(()) => &self.http,
+            Err(IntegrityFailure::PinsetTime) => &self.bootstrap_http,
+            Err(error) => return Err(CloudflareError::Integrity(error)),
+        };
+        let response = http.get(url).send().await.map_err(classify_reqwest_error)?;
+        self.validate_response(&response)?;
+        let body = response.text().await.map_err(classify_reqwest_error)?;
         let envelope = serde_json::from_str::<SignedPinsetEnvelope>(&body)
             .map_err(|_| CloudflareError::Integrity(IntegrityFailure::PinsetEnvelope))?;
         self.install_pinset_at(envelope, now)
@@ -298,7 +334,7 @@ impl PinnedApiClient {
     }
 
     pub async fn refresh_pinset(&self) -> CloudflareResult<PinsetClaims> {
-        self.refresh_pinset_at(unix_now()).await
+        self.refresh_pinset_at((self.clock)()).await
     }
 
     pub fn install_pinset_at(
@@ -309,12 +345,31 @@ impl PinnedApiClient {
         self.pinsets.install(envelope, now, true)
     }
 
+    #[cfg(debug_assertions)]
     pub fn reload_cached_pinset_at(&self, now: i64) -> Result<(), IntegrityFailure> {
         self.pinsets.load_cached(now)
     }
 
     pub(crate) fn http_client(&self) -> Client {
         self.http.clone()
+    }
+
+    pub(crate) fn ensure_active(&self) -> CloudflareResult<()> {
+        self.pinsets
+            .ensure_active_at((self.clock)())
+            .map_err(CloudflareError::Integrity)
+    }
+
+    pub(crate) fn validate_response(&self, response: &Response) -> CloudflareResult<()> {
+        if response.status().is_redirection()
+            || response.url().scheme() != "https"
+            || response.url().host_str() != Some(API_HOST)
+        {
+            return Err(CloudflareError::Integrity(
+                IntegrityFailure::InvalidApiEndpoint,
+            ));
+        }
+        Ok(())
     }
 
     fn url(&self, relative_path: &str) -> CloudflareResult<Url> {
@@ -336,11 +391,54 @@ impl PinnedApiClient {
     }
 }
 
+fn build_http_client(
+    roots: RootCertStore,
+    pins: Arc<RwLock<PinState>>,
+    resolve_to: Option<SocketAddr>,
+) -> CloudflareResult<Client> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .map_err(|_| CloudflareError::Integrity(IntegrityFailure::TlsConfiguration))?;
+    let verifier = Arc::new(SpkiServerVerifier { webpki, pins });
+    let mut config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| CloudflareError::Integrity(IntegrityFailure::TlsConfiguration))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    config.key_log = Arc::new(rustls::NoKeyLog);
+    debug_assert!(!config.key_log.will_log("CLIENT_RANDOM"));
+
+    let mut builder = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .no_proxy()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .use_preconfigured_tls(config);
+    if let Some(address) = resolve_to {
+        builder = builder.resolve(API_HOST, address);
+    }
+    builder
+        .build()
+        .map_err(|_| CloudflareError::Integrity(IntegrityFailure::TlsConfiguration))
+}
+
 #[derive(Debug)]
 struct PinState {
     version: u64,
     payload: Option<String>,
     pins: Vec<SpkiDigest>,
+    validity: Option<PinValidity>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PinValidity {
+    not_before: i64,
+    expires_at: i64,
 }
 
 #[derive(Debug)]
@@ -369,6 +467,7 @@ impl PinsetController {
                 version: embedded_version_floor,
                 payload: None,
                 pins: initial_pins,
+                validity: None,
             })),
             verifying_key,
             cache_path,
@@ -392,6 +491,20 @@ impl PinsetController {
         let envelope = serde_json::from_slice::<SignedPinsetEnvelope>(&bytes)
             .map_err(|_| IntegrityFailure::PinsetEnvelope)?;
         self.install(envelope, now, false).map(|_| ())
+    }
+
+    fn ensure_active_at(&self, now: i64) -> Result<(), IntegrityFailure> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| IntegrityFailure::PinsetCache)?;
+        if state
+            .validity
+            .is_some_and(|validity| now < validity.not_before || now >= validity.expires_at)
+        {
+            return Err(IntegrityFailure::PinsetTime);
+        }
+        Ok(())
     }
 
     fn install(
@@ -433,6 +546,10 @@ impl PinsetController {
         state.version = claims.version;
         state.payload = Some(envelope.pinset_payload);
         state.pins = pins;
+        state.validity = Some(PinValidity {
+            not_before: claims.not_before,
+            expires_at: claims.expires_at,
+        });
         Ok(claims)
     }
 }
@@ -653,11 +770,90 @@ fn persist_envelope(
     cache_path: &Path,
     envelope: &SignedPinsetEnvelope,
 ) -> Result<(), IntegrityFailure> {
+    persist_envelope_with_replace(cache_path, envelope, atomic_replace)
+}
+
+fn persist_envelope_with_replace<F>(
+    cache_path: &Path,
+    envelope: &SignedPinsetEnvelope,
+    replace: F,
+) -> Result<(), IntegrityFailure>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
     if let Some(parent) = cache_path.parent() {
         fs::create_dir_all(parent).map_err(|_| IntegrityFailure::PinsetCache)?;
     }
     let bytes = serde_json::to_vec(envelope).map_err(|_| IntegrityFailure::PinsetEnvelope)?;
-    fs::write(cache_path, bytes).map_err(|_| IntegrityFailure::PinsetCache)
+    let parent = cache_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = cache_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(IntegrityFailure::PinsetCache)?;
+    let nonce = CACHE_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+    let temporary_path = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+    let result = (|| -> io::Result<()> {
+        let mut temporary = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary_path)?;
+        temporary.write_all(&bytes)?;
+        temporary.sync_all()?;
+        drop(temporary);
+        replace(&temporary_path, cache_path)?;
+        sync_cache_directory(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result.map_err(|_| IntegrityFailure::PinsetCache)
+}
+
+#[cfg(windows)]
+fn atomic_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let from = from
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let to = to
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+#[cfg(unix)]
+fn sync_cache_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_cache_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn default_cache_path() -> PathBuf {
@@ -689,6 +885,41 @@ mod tests {
         assert_eq!(
             decode_verifying_key(&STANDARD.encode([0_u8; 31])),
             Err(IntegrityFailure::InvalidVerificationKey)
+        );
+    }
+
+    #[test]
+    fn failed_atomic_cache_replacement_preserves_the_previous_signed_envelope() {
+        let directory = tempfile::TempDir::new().expect("cache test directory should exist");
+        let cache_path = directory.path().join("pinset.json");
+        let previous = SignedPinsetEnvelope {
+            pinset_payload: "previous-payload".to_string(),
+            pinset_signature: "previous-signature".to_string(),
+        };
+        let replacement = SignedPinsetEnvelope {
+            pinset_payload: "replacement-payload".to_string(),
+            pinset_signature: "replacement-signature".to_string(),
+        };
+        let previous_bytes =
+            serde_json::to_vec(&previous).expect("previous cache should serialize");
+        fs::write(&cache_path, &previous_bytes).expect("previous cache should be written");
+
+        let error = persist_envelope_with_replace(&cache_path, &replacement, |_, _| {
+            Err(std::io::Error::other("injected replace failure"))
+        })
+        .expect_err("failed replacement must be reported");
+
+        assert_eq!(error, IntegrityFailure::PinsetCache);
+        assert_eq!(
+            fs::read(&cache_path).expect("previous cache should remain readable"),
+            previous_bytes
+        );
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("cache directory should be readable")
+                .count(),
+            1,
+            "failed replacement must clean the same-directory temporary file"
         );
     }
 }

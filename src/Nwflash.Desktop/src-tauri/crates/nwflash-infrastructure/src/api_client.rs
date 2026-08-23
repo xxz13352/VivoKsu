@@ -1,7 +1,7 @@
-use std::{
-    fmt::{self, Display, Formatter},
-    time::Duration,
-};
+use std::fmt::{self, Display, Formatter};
+
+#[cfg(debug_assertions)]
+use std::time::Duration;
 
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
@@ -188,6 +188,7 @@ pub struct CloudflareClient {
 
 impl CloudflareClient {
     /// Explicit non-production constructor for wiremock and local adapters.
+    #[cfg(debug_assertions)]
     pub fn new_injected(base_url: impl Into<String>, app_version: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -204,7 +205,15 @@ impl CloudflareClient {
         }
     }
 
+    #[cfg(debug_assertions)]
     pub fn new_pinned(
+        policy: ApiTlsPolicy,
+        app_version: impl Into<String>,
+    ) -> CloudflareResult<Self> {
+        Self::from_pinned_policy(policy, app_version)
+    }
+
+    fn from_pinned_policy(
         policy: ApiTlsPolicy,
         app_version: impl Into<String>,
     ) -> CloudflareResult<Self> {
@@ -219,7 +228,7 @@ impl CloudflareClient {
 
     pub fn new_default() -> CloudflareResult<Self> {
         let policy = ApiTlsPolicy::production().map_err(CloudflareError::Integrity)?;
-        Self::new_pinned(policy, DEFAULT_APP_VERSION)
+        Self::from_pinned_policy(policy, DEFAULT_APP_VERSION)
     }
 
     pub fn base_url(&self) -> &str {
@@ -274,6 +283,7 @@ impl CloudflareClient {
         pd: &str,
         version: &str,
     ) -> CloudflareResult<RomResolveResponse> {
+        self.ensure_integrity_ready()?;
         if pd.trim().is_empty() || version.trim().is_empty() {
             return Err(CloudflareError::InvalidInput(
                 "pd/version 不能为空".to_string(),
@@ -294,6 +304,7 @@ impl CloudflareClient {
             .send()
             .await
             .map_err(classify_reqwest_error)?;
+        self.ensure_integrity_response(&response)?;
         let body = self.handle_api_error(response).await?;
         self.parse_json(body).await
     }
@@ -383,6 +394,7 @@ impl CloudflareClient {
     pub async fn check_version_policy(
         &self,
     ) -> CloudflareResult<super::version_client::VersionCheckResponse> {
+        self.ensure_integrity_ready()?;
         let mut request_url = Url::parse(&self.url("/api/app/version"))
             .map_err(|err| CloudflareError::Transport(format!("构造请求失败: {err}")))?;
         request_url
@@ -396,6 +408,7 @@ impl CloudflareClient {
             .send()
             .await
             .map_err(classify_reqwest_error)?;
+        self.ensure_integrity_response(&response)?;
         let body = self.handle_api_error(response).await?;
         self.parse_json::<super::version_client::VersionCheckResponse>(body)
             .await
@@ -420,6 +433,7 @@ impl CloudflareClient {
         token: Option<&str>,
         body: Option<&T>,
     ) -> CloudflareResult<Response> {
+        self.ensure_integrity_ready()?;
         let builder = self
             .http
             .request(method, self.url(relative_path))
@@ -432,8 +446,23 @@ impl CloudflareClient {
         };
 
         let response = request.send().await.map_err(classify_reqwest_error)?;
+        self.ensure_integrity_response(&response)?;
 
         Ok(response)
+    }
+
+    fn ensure_integrity_ready(&self) -> CloudflareResult<()> {
+        if let Some(pinned) = self.pinned.as_ref() {
+            pinned.ensure_active()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_integrity_response(&self, response: &Response) -> CloudflareResult<()> {
+        if let Some(pinned) = self.pinned.as_ref() {
+            pinned.validate_response(response)?;
+        }
+        Ok(())
     }
 
     async fn handle_api_error(&self, response: Response) -> CloudflareResult<String> {

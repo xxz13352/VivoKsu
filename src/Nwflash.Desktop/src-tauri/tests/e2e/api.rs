@@ -20,7 +20,7 @@ fn temporary_directory(label: &str) -> PathBuf {
 }
 
 #[tokio::test]
-async fn cloudflare_authorization_failure_never_becomes_an_allowed_operation() {
+async fn cloudflare_authorization_503_is_reported_as_an_api_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/operation/authorize"))

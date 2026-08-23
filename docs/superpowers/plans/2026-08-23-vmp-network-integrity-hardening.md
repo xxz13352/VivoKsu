@@ -84,14 +84,15 @@
 **Interfaces:**
 - `PinnedApiClient::new(ApiTlsPolicy)` with exact host `api.nwflash.cc.cd`.
 - Built-in SHA-256 SPKI pins for current leaf and WE1 intermediate.
-- Signed cached pinset accepted only after lease public-key verification and monotonic version checks.
+- Signed cached pinset accepted only after public-key verification, signed time checks, the release embedded version floor, and current-process high-water checks. No tamper-proof cross-start monotonic storage is claimed for an attacker-controlled host; Task 8 raises the floor/key for releases.
 - `CloudflareError::Integrity(IntegrityFailure)` distinguishes pin/lease failures from transport failures.
+- Custom root/pin/resolver/key and unpinned HTTP adapters are debug/test-only; release exports only the exact production pinned path.
 
 - [ ] Write RED tests for valid chain+pin, valid chain+wrong pin, private proxy root, wrong DNS, expired certificate, proxy environment ignored, signed pin rotation, tampered cache and version rollback.
 - [ ] Run the targeted infrastructure tests and confirm RED.
 - [ ] Implement a rustls `ServerCertVerifier` that delegates WebPKI hostname/time/chain and TLS signature checks first, then parses leaf/intermediates and matches SHA-256 of SubjectPublicKeyInfo.
-- [ ] Build reqwest with preconfigured rustls, `no_proxy()`, no invalid-certificate bypass and no TLS key logging; enforce HTTPS and exact host for API endpoints.
-- [ ] Persist only signed public pin data, verify it on every load, and preserve independent clients for firmware/ROM downloads.
+- [ ] Build reqwest with preconfigured rustls, `no_proxy()`, no redirects, no invalid-certificate bypass and no TLS key logging; enforce HTTPS and exact host for API endpoints and classify every 3xx as endpoint integrity failure.
+- [ ] Persist only the signed public envelope using same-directory atomic replacement, verify signature/host/time/release-floor/current-process-high-water on load/use, and preserve independent clients for firmware/ROM downloads.
 - [ ] Update login/heartbeat DTOs for envelopes and classify pin failures as integrity events.
 - [ ] Run targeted tests and commit `feat(network): pin nwflash api certificates`.
 
