@@ -51,6 +51,7 @@
 - Delete 'cloudflare/user/src/user.html': remove the old monolithic glass UI after the Worker imports the new portal.
 - Rewrite 'cloudflare/user/README.md': current architecture, API, security, test, and no-deploy instructions.
 - Create 'cloudflare/user/docs/client-api-handoff.md': frozen user API and the shared API Worker revoked-marker requirement for later client integration.
+- Create 'cloudflare/user/docs/architecture.md': user-portal-only module tree, authentication/revocation, session/activity data flow, route state, security, tests, and deployment boundary.
 
 ---
 
@@ -469,6 +470,7 @@ git commit -m "feat(user): enforce personal ops contracts"
 - Delete: 'cloudflare/user/src/user.html'
 - Modify: 'cloudflare/user/README.md'
 - Create: 'cloudflare/user/docs/client-api-handoff.md'
+- Create: 'cloudflare/user/docs/architecture.md'
 
 **Interfaces:**
 - Consumes: the verified UI and Worker contracts from Tasks 1–2.
@@ -512,7 +514,22 @@ duration, retry count, exit code, safe error category, and remediation. It must
 not store user-visible partition, command, raw output, serial, path, token, or
 signed URL fields. Do not edit the shared schema in this task.
 
-- [ ] **Step 4: Run full verification**
+- [ ] **Step 4: Write the user portal subsystem architecture**
+
+Document only 'cloudflare/user'; do not write a full-project architecture.
+Include:
+
+- module tree and one responsibility per HTML/CSS/client/Worker/test file;
+- HttpOnly cookie login and revoked-marker password flow;
+- activity list/detail ownership and sanitization data flow;
+- session list, kick pending, poll, and confirmed-disappearance data flow;
+- 'view/type/status/activity' URL state and back/forward behavior;
+- CSP, XSS, CSRF, cookie, IP masking, and 404 security boundaries;
+- UI and Workerd test layers;
+- local verification and explicit no-deploy boundary;
+- later shared API/client handoff boundary.
+
+- [ ] **Step 5: Run full verification**
 
 Run from 'cloudflare/user':
 
@@ -528,13 +545,13 @@ git diff --check
 git status --short
 ~~~
 
-Expected: all user tests and dry-run build pass, diff check is clean, and no
-'cloudflare/user/.wrangler/' entry remains in final status.
+Expected: all user tests and dry-run build pass and diff check is clean.
+Wrangler output is removed only after the final independent reviews complete.
 
-- [ ] **Step 5: Commit documentation and deletion**
+- [ ] **Step 6: Commit documentation and deletion**
 
 ~~~powershell
-git add -- cloudflare/user/README.md cloudflare/user/docs/client-api-handoff.md
+git add -- cloudflare/user/README.md cloudflare/user/docs/client-api-handoff.md cloudflare/user/docs/architecture.md
 git rm -- cloudflare/user/src/user.html
 git commit -m "docs(user): freeze personal ops handoff"
 ~~~
@@ -551,8 +568,13 @@ After the three tasks pass task-scoped reviews:
 3. run a whole-branch code review against this plan;
 4. send one fix wave for any Critical/Important findings, then one scoped
    re-review;
-5. remove only the verified 'cloudflare/user/.wrangler/' directory after
+5. stop the visual companion server, then resolve and remove only this task’s
+   '.superpowers/brainstorm/codex-28468-1787501538' directory after confirming
+   it remains below the repository '.superpowers/brainstorm' directory;
+6. remove only the verified 'cloudflare/user/.wrangler/' directory after
    resolving its absolute path and confirming it remains below
    'cloudflare/user';
-6. freeze the final API contract and notify the coordinating task;
-7. do not deploy.
+7. run final 'git status --short' and verify no Wrangler or preview artifacts
+   remain;
+8. freeze the final API contract and notify the coordinating task;
+9. do not deploy.
