@@ -34,7 +34,6 @@ interface StoredIntegrityEvent {
 }
 
 interface StoredIntegrityClaim {
-  outcome: "pending" | "accepted" | "rejected";
   claimToken: string;
 }
 
@@ -62,6 +61,7 @@ class FakeD1Database {
   readonly integrityEvents = new Map<string, StoredIntegrityEvent>();
   readonly integrityClaims = new Map<string, StoredIntegrityClaim>();
   readonly rateLimits = new Map<string, number>();
+  readonly rateEventIds = new Map<string, string>();
   private integrityClaimTarget = 0;
   private integrityClaimCount = 0;
   private releaseIntegrityClaims: (() => void) | null = null;
@@ -163,24 +163,26 @@ class FakeD1Database {
     const claimSnapshot = new Map([...this.integrityClaims].map(([key, value]) => [key, { ...value }]));
     const eventSnapshot = new Map([...this.integrityEvents].map(([key, value]) => [key, { ...value }]));
     const rateSnapshot = new Map(this.rateLimits);
+    const rateEventSnapshot = new Map(this.rateEventIds);
     try {
       const [eventIdValue, claimTokenValue] = statements[0].bindings();
       const eventId = String(eventIdValue);
       const claimToken = String(claimTokenValue);
-      if (this.integrityClaims.has(eventId)) return emptyIntegrityBatchResults();
+      if (this.integrityEvents.has(eventId) || this.integrityClaims.has(eventId)) return emptyIntegrityBatchResults();
 
-      this.integrityClaims.set(eventId, { outcome: "pending", claimToken });
+      this.integrityClaims.set(eventId, { claimToken });
       if (this.consumeRateUpdateFailure()) throw new Error("injected integrity rate update failure");
 
-      const [ipHashValue, windowStartValue] = statements[1].bindings();
+      const [ipHashValue, windowStartValue, billedEventIdValue] = statements[1].bindings();
       const rateKey = `${String(ipHashValue)}|${Number(windowStartValue)}`;
-      const count = (this.rateLimits.get(rateKey) ?? this.consumeInitialRateCount()) + 1;
+      const billedEventId = String(billedEventIdValue);
+      const previousCount = this.rateLimits.get(rateKey) ?? this.consumeInitialRateCount();
+      const count = this.rateEventIds.get(rateKey) === billedEventId ? previousCount : previousCount + 1;
       this.rateLimits.set(rateKey, count);
-      const outcome = count <= 20 ? "accepted" : "rejected";
-      this.integrityClaims.set(eventId, { outcome, claimToken });
+      this.rateEventIds.set(rateKey, billedEventId);
 
-      if (outcome === "accepted") {
-        const [storedEventId, userId, trusted, phase, reason, clientVersion, buildId, occurredAt] = statements[3].bindings();
+      if (count <= 20) {
+        const [storedEventId, userId, trusted, phase, reason, clientVersion, buildId, occurredAt] = statements[2].bindings();
         this.integrityEvents.set(eventId, {
           eventId: String(storedEventId),
           userId: userId == null ? null : Number(userId),
@@ -192,17 +194,19 @@ class FakeD1Database {
           occurredAt: Number(occurredAt),
         });
       }
+      this.integrityClaims.delete(eventId);
 
       return [
         d1Rows([{ claim_token: claimToken }]),
         d1Rows([{ count }]),
-        d1Rows([{ outcome }]),
-        d1Rows(outcome === "accepted" ? [{ event_id: eventId }] : []),
+        d1Rows(count <= 20 ? [{ event_id: eventId }] : []),
+        d1Rows([{ event_id: eventId }]),
       ];
     } catch (error) {
       restoreMap(this.integrityClaims, claimSnapshot);
       restoreMap(this.integrityEvents, eventSnapshot);
       restoreMap(this.rateLimits, rateSnapshot);
+      restoreMap(this.rateEventIds, rateEventSnapshot);
       throw error;
     }
   }
@@ -250,9 +254,9 @@ class FakeD1PreparedStatement {
     if (sql.includes("from session_leases where session_id = ?")) {
       return (this.db.sessionLeases.get(String(this.values[0])) ?? null) as T | null;
     }
-    if (sql.includes("from integrity_event_claims where event_id = ?")) {
-      const claim = this.db.integrityClaims.get(String(this.values[0]));
-      return (claim ? { outcome: claim.outcome } : null) as T | null;
+    if (sql.includes("from integrity_events where event_id = ?")) {
+      const event = this.db.integrityEvents.get(String(this.values[0]));
+      return (event ? { event_id: event.eventId } : null) as T | null;
     }
     if (sql.startsWith("insert into session_leases")) {
       const [sessionId, userId, username, clientVersion, buildId, processNonce, createdAt, updatedAt] = this.values;
@@ -1068,7 +1072,7 @@ describe("integrity telemetry route", () => {
     expect(statuses.filter((status) => status === 202)).toHaveLength(1);
     expect(statuses.filter((status) => status === 200)).toHaveLength(concurrency - 1);
     expect(db.integrityEvents.size).toBe(1);
-    expect(db.integrityClaims.get("event-concurrent-idempotent")?.outcome).toBe("accepted");
+    expect(db.integrityClaims.size).toBe(0);
     expect(totalRateCount(db)).toBe(1);
   });
 
@@ -1086,7 +1090,7 @@ describe("integrity telemetry route", () => {
 
     expect(responses.map((response) => response.status).sort()).toEqual([429, 429]);
     expect(db.integrityEvents.size).toBe(0);
-    expect(db.integrityClaims.get("event-concurrent-over-quota")?.outcome).toBe("rejected");
+    expect(db.integrityClaims.size).toBe(0);
     expect(totalRateCount(db)).toBe(21);
   });
 
@@ -1106,7 +1110,42 @@ describe("integrity telemetry route", () => {
     expect(statuses).toEqual([202, 500]);
     expect(statuses).not.toContain(200);
     expect(db.integrityEvents.size).toBe(1);
-    expect(db.integrityClaims.get("event-concurrent-rate-error")?.outcome).toBe("accepted");
+    expect(db.integrityClaims.size).toBe(0);
     expect(totalRateCount(db)).toBe(1);
+  });
+
+  it("does not accumulate temporary claims across many unique over-quota event IDs", async () => {
+    const { env, db } = await testEnv();
+    const attempts = 64;
+    db.seedRateCount(20);
+
+    const responses = await Promise.all(Array.from({ length: attempts }, (_, index) =>
+      fetchWorker(env, "/api/integrity/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.34" },
+        body: JSON.stringify(telemetry(`event-over-quota-unique-${index}`)),
+      }),
+    ));
+
+    expect(responses.every((response) => response.status === 429)).toBe(true);
+    expect(db.integrityEvents.size).toBe(0);
+    expect(db.integrityClaims.size).toBe(0);
+    expect(totalRateCount(db)).toBe(20 + attempts);
+  });
+
+  it("rolls a failed rate update back without leaving an event or temporary claim", async () => {
+    const { env, db } = await testEnv();
+    db.failNextRateUpdate();
+
+    const response = await fetchWorker(env, "/api/integrity/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.35" },
+      body: JSON.stringify(telemetry("event-rate-error-no-contender")),
+    });
+
+    expect(response.status).toBe(500);
+    expect(db.integrityEvents.size).toBe(0);
+    expect(db.integrityClaims.size).toBe(0);
+    expect(totalRateCount(db)).toBe(0);
   });
 });

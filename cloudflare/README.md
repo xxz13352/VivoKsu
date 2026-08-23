@@ -44,11 +44,13 @@ npx wrangler secret put VOTA_API_TOKEN    # 粘贴 VOTA 的 API Token
 npx wrangler secret put SESSION_SIGNING_PRIVATE_KEY_PKCS8  # 无填充 base64url PKCS#8 Ed25519 DER
 npm test
 npm run typecheck             # strict tsc + Wrangler dry-run,不会部署
+npm run test:workerd          # 实际 Workerd Worker route + 隔离 D1 集成套件
 npm run deploy                # 预检远端签名 secret 后部署
 ```
 
 > D1(`nwflash-db`)建库 / 建表见 [web/README.md](web/README.md);`/api/rom` 依赖 D1 做版本控制与访问日志。
 > 必须先应用 `web/schema.sql` 中的 `session_leases`、`integrity_event_claims`、`integrity_events` 与 `integrity_rate_limits` 表。`npm run deploy` 缺少 `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 时失败;不要直接调用 `wrangler deploy` 绕过预检。
+> `npm test` 保留 Node + controlled D1 fake 的确定性边界测试;`npm run test:workerd` 使用 `@cloudflare/vitest-plugin` 在实际 Workerd runtime 中运行 Worker route 和隔离 D1。集成配置每次从 `web/schema.sql` 生成临时迁移并在运行时生成临时 Ed25519 key,不读取或写入生产 secret/remote D1。
 
 部署后验证:
 

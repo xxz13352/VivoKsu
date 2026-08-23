@@ -82,7 +82,7 @@
 - `reason` 闭集:`image_crc_invalid`、`lease_signature_invalid`、`lease_binding_invalid`、`lease_expired`、`sequence_rollback`、`pin_mismatch`、`debugger_detected`、`virtual_machine_detected`、`authenticode_invalid`、`release_manifest_invalid`。
 - `event_id`、`build_id` 只允许 URL-safe 标识字符;时间为正整数 epoch 秒。
 
-服务端用单个 D1 transactional batch 完成 event claim、条件配额递增、accepted/rejected outcome 提交和 accepted event 写入。`integrity_event_claims` 的 `pending` 只存在于事务内部;外部请求只能看到已提交的 `accepted` 或 `rejected`。并发重复请求只有在 outcome 已 durable accepted 时返回 `200 { "ok": true, "duplicate": true }`;rejected claim 的重复请求返回 `429`。每个 IP 的 SHA-256 base64url 摘要按 60 秒窗口最多接收 20 个不同事件;第 21 个提交 rejected outcome 且不写 `integrity_events`。若配额语句报错,整个 batch(含 pending claim)回滚,竞争请求可重新认领,不会观察到 provisional success。首次 accepted 返回 `202`;D1 不保存原始 IP。请求体超限返回 `413`。
+服务端用单个 D1 transactional batch 完成临时 owner claim、条件配额递增、accepted event 写入和 owner-scoped claim 删除。claim 插入同时要求 `integrity_events` 尚无该 event ID;batch 最后一条语句按 event ID + 随机 claim token 删除临时行,因此提交后 `integrity_event_claims` 必须为空,over-quota 唯一 ID 也不会形成持久存储。并发重复请求只有在 durable `integrity_events` 行已存在时返回 `200 { "ok": true, "duplicate": true }`;over-quota 请求均返回 `429` 且不写 event。`integrity_rate_limits` 每个 IP/window 只有一行和一个 `last_event_id` 有界标记,同一 over-quota event 的并发竞争只计费一次,不同唯一 ID 不会扩展行数。若配额语句报错,整个 batch(含临时 claim/marker 更新)回滚,竞争请求可重新认领,不会观察到 provisional success。每个 IP 的 SHA-256 base64url 摘要按 60 秒窗口最多接受 20 个 event;首次 accepted 返回 `202`;D1 不保存原始 IP。请求体超限返回 `413`。
 
 ---
 
@@ -453,6 +453,8 @@ cloudflare/
 ├─ src/index.ts        # Worker 入口:路由 + resolveRom + 心跳/在线 + 完整性遥测
 ├─ src/security.ts     # Ed25519 签名、pin 清单、严格限长遥测解析
 ├─ test/security.test.ts # 实际安全 helper + Worker/D1 边界测试
+├─ test/security.workerd.test.ts # 实际 Workerd Worker route + D1 并发集成测试
+├─ vitest.workerd.config.ts # @cloudflare/vitest-plugin 独立配置 + 运行时临时密钥/迁移
 ├─ wrangler.toml       # 变量与自定义域路由 + Cron 触发器
 ├─ README.md           # 部署/使用说明
 └─ API.md              # 本文档(接口契约)

@@ -130,15 +130,12 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_window ON login_attempts(window_start);
 
--- 完整性 event_id 的事务状态。pending 只存在于 D1 batch 内,提交后仅为 accepted/rejected。
+-- 完整性 event_id 的事务内 owner claim。batch 最后一条语句按 claim_token 删除,提交后必须为空。
 CREATE TABLE IF NOT EXISTS integrity_event_claims (
   event_id TEXT PRIMARY KEY,
   claim_token TEXT NOT NULL,
-  outcome TEXT NOT NULL CHECK (outcome IN ('pending', 'accepted', 'rejected')),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_integrity_claims_outcome ON integrity_event_claims(outcome, updated_at);
 
 -- 客户端完整性事件。只保存闭集枚举和构建元数据;不保存 token/password/path/URL/serial/raw output。
 CREATE TABLE IF NOT EXISTS integrity_events (
@@ -161,6 +158,7 @@ CREATE TABLE IF NOT EXISTS integrity_rate_limits (
   ip_hash TEXT NOT NULL,
   window_start INTEGER NOT NULL,
   count INTEGER NOT NULL DEFAULT 1,
+  last_event_id TEXT NOT NULL DEFAULT '', -- 同窗口最近一次计费 event;有界去重,不保存 rejected claim 行
   PRIMARY KEY (ip_hash, window_start)
 );
 CREATE INDEX IF NOT EXISTS idx_integrity_rate_window ON integrity_rate_limits(window_start);
