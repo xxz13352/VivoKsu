@@ -34,7 +34,25 @@ interface PersistedEventRow {
 
 interface PersistedRunRow {
   run_id: string;
+  api_user_name: string;
+  operation_kind: string;
+  title: string;
+  outcome: string;
+  device_serial: string | null;
+  source_ip: string | null;
+  source_paths_json: string;
+  source_urls_json: string;
+  client_version: string;
+  started_at_ms: number;
+  ended_at_ms: number | null;
+  duration_ms: number | null;
+  error_class: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  final_sequence: number | null;
   trace_complete: number;
+  trace_loss_reason: string | null;
+  credential_redactions_json: string;
 }
 
 interface PersistedChunkRow {
@@ -79,7 +97,7 @@ export async function ingestTraceUploadV2(
         return traceError(409, "TRACE_OWNERSHIP_CONFLICT", "日志标识已属于其他用户。", conflict);
       }
 
-      const prepared = await prepareTraceUpload(env.DB, sanitized.payload);
+      const prepared = await prepareTraceUpload(env.DB, sanitized, user, sourceIp);
       const incomplete = findIncompleteRuns(sanitized.payload, prepared);
       if (incomplete.length > 0) {
         return traceError(422, "TRACE_INCOMPLETE", "日志完整性声明与已提交证据不一致。", incomplete);
@@ -109,7 +127,7 @@ export async function ingestTraceUploadV2(
     if (finalConflict.length > 0) {
       return traceError(409, "TRACE_OWNERSHIP_CONFLICT", "日志标识已属于其他用户。", finalConflict);
     }
-    const finalPrepared = await prepareTraceUpload(env.DB, sanitized.payload);
+    const finalPrepared = await prepareTraceUpload(env.DB, sanitized, user, sourceIp);
     if (!hasTraceItemIds(finalPrepared.pendingWrites)) {
       return traceJson({
         ok: true,
@@ -131,12 +149,22 @@ export async function ingestTraceUploadV2(
 
 async function prepareTraceUpload(
   db: D1Database,
-  payload: TraceUploadRequestV2,
+  sanitized: RedactedTraceUploadV2,
+  user: AuthenticatedTraceUser,
+  sourceIp: string,
 ): Promise<PreparedTraceUpload> {
+  const payload = sanitized.payload;
   const runIds = payload.runs.map((run) => run.run_id);
   const eventIds = payload.events.map((event) => event.event_id);
   const persistedRuns = await readPersistedRuns(db, runIds);
   const persistedRunIds = new Set(persistedRuns.map((run) => run.run_id));
+  const persistedRunById = new Map(persistedRuns.map((run) => [run.run_id, run]));
+  const projectedRunIds = await readProjectedRunIds(
+    db,
+    payload.runs
+      .filter((run) => run.trace_complete && run.outcome !== "running")
+      .map((run) => run.run_id),
+  );
   const completedRunIds = new Set(
     persistedRuns.filter((run) => run.trace_complete === 1).map((run) => run.run_id),
   );
@@ -248,7 +276,16 @@ async function prepareTraceUpload(
       output_chunks: durableChunks,
     },
     pendingWrites: {
-      runs: payload.runs.filter((run) => !persistedRunIds.has(run.run_id)).map((run) => run.run_id),
+      runs: payload.runs
+        .filter((run) => runRequiresMutation(
+          run,
+          persistedRunById.get(run.run_id),
+          projectedRunIds,
+          sanitized,
+          user,
+          sourceIp,
+        ))
+        .map((run) => run.run_id),
       events: newEvents.map((event) => event.event_id),
       output_chunks: newChunks.map((chunk) => chunk.chunk_id),
     },
@@ -268,11 +305,59 @@ function hasTraceItemIds(items: TraceUploadResponseV2["accepted"]): boolean {
 async function readPersistedRuns(db: D1Database, runIds: string[]): Promise<PersistedRunRow[]> {
   if (runIds.length === 0) return [];
   const rows = await db.prepare(
-    `SELECT run_id, trace_complete
+    `SELECT run_id, api_user_name, operation_kind, title, outcome, device_serial, source_ip,
+            source_paths_json, source_urls_json, client_version, started_at_ms, ended_at_ms,
+            duration_ms, error_class, error_code, error_message, final_sequence, trace_complete,
+            trace_loss_reason, credential_redactions_json
      FROM usage_operation_runs
      WHERE run_id IN (${runIds.map(() => "?").join(",")})`,
   ).bind(...runIds).all<PersistedRunRow>();
   return rows.results;
+}
+
+async function readProjectedRunIds(db: D1Database, runIds: string[]): Promise<Set<string>> {
+  if (runIds.length === 0) return new Set();
+  const rows = await db.prepare(
+    `SELECT event_key
+     FROM usage_logs
+     WHERE event_key IN (${runIds.map(() => "?").join(",")})`,
+  ).bind(...runIds).all<{ event_key: string }>();
+  return new Set(rows.results.map((row) => row.event_key));
+}
+
+function runRequiresMutation(
+  run: TraceUploadRequestV2["runs"][number],
+  persisted: PersistedRunRow | undefined,
+  projectedRunIds: ReadonlySet<string>,
+  sanitized: RedactedTraceUploadV2,
+  user: AuthenticatedTraceUser,
+  sourceIp: string,
+): boolean {
+  if (!persisted) return true;
+  const projectionPending = run.trace_complete
+    && run.outcome !== "running"
+    && !projectedRunIds.has(run.run_id);
+  if (persisted.trace_complete === 1) return projectionPending;
+  return projectionPending
+    || persisted.api_user_name !== user.name
+    || persisted.operation_kind !== run.operation_kind
+    || persisted.title !== run.title
+    || persisted.outcome !== run.outcome
+    || persisted.device_serial !== run.device_serial
+    || persisted.source_ip !== sourceIp
+    || persisted.source_paths_json !== JSON.stringify(run.source_paths)
+    || persisted.source_urls_json !== JSON.stringify(run.source_urls)
+    || persisted.client_version !== run.client_version
+    || persisted.started_at_ms !== run.started_at_ms
+    || persisted.ended_at_ms !== run.ended_at_ms
+    || persisted.duration_ms !== run.duration_ms
+    || persisted.error_class !== run.error_class
+    || persisted.error_code !== run.error_code
+    || persisted.error_message !== run.error_message
+    || persisted.final_sequence !== run.final_sequence
+    || persisted.trace_complete !== (run.trace_complete ? 1 : 0)
+    || persisted.trace_loss_reason !== run.trace_loss_reason
+    || persisted.credential_redactions_json !== JSON.stringify(sanitized.run_redactions.get(run.run_id) ?? []);
 }
 
 async function readPersistedEvents(

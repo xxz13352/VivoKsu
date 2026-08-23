@@ -278,8 +278,8 @@ describe("POST /api/usage/traces/v2", () => {
 
   it("returns a durable run ack plus item rejections after every retry loses a natural-key race", async () => {
     await seedUser("trace-bearer", 7);
-    await seedRunOwnedBy(7, successFixture.runs[0].run_id);
     const payload = retryExhaustionPayload();
+    await seedRunFromPayload(7, payload.runs[0], "203.0.113.51");
     const db = collisionPerBatchDatabase(async (attempt) => {
       await seedEvent(
         `019d9c40-7b3c-7000-8000-00000000009${attempt}`,
@@ -314,7 +314,7 @@ describe("POST /api/usage/traces/v2", () => {
       "SELECT COUNT(*) AS value FROM usage_operation_events WHERE run_id = ?",
       payload.runs[0].run_id,
     )).toBe(3);
-    expect(await text("SELECT title AS value FROM usage_operation_runs WHERE run_id = ?", payload.runs[0].run_id)).toBe("Seed run");
+    expect(await text("SELECT title AS value FROM usage_operation_runs WHERE run_id = ?", payload.runs[0].run_id)).toBe(payload.runs[0].title);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_trace_ingest_guards")).toBe(0);
   });
@@ -362,7 +362,7 @@ describe("POST /api/usage/traces/v2", () => {
     const payload = exactRetryExhaustionPayload();
     const db = collisionPerBatchDatabase(async (attempt) => {
       if (attempt === 1) {
-        await seedRunOwnedBy(7, payload.runs[0].run_id);
+        await seedRunFromPayload(7, payload.runs[0], "203.0.113.53");
         await seedEvent(payload.events[0].event_id, payload.runs[0].run_id, 1);
         return;
       }
@@ -393,7 +393,7 @@ describe("POST /api/usage/traces/v2", () => {
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_runs")).toBe(1);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(3);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
-    expect(await text("SELECT title AS value FROM usage_operation_runs")).toBe("Seed run");
+    expect(await text("SELECT title AS value FROM usage_operation_runs")).toBe(payload.runs[0].title);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_trace_ingest_guards")).toBe(0);
   });
@@ -403,7 +403,7 @@ describe("POST /api/usage/traces/v2", () => {
     const payload = retryExhaustionPayload();
     const db = collisionPerBatchDatabase(async (attempt) => {
       if (attempt === 1) {
-        await seedRunOwnedBy(7, payload.runs[0].run_id);
+        await seedRunFromPayload(7, payload.runs[0], "203.0.113.54");
         await seedEvent(payload.events[0].event_id, payload.runs[0].run_id, 1);
         return;
       }
@@ -445,6 +445,37 @@ describe("POST /api/usage/traces/v2", () => {
       payload.events[0].event_id,
       payload.events[2].event_id,
     )).toBe(2);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_trace_ingest_guards")).toBe(0);
+  });
+
+  it("returns 500 when exhausted retries leave completion and V1 projection pending", async () => {
+    await seedUser("trace-bearer", 7);
+    const incomplete = copySuccess();
+    incomplete.runs[0].trace_complete = false;
+    expect((await postTrace(incomplete, "trace-bearer", "203.0.113.55")).status).toBe(200);
+    expect(await scalar(
+      "SELECT trace_complete AS value FROM usage_operation_runs WHERE run_id = ?",
+      successFixture.runs[0].run_id,
+    )).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
+    await env.DB.prepare(
+      `CREATE TRIGGER force_trace_projection_failure
+       BEFORE INSERT ON usage_logs
+       WHEN NEW.event_key = '${successFixture.runs[0].run_id}'
+       BEGIN SELECT RAISE(ABORT, 'forced trace projection failure'); END`,
+    ).run();
+
+    const response = await postTrace(successFixture, "trace-bearer", "203.0.113.55");
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ ok: false, error: { code: "TRACE_INTERNAL" } });
+    expect(await scalar(
+      "SELECT trace_complete AS value FROM usage_operation_runs WHERE run_id = ?",
+      successFixture.runs[0].run_id,
+    )).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(3);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_trace_ingest_guards")).toBe(0);
   });
@@ -725,6 +756,38 @@ async function seedRunOwnedBy(userId: number, runId: string): Promise<void> {
         client_version, started_at_ms, trace_complete)
      VALUES (?, ?, ?, 2, 'seed', 'Seed run', 'running', '1.4.0', 1, 0)`,
   ).bind(runId, userId, `User ${userId}`).run();
+}
+
+async function seedRunFromPayload(userId: number, run: any, sourceIp: string): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO usage_operation_runs
+       (run_id, api_user_id, api_user_name, schema_version, operation_kind, title, outcome,
+        device_serial, source_ip, source_paths_json, source_urls_json, client_version,
+        started_at_ms, ended_at_ms, duration_ms, error_class, error_code, error_message,
+        final_sequence, trace_complete, trace_loss_reason, credential_redactions_json)
+     VALUES (?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')`,
+  ).bind(
+    run.run_id,
+    userId,
+    `User ${userId}`,
+    run.operation_kind,
+    run.title,
+    run.outcome,
+    run.device_serial,
+    sourceIp,
+    JSON.stringify(run.source_paths),
+    JSON.stringify(run.source_urls),
+    run.client_version,
+    run.started_at_ms,
+    run.ended_at_ms,
+    run.duration_ms,
+    run.error_class,
+    run.error_code,
+    run.error_message,
+    run.final_sequence,
+    run.trace_complete ? 1 : 0,
+    run.trace_loss_reason,
+  ).run();
 }
 
 async function seedEvent(
