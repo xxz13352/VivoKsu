@@ -22,7 +22,7 @@ export default defineConfig({
         wrangler: { configPath: "./wrangler.toml" },
         miniflare: {
           modulesRules: [
-            { type: "Text", include: ["**/*.html"], fallthrough: true },
+            { type: "Text", include: ["**/*.sql", "**/*.html", "**/*.css", "**/admin/**/*.js"], fallthrough: true },
           ],
           bindings: {
             TEST_MIGRATIONS: migrations,
@@ -34,7 +34,7 @@ export default defineConfig({
     }),
   ],
   test: {
-    include: ["test/security.workerd.test.ts"],
+    include: ["test/*.workerd.test.ts"],
     testTimeout: 10_000,
   },
 });
