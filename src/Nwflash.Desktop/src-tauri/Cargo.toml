@@ -7,6 +7,7 @@ description = "奶蛙Flash Desktop Workspace Root"
 [workspace]
 members = [
   "crates/nwflash-domain",
+  "crates/nwflash-protection",
   "crates/nwflash-application",
   "crates/nwflash-infrastructure",
   "crates/nwflash-windows",

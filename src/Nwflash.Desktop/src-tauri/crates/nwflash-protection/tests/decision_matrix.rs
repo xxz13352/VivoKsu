@@ -1,0 +1,151 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use ed25519_dalek::{Signer as _, SigningKey};
+use nwflash_protection::{
+    accept_login_lease, admit_local_operation, dispatch_protection_decision, encoded_selector,
+    verify_signed_lease, DecisionInput, LeaseBinding, LeaseClaims, LeaseKind, OperationDecision,
+    ProtectionDecision, ProtectionFailure, ProtectionSelector, SignedEnvelope, TokenDigest,
+};
+
+fn accepted_login(expires_at: i64) -> nwflash_protection::SessionLease {
+    let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let claims = LeaseClaims {
+        version: 1,
+        kind: LeaseKind::Login,
+        username: "alice".into(),
+        token_sha256: URL_SAFE_NO_PAD.encode([9_u8; 32]),
+        client_version: "1.0.1".into(),
+        build_id: "build-123".into(),
+        process_nonce: "nonce-abc".into(),
+        session_id: "session-xyz".into(),
+        sequence: 1,
+        issued_at: 10,
+        expires_at,
+    };
+    let lease_payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+    let lease_signature =
+        URL_SAFE_NO_PAD.encode(signing_key.sign(lease_payload.as_bytes()).to_bytes());
+    let verified = verify_signed_lease(
+        &SignedEnvelope {
+            lease_payload,
+            lease_signature,
+        },
+        &signing_key.verifying_key(),
+    )
+    .unwrap();
+    accept_login_lease(
+        &verified,
+        &LeaseBinding::new(
+            "alice",
+            TokenDigest::from_bytes([9_u8; 32]),
+            "1.0.1",
+            "build-123",
+            "nonce-abc",
+            "session-xyz",
+        ),
+        20,
+    )
+    .unwrap()
+}
+
+#[test]
+fn dispatcher_allows_each_encoded_selector_only_with_its_validated_input() {
+    let cases = [
+        (
+            ProtectionSelector::Login,
+            DecisionInput::Login {
+                signature_valid: true,
+                claims_bound: true,
+            },
+        ),
+        (
+            ProtectionSelector::Heartbeat,
+            DecisionInput::Heartbeat {
+                signature_valid: true,
+                claims_bound: true,
+                sequence_advanced: true,
+            },
+        ),
+        (
+            ProtectionSelector::LocalOperation,
+            DecisionInput::LocalOperation {
+                session_active: true,
+                lease_current: true,
+            },
+        ),
+    ];
+
+    for (selector, input) in cases {
+        assert_eq!(
+            dispatch_protection_decision(encoded_selector(selector), input),
+            ProtectionDecision::Allow
+        );
+    }
+}
+
+#[test]
+fn dispatcher_denies_each_known_selector_when_its_required_flag_is_false() {
+    assert_eq!(
+        dispatch_protection_decision(
+            encoded_selector(ProtectionSelector::Login),
+            DecisionInput::Login {
+                signature_valid: false,
+                claims_bound: true,
+            },
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::InvalidLease)
+    );
+    assert_eq!(
+        dispatch_protection_decision(
+            encoded_selector(ProtectionSelector::Heartbeat),
+            DecisionInput::Heartbeat {
+                signature_valid: true,
+                claims_bound: true,
+                sequence_advanced: false,
+            },
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::SequenceRollback)
+    );
+    assert_eq!(
+        dispatch_protection_decision(
+            encoded_selector(ProtectionSelector::LocalOperation),
+            DecisionInput::LocalOperation {
+                session_active: true,
+                lease_current: false,
+            },
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::LeaseExpired)
+    );
+}
+
+#[test]
+fn dispatcher_fails_closed_for_an_illegal_selector_or_mismatched_input() {
+    assert_eq!(
+        dispatch_protection_decision(
+            0,
+            DecisionInput::Login {
+                signature_valid: true,
+                claims_bound: true,
+            }
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::IllegalSelector)
+    );
+    assert_eq!(
+        dispatch_protection_decision(
+            encoded_selector(ProtectionSelector::Login),
+            DecisionInput::LocalOperation {
+                session_active: true,
+                lease_current: true,
+            },
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::InvalidInput)
+    );
+}
+
+#[test]
+fn local_operation_admission_rejects_an_expired_session() {
+    let expired = accepted_login(30);
+    assert_eq!(
+        admit_local_operation(&expired, 31),
+        OperationDecision::DenyExpired
+    );
+}
