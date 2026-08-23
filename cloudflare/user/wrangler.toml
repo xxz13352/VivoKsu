@@ -2,9 +2,9 @@ name = "nwflash-user"
 main = "src/index.ts"
 compatibility_date = "2026-08-13"
 
-# 让 worker 能把 user.html 当作纯文本导入
+# 让 worker 能把门户静态资源当作纯文本导入
 rules = [
-  { type = "Text", globs = ["**/*.html"], fallthrough = true }
+  { type = "Text", globs = ["**/*.html", "**/*.css", "**/*.client.js"], fallthrough = true }
 ]
 
 [[d1_databases]]
