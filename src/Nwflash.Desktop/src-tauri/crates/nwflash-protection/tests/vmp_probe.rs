@@ -128,3 +128,63 @@ fn missing_sdk_root_build_fails_closed_with_an_actionable_error() {
         std::fs::remove_dir_all(&target_dir).expect("temporary target directory must be removable");
     }
 }
+
+#[cfg(all(windows, target_arch = "x86_64", not(feature = "vmp-sdk")))]
+#[test]
+#[ignore = "spawns a nested Cargo build to exercise build.rs"]
+fn bogus_sdk_root_is_ignored_when_feature_is_disabled() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let target_dir = std::env::temp_dir().join(format!(
+        "nwflash-vmp-disabled-bogus-sdk-{}",
+        std::process::id()
+    ));
+    let output = Command::new(env!("CARGO"))
+        .current_dir(manifest_dir)
+        .args([
+            "check",
+            "--target-dir",
+            target_dir.to_str().expect("temporary path must be UTF-8"),
+        ])
+        .env("NWFLASH_VMP_SDK_ROOT", "relative-and-nonexistent")
+        .output()
+        .expect("nested Cargo check must start");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "no-feature build failed: {stderr}");
+
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir).expect("temporary target directory must be removable");
+    }
+}
+
+#[cfg(all(windows, target_arch = "x86_64", not(feature = "vmp-sdk")))]
+#[test]
+#[ignore = "spawns a nested Cargo build to exercise build.rs"]
+fn relative_sdk_root_feature_build_fails_before_filesystem_access() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let target_dir =
+        std::env::temp_dir().join(format!("nwflash-vmp-relative-sdk-{}", std::process::id()));
+    let output = Command::new(env!("CARGO"))
+        .current_dir(manifest_dir)
+        .args([
+            "check",
+            "--features",
+            "vmp-sdk",
+            "--target-dir",
+            target_dir.to_str().expect("temporary path must be UTF-8"),
+        ])
+        .env("NWFLASH_VMP_SDK_ROOT", "relative-and-nonexistent")
+        .output()
+        .expect("nested Cargo check must start");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "relative SDK root must fail");
+    assert!(
+        stderr.contains("must be a fully qualified path"),
+        "unexpected build failure: {stderr}"
+    );
+
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir).expect("temporary target directory must be removable");
+    }
+}

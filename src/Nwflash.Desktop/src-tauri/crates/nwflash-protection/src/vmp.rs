@@ -108,7 +108,7 @@ pub struct ImageIntegrityOutcome {
 #[inline(never)]
 #[export_name = "nwflash_protection_verify_image_integrity"]
 pub fn verify_image_integrity(probe: &dyn IntegrityProbe) -> ImageIntegrityOutcome {
-    let _marker = MarkerScope::enter(MarkerBoundary::ImageIntegrityDispatch);
+    begin_image_integrity_dispatch();
     let signals = probe.signals();
     let telemetry = classify_telemetry(signals);
     let status = match signals.availability {
@@ -122,15 +122,19 @@ pub fn verify_image_integrity(probe: &dyn IntegrityProbe) -> ImageIntegrityOutco
         ProbeAvailability::Available => ImageIntegrityStatus::Valid,
     };
 
-    ImageIntegrityOutcome { status, telemetry }
+    let outcome = ImageIntegrityOutcome { status, telemetry };
+    end_marker();
+    outcome
 }
 
 /// Compares normalized build identifiers at the dedicated mutation boundary.
 #[inline(never)]
 #[export_name = "nwflash_protection_build_identity_matches"]
 pub fn build_identity_matches(expected: &str, actual: &str) -> bool {
-    let _marker = MarkerScope::enter(MarkerBoundary::BuildIdentity);
-    expected == actual
+    begin_build_identity();
+    let matches = expected == actual;
+    end_marker();
+    matches
 }
 
 pub const fn marker_backend_available() -> bool {
@@ -146,58 +150,51 @@ fn classify_telemetry(signals: IntegritySignals) -> IntegrityTelemetry {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum MarkerBoundary {
-    LoginLeaseAcceptance,
-    HeartbeatLeaseClassification,
-    OperationAdmission,
-    ImageIntegrityDispatch,
-    BuildIdentity,
-}
-
-pub(crate) struct MarkerScope {
+#[inline(always)]
+pub(crate) fn begin_login_lease_acceptance() {
     #[cfg(feature = "vmp-sdk")]
-    active: bool,
-}
-
-impl MarkerScope {
-    pub(crate) fn enter(boundary: MarkerBoundary) -> Self {
-        #[cfg(feature = "vmp-sdk")]
-        unsafe {
-            match boundary {
-                MarkerBoundary::LoginLeaseAcceptance => {
-                    VMProtectBeginUltra(c"NWFlash.LoginLeaseAcceptance".as_ptr())
-                }
-                MarkerBoundary::HeartbeatLeaseClassification => {
-                    VMProtectBeginVirtualization(c"NWFlash.HeartbeatLeaseClassification".as_ptr())
-                }
-                MarkerBoundary::OperationAdmission => {
-                    VMProtectBeginUltra(c"NWFlash.OperationAdmission".as_ptr())
-                }
-                MarkerBoundary::ImageIntegrityDispatch => {
-                    VMProtectBeginVirtualization(c"NWFlash.ImageIntegrityDispatch".as_ptr())
-                }
-                MarkerBoundary::BuildIdentity => {
-                    VMProtectBeginMutation(c"NWFlash.BuildIdentity".as_ptr())
-                }
-            }
-            Self { active: true }
-        }
-
-        #[cfg(not(feature = "vmp-sdk"))]
-        {
-            let _ = boundary;
-            Self {}
-        }
+    unsafe {
+        VMProtectBeginUltra(c"NWFlash.LoginLeaseAcceptance".as_ptr())
     }
 }
 
-impl Drop for MarkerScope {
-    fn drop(&mut self) {
-        #[cfg(feature = "vmp-sdk")]
-        if self.active {
-            unsafe { VMProtectEnd() }
-        }
+#[inline(always)]
+pub(crate) fn begin_heartbeat_lease_classification() {
+    #[cfg(feature = "vmp-sdk")]
+    unsafe {
+        VMProtectBeginVirtualization(c"NWFlash.HeartbeatLeaseClassification".as_ptr())
+    }
+}
+
+#[inline(always)]
+pub(crate) fn begin_operation_admission() {
+    #[cfg(feature = "vmp-sdk")]
+    unsafe {
+        VMProtectBeginUltra(c"NWFlash.OperationAdmission".as_ptr())
+    }
+}
+
+#[inline(always)]
+fn begin_image_integrity_dispatch() {
+    #[cfg(feature = "vmp-sdk")]
+    unsafe {
+        VMProtectBeginVirtualization(c"NWFlash.ImageIntegrityDispatch".as_ptr())
+    }
+}
+
+#[inline(always)]
+fn begin_build_identity() {
+    #[cfg(feature = "vmp-sdk")]
+    unsafe {
+        VMProtectBeginMutation(c"NWFlash.BuildIdentity".as_ptr())
+    }
+}
+
+#[inline(always)]
+pub(crate) fn end_marker() {
+    #[cfg(feature = "vmp-sdk")]
+    unsafe {
+        VMProtectEnd()
     }
 }
 

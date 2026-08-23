@@ -7,7 +7,10 @@ use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{build_identity_matches, MarkerBoundary, MarkerScope};
+use crate::{
+    begin_heartbeat_lease_classification, begin_login_lease_acceptance, begin_operation_admission,
+    build_identity_matches, end_marker,
+};
 
 /// The maximum accepted clock skew for a server-issued lease.
 pub const MAX_CLOCK_SKEW_SECONDS: i64 = 60;
@@ -300,8 +303,10 @@ pub fn accept_login_lease(
     binding: &LeaseBinding,
     now: i64,
 ) -> Result<SessionLease, LeaseRejection> {
-    let _marker = MarkerScope::enter(MarkerBoundary::LoginLeaseAcceptance);
-    validate_lease(lease.claims(), binding, LeaseKind::Login, now, None)
+    begin_login_lease_acceptance();
+    let result = validate_lease(lease.claims(), binding, LeaseKind::Login, now, None);
+    end_marker();
+    result
 }
 
 /// Classifies a verified heartbeat lease and fails closed on sequence rollback.
@@ -313,8 +318,8 @@ pub fn classify_heartbeat_lease(
     previous_sequence: u64,
     now: i64,
 ) -> HeartbeatDecision {
-    let _marker = MarkerScope::enter(MarkerBoundary::HeartbeatLeaseClassification);
-    match validate_lease(
+    begin_heartbeat_lease_classification();
+    let decision = match validate_lease(
         lease.claims(),
         binding,
         LeaseKind::Heartbeat,
@@ -323,19 +328,23 @@ pub fn classify_heartbeat_lease(
     ) {
         Ok(session) => HeartbeatDecision::Continue(session),
         Err(reason) => HeartbeatDecision::ExitPending(reason),
-    }
+    };
+    end_marker();
+    decision
 }
 
 /// Rechecks a locally held capability before a sensitive operation begins.
 #[inline(never)]
 #[export_name = "nwflash_protection_admit_local_operation"]
 pub fn admit_local_operation(session: &SessionLease, now: i64) -> OperationDecision {
-    let _marker = MarkerScope::enter(MarkerBoundary::OperationAdmission);
-    if session.expires_at <= now {
+    begin_operation_admission();
+    let decision = if session.expires_at <= now {
         OperationDecision::DenyExpired
     } else {
         OperationDecision::Allow
-    }
+    };
+    end_marker();
+    decision
 }
 
 fn validate_lease(

@@ -8,6 +8,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Amd64Machine = 0x8664
+$ExpectedSdkDll = 'VMProtectSDK64.dll'
+$RequiredSymbols = @(
+    'VMProtectBeginVirtualization',
+    'VMProtectBeginMutation',
+    'VMProtectBeginUltra',
+    'VMProtectEnd',
+    'VMProtectIsProtected',
+    'VMProtectIsDebuggerPresent',
+    'VMProtectIsVirtualMachinePresent',
+    'VMProtectIsValidImageCRC'
+)
 $RequiredDeclarations = @(
     'VMP_IMPORT void VMP_API VMProtectBeginVirtualization(const char *);',
     'VMP_IMPORT void VMP_API VMProtectBeginMutation(const char *);',
@@ -34,24 +45,50 @@ function Resolve-RequiredLeaf {
 }
 
 function Get-UInt16LittleEndian {
-    param(
-        [Parameter(Mandatory = $true)]
-        [byte[]]$Bytes,
-        [Parameter(Mandatory = $true)]
-        [int]$Offset
-    )
-
+    param([byte[]]$Bytes, [int]$Offset)
     if ($Offset -lt 0 -or $Offset + 2 -gt $Bytes.Length) {
         throw 'Unexpected end of binary while reading a 16-bit value.'
     }
     return ([int]$Bytes[$Offset] -bor ([int]$Bytes[$Offset + 1] -shl 8))
 }
 
-function Assert-Amd64CoffArchive {
+function Get-UInt32LittleEndian {
+    param([byte[]]$Bytes, [int]$Offset)
+    if ($Offset -lt 0 -or $Offset + 4 -gt $Bytes.Length) {
+        throw 'Unexpected end of binary while reading a 32-bit value.'
+    }
+    return [uint32]([uint32]$Bytes[$Offset] -bor
+        ([uint32]$Bytes[$Offset + 1] -shl 8) -bor
+        ([uint32]$Bytes[$Offset + 2] -shl 16) -bor
+        ([uint32]$Bytes[$Offset + 3] -shl 24))
+}
+
+function Read-NullTerminatedAscii {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
+        [byte[]]$Bytes,
+        [int]$Offset,
+        [int]$Limit,
+        [string]$Description
     )
+    if ($Offset -lt 0 -or $Offset -ge $Limit -or $Limit -gt $Bytes.Length) {
+        throw "Invalid $Description range."
+    }
+    $end = $Offset
+    while ($end -lt $Limit -and $Bytes[$end] -ne 0) {
+        $end++
+    }
+    if ($end -eq $Limit) {
+        throw "$Description is missing a null terminator."
+    }
+    $value = [System.Text.Encoding]::ASCII.GetString($Bytes, $Offset, $end - $Offset)
+    if ([string]::IsNullOrEmpty($value)) {
+        throw "$Description is empty."
+    }
+    return [pscustomobject]@{ Value = $value; NextOffset = $end + 1 }
+}
+
+function Assert-Amd64SdkImportArchive {
+    param([string]$Path)
 
     [byte[]]$bytes = [System.IO.File]::ReadAllBytes($Path)
     [byte[]]$magic = [System.Text.Encoding]::ASCII.GetBytes("!<arch>`n")
@@ -64,6 +101,7 @@ function Assert-Amd64CoffArchive {
         }
     }
 
+    $imports = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $offset = 8
     $objectCount = 0
     while ($offset -lt $bytes.Length) {
@@ -92,32 +130,61 @@ function Assert-Amd64CoffArchive {
                 throw "Import library contains an unrecognized COFF member: $Path"
             }
             $machine = Get-UInt16LittleEndian -Bytes $bytes -Offset $dataOffset
-            if ($machine -eq 0) {
-                if ($memberSize -lt 8 -or
-                    (Get-UInt16LittleEndian -Bytes $bytes -Offset ($dataOffset + 2)) -ne 0xFFFF) {
-                    throw "Import library contains an unrecognized COFF member: $Path"
-                }
+            $isShortImport = $machine -eq 0 -and $memberSize -ge 8 -and
+                (Get-UInt16LittleEndian -Bytes $bytes -Offset ($dataOffset + 2)) -eq 0xFFFF
+            if ($isShortImport) {
                 $machine = Get-UInt16LittleEndian -Bytes $bytes -Offset ($dataOffset + 6)
             }
             if ($machine -ne $Amd64Machine) {
                 throw ('Import library has wrong COFF architecture 0x{0:X4}; expected AMD64 0x8664: {1}' -f $machine, $Path)
             }
             $objectCount++
+
+            if ($isShortImport) {
+                if ($memberSize -lt 20) {
+                    throw "Import library contains a truncated short import header: $Path"
+                }
+                $payloadSize = Get-UInt32LittleEndian -Bytes $bytes -Offset ($dataOffset + 12)
+                $payloadOffset = $dataOffset + 20
+                $payloadEnd = $payloadOffset + $payloadSize
+                if ($payloadEnd -gt $dataEnd) {
+                    throw "Import library contains a truncated short import payload: $Path"
+                }
+                $symbol = Read-NullTerminatedAscii -Bytes $bytes -Offset $payloadOffset -Limit $payloadEnd -Description 'import symbol'
+                $dll = Read-NullTerminatedAscii -Bytes $bytes -Offset $symbol.NextOffset -Limit $payloadEnd -Description 'imported DLL name'
+                if (-not $dll.Value.Equals($ExpectedSdkDll, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Import library maps $($symbol.Value) to $($dll.Value); expected $ExpectedSdkDll"
+                }
+                [void]$imports.Add($symbol.Value)
+            }
         }
 
-        $offset = $dataEnd + ($memberSize % 2)
+        if (($memberSize % 2) -eq 1) {
+            if ($dataEnd -ge $bytes.Length) {
+                throw "Import library is missing odd-member archive padding: $Path"
+            }
+            if ($bytes[$dataEnd] -ne 0x0A) {
+                throw "Import library has invalid odd-member archive padding: $Path"
+            }
+            $offset = $dataEnd + 1
+        }
+        else {
+            $offset = $dataEnd
+        }
     }
 
     if ($objectCount -eq 0) {
         throw "Import library contains no AMD64 COFF objects: $Path"
     }
+    foreach ($symbol in $RequiredSymbols) {
+        if (-not $imports.Contains($symbol)) {
+            throw "Import library is missing required symbol $symbol for ${ExpectedSdkDll}: $Path"
+        }
+    }
 }
 
 function Assert-Amd64PeImage {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
+    param([string]$Path)
 
     [byte[]]$bytes = [System.IO.File]::ReadAllBytes($Path)
     if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
@@ -135,8 +202,55 @@ function Assert-Amd64PeImage {
     }
 }
 
+function Resolve-X64Dumpbin {
+    $vswhereCandidates = @(
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe",
+        "$env:ProgramFiles\Microsoft Visual Studio\Installer\vswhere.exe"
+    )
+    $vswhere = $vswhereCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $vswhere) {
+        throw 'vswhere.exe was not found; cannot validate SDK DLL exports.'
+    }
+    $installation = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+    $vswhereSucceeded = $?
+    if (-not $vswhereSucceeded -or [string]::IsNullOrWhiteSpace($installation)) {
+        throw 'vswhere.exe did not locate Visual Studio C++ x64 tools.'
+    }
+    $toolsRoot = Join-Path $installation.Trim() 'VC\Tools\MSVC'
+    $dumpbin = Get-ChildItem -LiteralPath $toolsRoot -Directory |
+        Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName 'bin\Hostx64\x64\dumpbin.exe' } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    if (-not $dumpbin) {
+        throw "Visual Studio x64 dumpbin.exe was not found under $toolsRoot"
+    }
+    return (Resolve-Path -LiteralPath $dumpbin).ProviderPath
+}
+
+function Assert-RequiredDllExports {
+    param([string]$Dumpbin, [string]$DllPath)
+
+    $output = (& $Dumpbin /NOLOGO /EXPORTS $DllPath 2>&1 | Out-String)
+    $dumpbinSucceeded = $?
+    if (-not $dumpbinSucceeded) {
+        throw "dumpbin failed to inspect SDK DLL exports: $output"
+    }
+    if (-not $output.Contains("exports for $ExpectedSdkDll")) {
+        throw "SDK DLL export table identity is not $ExpectedSdkDll"
+    }
+    foreach ($symbol in $RequiredSymbols) {
+        if ($output -notmatch "(?m)^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+$([regex]::Escape($symbol))\s*$") {
+            throw "SDK DLL is missing required export $symbol"
+        }
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($SdkRoot)) {
     throw 'NWFLASH_VMP_SDK_ROOT is required and must point to the external VMProtect package root.'
+}
+if (-not [System.IO.Path]::IsPathFullyQualified($SdkRoot)) {
+    throw 'NWFLASH_VMP_SDK_ROOT must be a fully qualified path.'
 }
 if (-not (Test-Path -LiteralPath $SdkRoot -PathType Container)) {
     throw "VMProtect SDK root does not exist: $SdkRoot"
@@ -154,11 +268,14 @@ foreach ($declaration in $RequiredDeclarations) {
     }
 }
 
-Assert-Amd64CoffArchive -Path $libraryPath
+Assert-Amd64SdkImportArchive -Path $libraryPath
 Assert-Amd64PeImage -Path $dllPath
+$dumpbin = Resolve-X64Dumpbin
+Assert-RequiredDllExports -Dumpbin $dumpbin -DllPath $dllPath
 
 Write-Output "VMProtect SDK root: $resolvedRoot"
 Write-Output "Header: $headerPath"
-Write-Output "Import library: $libraryPath (AMD64 COFF)"
+Write-Output "Import library: $libraryPath (AMD64 COFF; $ExpectedSdkDll; 8 required symbols)"
 Write-Output "SDK DLL: $dllPath (AMD64 PE)"
+Write-Output "Required DLL exports: verified (8 symbols via $dumpbin)"
 Write-Output 'VMProtect SDK validation passed. No files were copied or modified.'
