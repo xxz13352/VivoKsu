@@ -8,7 +8,7 @@ const portalCss = readFileSync(resolve(process.cwd(), 'src/portal/styles.css'), 
 
 const ownedSession = {
   id: 'session-owned',
-  ip: '203.0.113.*',
+  ip_masked: '203.0.113.*',
   clientVersion: '1.4.0',
   connectedAt: '2026-08-24T00:00:00.000Z',
   lastSeenAt: '2026-08-24T00:02:00.000Z',
@@ -183,6 +183,15 @@ describe('Personal Ops portal', () => {
     fetchQueue.respond('/api/me/sessions', { count: 0, sessions: [] });
     await pollOnce();
     expect(document.querySelector('[data-session="session-owned"]')).toBeNull();
+  });
+
+  it('renders the masked session address supplied by the authoritative API', async () => {
+    queueSignedInStart();
+    await startPortal();
+    fetchQueue.respond('/api/me/sessions', { count: 1, sessions: [ownedSession] });
+    document.querySelector('[data-nav="sessions"]').click();
+    await flush();
+    expect(document.querySelector('[data-session="session-owned"] p').textContent).toContain('203.0.113.*');
   });
 
   it('returns to login after authoritative password revocation', async () => {

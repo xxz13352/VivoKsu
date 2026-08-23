@@ -148,7 +148,7 @@ export function createPortal({
       const row = document.createElement('article');
       row.dataset.session = session.id;
       const summary = document.createElement('p');
-      summary.textContent = [session.ip, session.clientVersion, session.duration].filter(Boolean).join(' · ');
+      summary.textContent = [session.ip_masked, session.clientVersion, session.duration].filter(Boolean).join(' · ');
       const status = document.createElement('p');
       status.dataset.sessionStatus = '';
       status.textContent = state.pendingKicks.has(session.id)
