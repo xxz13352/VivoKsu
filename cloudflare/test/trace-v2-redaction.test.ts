@@ -184,7 +184,7 @@ describe("trace v2 credential boundary", () => {
       "--label",
       "nightly",
       "--token",
-      "-dash-sentinel-391918",
+      "-secret-value",
     ];
     command.display_command = "upload aws_secret_access_key=aws-sentinel-374165";
 
@@ -219,6 +219,35 @@ describe("trace v2 credential boundary", () => {
     expect(chunk.text).not.toContain("pwd=x");
     expect(chunk.byte_count).toBeLessThanOrEqual(32_768);
     expect(validateTraceUploadV2(result.payload)).toEqual(result.payload);
+  });
+
+  it("redacts a credential-like dash value but preserves a safe option boundary", () => {
+    const sensitive = copyCanonical();
+    sensitive.events[1].command!.argv = ["--token", "--secret-value", "positional"];
+    const safeBoundary = copyCanonical();
+    safeBoundary.events[1].command!.argv = ["--token", "--label"];
+
+    expect(redactTraceUploadV2(sensitive, []).payload.events[1].command!.argv).toEqual([
+      "--token",
+      "[REDACTED]",
+      "positional",
+    ]);
+    expect(redactTraceUploadV2(safeBoundary, []).payload.events[1].command!.argv).toEqual([
+      "--token",
+      "--label",
+    ]);
+  });
+
+  it("redacts an exact registered secret before treating it as an option boundary", () => {
+    const source = copyCanonical();
+    source.events[1].command!.argv = ["--token", "--label"];
+    const result = redactTraceUploadV2(source, ["--label"]);
+
+    expect(result.payload.events[1].command!.argv).toEqual([
+      "--token",
+      "*******",
+    ]);
+    expect(result.event_redactions.get(source.events[1].event_id)).toEqual([{ kind: "exact", count: 1 }]);
   });
 
   it("keeps merged counts and high-risk field replacement within the frozen contract", () => {

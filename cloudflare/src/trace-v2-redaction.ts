@@ -254,11 +254,22 @@ function mapRun(run: TraceRunV2, redact: (text: string) => string): TraceRunV2 {
 
 function mapCommand(command: TraceCommandV2, redact: (text: string) => string, counts: RedactionCounts): TraceCommandV2 {
   let pendingSecretKind: string | null = null;
-  const argv = command.argv.map((argument, index) => {
+  const argv = command.argv.map((argument) => {
     if (pendingSecretKind !== null) {
-      if (argument.startsWith("--") && index + 1 < command.argv.length) {
+      const matched = redact(argument);
+      if (matched !== argument) {
+        pendingSecretKind = null;
+        return matched;
+      }
+      if (isCredentialLikeDashValue(argument)) {
+        const kind = pendingSecretKind;
+        pendingSecretKind = null;
+        addCount(counts, kind);
+        return safeCredentialMarker(argument);
+      }
+      if (argument.startsWith("-")) {
         pendingSecretKind = cliFlagKind(argument);
-        return redact(argument);
+        return argument;
       }
       const kind = pendingSecretKind;
       pendingSecretKind = null;
@@ -362,6 +373,12 @@ function credentialKind(key: string): string {
 function cliFlagKind(value: string): string | null {
   const match = new RegExp(`^--(${CREDENTIAL_KEY})$`, "i").exec(value);
   return match ? credentialKind(match[1]) : null;
+}
+
+function isCredentialLikeDashValue(value: string): boolean {
+  if (!value.startsWith("-")) return false;
+  const normalized = value.replace(/^-+/, "").toLowerCase();
+  return /(?:^|[-_])(?:password|passwd|pwd|token|api[-_]?key|secret|signature|sig)(?:[-_]|$)/.test(normalized);
 }
 
 function mapNullable(value: string | null, redact: (text: string) => string): string | null {
