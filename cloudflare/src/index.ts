@@ -288,32 +288,12 @@ async function acceptIntegrityReport(env: Env, request: Request): Promise<Respon
     trusted = 1;
   }
 
-  const duplicate = await env.DB
-    .prepare("SELECT event_id FROM integrity_events WHERE event_id = ?")
-    .bind(report.event_id)
-    .first<{ event_id: string }>();
-  if (duplicate) return json({ ok: true, duplicate: true }, 200);
-
-  const now = Math.floor(Date.now() / 1000);
-  const windowStart = Math.floor(now / INTEGRITY_RATE_WINDOW_SECONDS) * INTEGRITY_RATE_WINDOW_SECONDS;
-  const ipHash = await integrityIpHash(request.headers.get("CF-Connecting-IP") || "unknown");
-  const rate = await env.DB.prepare(
-    `INSERT INTO integrity_rate_limits (ip_hash, window_start, count)
-     VALUES (?, ?, 1)
-     ON CONFLICT(ip_hash, window_start) DO UPDATE SET count = integrity_rate_limits.count + 1
-     RETURNING count`,
-  )
-    .bind(ipHash, windowStart)
-    .first<{ count: number }>();
-  if (!rate || rate.count > INTEGRITY_RATE_LIMIT) {
-    return json({ error: "完整性事件上报过于频繁。" }, 429);
-  }
-
-  const inserted = await env.DB.prepare(
+  const claimed = await env.DB.prepare(
     `INSERT INTO integrity_events
        (event_id, api_user_id, trusted, phase, reason, client_version, build_id, occurred_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(event_id) DO NOTHING`,
+     ON CONFLICT(event_id) DO NOTHING
+     RETURNING event_id`,
   )
     .bind(
       report.event_id,
@@ -325,9 +305,35 @@ async function acceptIntegrityReport(env: Env, request: Request): Promise<Respon
       report.build_id,
       report.occurred_at,
     )
-    .run();
-  if ((inserted.meta?.changes ?? 0) === 0) return json({ ok: true, duplicate: true }, 200);
+    .first<{ event_id: string }>();
+  if (!claimed) return json({ ok: true, duplicate: true }, 200);
+
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = Math.floor(now / INTEGRITY_RATE_WINDOW_SECONDS) * INTEGRITY_RATE_WINDOW_SECONDS;
+  const ipHash = await integrityIpHash(request.headers.get("CF-Connecting-IP") || "unknown");
+  let rate: { count: number } | null;
+  try {
+    rate = await env.DB.prepare(
+      `INSERT INTO integrity_rate_limits (ip_hash, window_start, count)
+       VALUES (?, ?, 1)
+       ON CONFLICT(ip_hash, window_start) DO UPDATE SET count = integrity_rate_limits.count + 1
+       RETURNING count`,
+    )
+      .bind(ipHash, windowStart)
+      .first<{ count: number }>();
+  } catch (error) {
+    await releaseIntegrityClaim(env, report.event_id);
+    throw error;
+  }
+  if (!rate || rate.count > INTEGRITY_RATE_LIMIT) {
+    await releaseIntegrityClaim(env, report.event_id);
+    return json({ error: "完整性事件上报过于频繁。" }, 429);
+  }
   return json({ ok: true, accepted: true }, 202);
+}
+
+async function releaseIntegrityClaim(env: Env, eventId: string): Promise<void> {
+  await env.DB.prepare("DELETE FROM integrity_events WHERE event_id = ?").bind(eventId).run();
 }
 
 async function purgeIntegrityRateLimits(env: Env): Promise<void> {
@@ -364,14 +370,16 @@ const heartbeatLimits = new Map<string, number>();
 /** 请求路径内联清理的 per-isolate 节流;真正的兜底是 scheduled() Cron。 */
 let lastPurgeAt = 0;
 
-/** per-token 心跳限速:超频返回 false(调用方应跳过读写)。 */
-function allowHeartbeat(token: string): boolean {
+/** 在 CAS 前只读检查限速;仅 CAS 成功后记录,避免并发同序号请求绕过数据库竞争。 */
+function heartbeatRateLimited(token: string): boolean {
   const now = Date.now();
   const last = heartbeatLimits.get(token);
-  if (last !== undefined && now - last < HEARTBEAT_MIN_INTERVAL_MS) return false;
-  heartbeatLimits.set(token, now);
+  return last !== undefined && now - last < HEARTBEAT_MIN_INTERVAL_MS;
+}
+
+function markHeartbeatAccepted(token: string): void {
+  heartbeatLimits.set(token, Date.now());
   if (heartbeatLimits.size > HEARTBEAT_LIMIT_MAP_CAP) heartbeatLimits.clear();
-  return true;
 }
 
 /** 清理 stale 会话(超过在线窗口未心跳)。带 force_exit 的会话保留 24h,保证「踢后离线再回来」仍能收到 kick。 */
@@ -390,12 +398,20 @@ async function purgeStaleSessions(env: Env, force = false): Promise<void> {
     )
       .bind(cutoff, forceExitCutoff)
       .run();
+    await env.DB.prepare(
+      `DELETE FROM session_leases
+       WHERE updated_at < ? AND session_id NOT IN (
+         SELECT session_id FROM online_sessions WHERE force_exit_at IS NOT NULL AND force_exit_at >= ?
+       )`,
+    )
+      .bind(cutoff, forceExitCutoff)
+      .run();
   } catch {
     // 清理失败不影响心跳主流程。
   }
 }
 
-/** POST /api/heartbeat —— 客户端每 5s 一次。鉴权;返回是否应强制退出。 */
+/** POST /api/heartbeat —— 只有 D1 中登录创建的完整绑定与当前序号可刷新签名租约。 */
 async function heartbeat(env: Env, request: Request): Promise<Response> {
   const auth = await authenticateUser(env, request);
   if (auth instanceof Response) return auth;
@@ -405,14 +421,14 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const rawSessionId = body?.session_id ?? body?.sessionId;
   const sessionId = typeof rawSessionId === "string" ? rawSessionId.trim() : "";
-  // 字符集白名单:sessionId 只允许 URL 安全字符,杜绝任意字符串进库(配合后台 XSS 修复,纵深防御)。
   if (!/^[A-Za-z0-9._:-]{1,64}$/.test(sessionId)) return json({ error: "sessionId 不合法。" }, 400);
 
-  // goodbye(客户端正常/强制退出):删除会话行,绑定 user_id 防跨用户误删。
+  // goodbye 不创建能力;两个删除都绑定 user_id,避免跨用户清理。
   if (body?.active === false) {
-    await env.DB.prepare("DELETE FROM online_sessions WHERE session_id = ? AND user_id = ?")
-      .bind(sessionId, auth.id)
-      .run();
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM session_leases WHERE session_id = ? AND user_id = ?").bind(sessionId, auth.id),
+      env.DB.prepare("DELETE FROM online_sessions WHERE session_id = ? AND user_id = ?").bind(sessionId, auth.id),
+    ]);
     return json({ ok: true, force_exit: false }, 200);
   }
 
@@ -428,43 +444,118 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
     return json({ error: "sequence 不合法。" }, 400);
   }
 
-  // per-token 限速只拦「写入」,不拦「读取」:被限速的心跳仍要读 force_exit,避免吞掉 kick 一轮。
-  const header = request.headers.get("Authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  const rateLimited = !allowHeartbeat(token);
+  const lease = await env.DB.prepare(
+    `SELECT user_id, username, client_version, build_id, process_nonce, sequence
+     FROM session_leases WHERE session_id = ?`,
+  )
+    .bind(sessionId)
+    .first<{
+      user_id: number;
+      username: string;
+      client_version: string;
+      build_id: string;
+      process_nonce: string;
+      sequence: number;
+    }>();
+  if (
+    !lease
+    || lease.user_id !== auth.id
+    || lease.username !== auth.username
+    || lease.client_version !== clientVersion
+    || lease.build_id !== buildId
+    || lease.process_nonce !== processNonce
+    || lease.sequence !== sequence
+  ) return leaseConflict();
 
-  const now = Math.floor(Date.now() / 1000);
-  const writeIntervalSec = Math.floor((Number(env.HEARTBEAT_WRITE_INTERVAL_MS) || 60_000) / 1000);
-  const sessionCap = Number(env.ONLINE_SESSION_CAP) || 3;
-  // 仅展示用,绝不作鉴权依据(仅 Cloudflare 边缘覆写,不可伪造,但 wrangler dev 等环境可能被伪造)。
-  const ip = request.headers.get("CF-Connecting-IP") || "";
-
-  const row = await env.DB.prepare(
+  const online = await env.DB.prepare(
     "SELECT user_id, last_seen_at, force_exit_at, force_exit_reason FROM online_sessions WHERE session_id = ?",
   )
     .bind(sessionId)
     .first<{ user_id: number; last_seen_at: number; force_exit_at: number | null; force_exit_reason: string | null }>();
+  if (online && online.user_id !== auth.id) return leaseConflict();
+  if (online?.force_exit_at) {
+    return json({ ok: true, force_exit: true, reason: online.force_exit_reason || "已被服务端强制下线。" }, 200);
+  }
 
-  if (!row) {
-    // 新会话(或被裁掉的会话):若被限速则跳过建行(下个心跳再建),否则插入 + 清理多余 stale 行。
-    if (rateLimited) {
-      return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
+  const header = request.headers.get("Authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (heartbeatRateLimited(token)) return json({ error: "心跳过于频繁。" }, 429);
+
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const nextSequence = sequence + 1;
+  const claims: LeaseClaims = {
+    version: 1,
+    kind: "heartbeat",
+    username: auth.username,
+    token_sha256: await tokenSha256(token),
+    client_version: clientVersion,
+    build_id: buildId,
+    process_nonce: processNonce,
+    session_id: sessionId,
+    sequence: nextSequence,
+    issued_at: issuedAt,
+    expires_at: issuedAt + LEASE_TTL_SECONDS,
+  };
+
+  let envelope;
+  try {
+    envelope = await signLease(claims, env.SESSION_SIGNING_PRIVATE_KEY_PKCS8);
+  } catch (error) {
+    if (error instanceof SigningConfigurationError) return signingUnavailable();
+    throw error;
+  }
+
+  const advanced = await env.DB.prepare(
+    `UPDATE session_leases SET sequence = ?, updated_at = ?
+     WHERE session_id = ? AND user_id = ? AND username = ?
+       AND client_version = ? AND build_id = ? AND process_nonce = ? AND sequence = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM online_sessions
+         WHERE online_sessions.session_id = session_leases.session_id AND force_exit_at IS NOT NULL
+       )
+     RETURNING sequence`,
+  )
+    .bind(nextSequence, issuedAt, sessionId, auth.id, auth.username, clientVersion, buildId, processNonce, sequence)
+    .first<{ sequence: number }>();
+  if (!advanced) return leaseConflict();
+
+  markHeartbeatAccepted(token);
+  await projectOnlineSession(env, request, auth, online, sessionId, clientVersion, issuedAt);
+  return json({ ok: true, force_exit: false, ...envelope }, 200);
+}
+
+function leaseConflict(): Response {
+  return json({ error: "会话租约无效、冲突或已过期。" }, 409);
+}
+
+async function projectOnlineSession(
+  env: Env,
+  request: Request,
+  auth: { id: number; name: string },
+  online: { last_seen_at: number } | null,
+  sessionId: string,
+  clientVersion: string,
+  now: number,
+): Promise<void> {
+  const writeIntervalSec = Math.floor((Number(env.HEARTBEAT_WRITE_INTERVAL_MS) || 60_000) / 1000);
+  const sessionCap = Number(env.ONLINE_SESSION_CAP) || 3;
+  const ip = request.headers.get("CF-Connecting-IP") || "";
+  try {
+    if (!online) {
+      await env.DB.prepare(
+        `INSERT INTO online_sessions (session_id, user_id, user_name, client_version, ip, connected_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO NOTHING`,
+      )
+        .bind(sessionId, auth.id, auth.name, clientVersion, ip, now, now)
+        .run();
+    } else if (now - online.last_seen_at >= writeIntervalSec) {
+      await env.DB.prepare(
+        "UPDATE online_sessions SET last_seen_at = ?, client_version = ?, ip = ? WHERE session_id = ? AND user_id = ?",
+      )
+        .bind(now, clientVersion, ip, sessionId, auth.id)
+        .run();
     }
-
-    // ON CONFLICT 仅当归属相同用户才更新(防并发竞态/跨用户篡改),且绝不触碰 connected_at。
-    await env.DB.prepare(
-      `INSERT INTO online_sessions (session_id, user_id, user_name, client_version, ip, connected_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(session_id) DO UPDATE SET
-         last_seen_at = excluded.last_seen_at,
-         client_version = excluded.client_version
-       WHERE online_sessions.user_id = excluded.user_id`,
-    )
-      .bind(sessionId, auth.id, auth.name, clientVersion, ip, now, now)
-      .run();
-
-    // 每用户会话数上限:只裁「已 stale」的多余行(不裁仍活跃的,避免 churn:活跃会话被裁后下次心跳
-    // 又重建并再触发裁剪,cap 永达不到;配额防线主要靠 per-token 限速 + purge)。
     const staleCutoff = now - writeIntervalSec;
     await env.DB.prepare(
       `DELETE FROM online_sessions
@@ -474,61 +565,9 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
     )
       .bind(auth.id, staleCutoff, auth.id, sessionCap)
       .run();
-
     await purgeStaleSessions(env);
-    return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
-  }
-
-  // 会话已存在但归属其它用户 → 不触碰(防跨用户保活/伪造离线)。
-  if (row.user_id !== auth.id) {
-    return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
-  }
-
-  // 先判强制下线:被 kick 的会话不再刷新 last_seen(拒绝退出的客户端也不能靠心跳保活永不超时)。
-  if (row.force_exit_at) {
-    return json({ ok: true, force_exit: true, reason: row.force_exit_reason || "已被服务端强制下线。" }, 200);
-  }
-
-  // 写节流:距上次写 >= 间隔才写,且只动 last_seen_at/client_version/ip。被限速时跳过写入。
-  if (!rateLimited && now - row.last_seen_at >= writeIntervalSec) {
-    await env.DB
-      .prepare("UPDATE online_sessions SET last_seen_at = ?, client_version = ?, ip = ? WHERE session_id = ?")
-      .bind(now, clientVersion, ip, sessionId)
-      .run();
-  }
-
-  return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
-}
-
-async function signedHeartbeat(
-  env: Env,
-  username: string,
-  token: string,
-  clientVersion: string,
-  buildId: string,
-  processNonce: string,
-  sessionId: string,
-  previousSequence: number,
-): Promise<Response> {
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const claims: LeaseClaims = {
-    version: 1,
-    kind: "heartbeat",
-    username,
-    token_sha256: await tokenSha256(token),
-    client_version: clientVersion,
-    build_id: buildId,
-    process_nonce: processNonce,
-    session_id: sessionId,
-    sequence: previousSequence + 1,
-    issued_at: issuedAt,
-    expires_at: issuedAt + LEASE_TTL_SECONDS,
-  };
-  try {
-    return json({ ok: true, force_exit: false, ...await signLease(claims, env.SESSION_SIGNING_PRIVATE_KEY_PKCS8) }, 200);
-  } catch (error) {
-    if (error instanceof SigningConfigurationError) return signingUnavailable();
-    throw error;
+  } catch {
+    // 在线展示投影失败不回滚已成功的安全 CAS;下次有效心跳会重试投影。
   }
 }
 
@@ -708,7 +747,6 @@ const PBKDF2_ITERATIONS = 100_000;
 
 /** POST /api/login —— 密码验证成功后返回 token 与绑定当前进程/会话的短期签名租约。 */
 async function login(env: Env, request: Request): Promise<Response> {
-  if (!env.SESSION_SIGNING_PRIVATE_KEY_PKCS8) return signingUnavailable();
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const username = (body?.username as string || "").trim();
   const password = body?.password as string || "";
@@ -751,6 +789,16 @@ async function login(env: Env, request: Request): Promise<Response> {
   };
   try {
     const envelope = await signLease(claims, env.SESSION_SIGNING_PRIVATE_KEY_PKCS8);
+    const claimed = await env.DB.prepare(
+      `INSERT INTO session_leases
+         (session_id, user_id, username, client_version, build_id, process_nonce, sequence, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+       ON CONFLICT(session_id) DO NOTHING
+       RETURNING sequence`,
+    )
+      .bind(sessionId, user.id, user.username, clientVersion, buildId, processNonce, issuedAt, issuedAt)
+      .first<{ sequence: number }>();
+    if (!claimed) return json({ error: "session_id 已被占用。" }, 409);
     return json({ ok: true, token: user.token, username: user.username, name: user.name, ...envelope }, 200);
   } catch (error) {
     if (error instanceof SigningConfigurationError) return signingUnavailable();

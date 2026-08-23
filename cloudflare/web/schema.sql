@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS online_sessions (
 CREATE INDEX IF NOT EXISTS idx_online_last_seen ON online_sessions(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_online_user ON online_sessions(user_id);
 
+-- 服务器签名租约状态。登录先签名再插入 sequence=1;活动心跳只可用完整绑定元组做原子 CAS。
+CREATE TABLE IF NOT EXISTS session_leases (
+  session_id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  username TEXT NOT NULL,
+  client_version TEXT NOT NULL,
+  build_id TEXT NOT NULL,
+  process_nonce TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence >= 1),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_leases_user ON session_leases(user_id);
+CREATE INDEX IF NOT EXISTS idx_session_leases_updated ON session_leases(updated_at);
+
 -- 管理员操作审计(kick 等;查看入口后续再加)
 CREATE TABLE IF NOT EXISTS admin_audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

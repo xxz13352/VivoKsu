@@ -82,7 +82,7 @@
 - `reason` 闭集:`image_crc_invalid`、`lease_signature_invalid`、`lease_binding_invalid`、`lease_expired`、`sequence_rollback`、`pin_mismatch`、`debugger_detected`、`virtual_machine_detected`、`authenticode_invalid`、`release_manifest_invalid`。
 - `event_id`、`build_id` 只允许 URL-safe 标识字符;时间为正整数 epoch 秒。
 
-成功首次写入返回 `202`;同一 `event_id` 重试返回 `200 { "ok": true, "duplicate": true }`,D1 只保留一行。每个 IP 的 SHA-256 base64url 摘要按 60 秒窗口最多接收 20 个不同事件,第 21 个返回 `429`;D1 不保存原始 IP。超限请求返回 `413`。
+服务端先用 `INSERT ... ON CONFLICT DO NOTHING RETURNING` 原子认领 `event_id`;只有认领成功的唯一请求才递增 IP 配额。并发重复请求返回 `200 { "ok": true, "duplicate": true }`,D1 只保留一行且总共只消耗一个配额。每个 IP 的 SHA-256 base64url 摘要按 60 秒窗口最多接收 20 个不同事件;第 21 个会删除本次刚认领的事件后返回 `429`,不会留下超额事件。首次成功返回 `202`;D1 不保存原始 IP。请求体超限返回 `413`。
 
 ---
 
@@ -170,6 +170,8 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 `lease_payload` 解码后的 UTF-8 JSON 字段固定为 snake_case:`version = 1`、`kind = "login"`、`username`、`token_sha256`、`client_version`、`build_id`、`process_nonce`、`session_id`、`sequence = 1`、`issued_at`、`expires_at`。`token_sha256` 是 bearer token 原始 UTF-8 字节 SHA-256 的无填充 base64url。签名输入是响应中**原始、未补 `=` 的 `lease_payload` ASCII 字节**,客户端必须先验签再解码 JSON。
 
+服务端在请求字段、账号、密码、封禁和停用检查通过后先生成签名候选,再用 D1 `session_leases` 原子认领精确的 session ID、用户、client version、build ID、process nonce 和 `sequence = 1`;只有认领成功才返回 token/租约。session ID 已存在返回 `409`,不会返回另一个 token 或租约。缺失/畸形签名 key 返回 `503` 且不创建会话状态;签名服务故障期间既有 `400/401` 登录失败仍保持原语义。
+
 **失败**:`401` —— `用户名或密码错误` / `账号已被封禁,请联系管理员。` / `账号已被停用。`;`400` 缺少或非法字段;`503` 签名服务不可用。
 
 ---
@@ -224,9 +226,9 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 { "ok": true, "force_exit": true, "reason": "违规下线" }
 ```
 
-活动成功租约字段与登录租约相同,但 `kind = "heartbeat"` 且返回 `sequence = 请求 sequence + 1`,保证严格递增。用户、token 摘要、版本、构建、进程 nonce 和 session 均绑定到签名 claims。强制退出响应不创建新能力。
+活动心跳必须与 D1 中的用户、session ID、client version、build ID、process nonce 和当前 sequence **全部精确匹配**。服务端先签名 `sequence + 1` 候选,再用完整绑定元组和旧 sequence 执行原子 compare-and-swap;只有 CAS 获胜才返回候选。并发同序号最多一个成功;重放、回退、跳号、绑定变更、未知 session 或跨用户 ownership 返回 `409` 且不返回签名字段。签名失败发生在 CAS 之前,因此不会推进服务端 sequence。per-token 3 秒限速返回 `429`,同样不签发、不推进。强制退出响应不创建新能力。
 
-goodbye 只需 `sessionId` 和 `active = false`;它继续删除当前用户的会话并返回 `{ "ok": true, "force_exit": false }`,不要求签名 secret,也不创建新租约。
+goodbye 只需 `sessionId` 和 `active = false`;它删除当前用户的 `session_leases` 与 `online_sessions` 行并返回 `{ "ok": true, "force_exit": false }`,不要求签名 secret,也不创建新租约。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -235,7 +237,7 @@ goodbye 只需 `sessionId` 和 `active = false`;它继续删除当前用户的�
 
 **强制退出触发点**:管理端「在线状态」强制下线(下一个心跳 ≤5s 收到);账号被封禁;token 被停用/轮换(心跳返回 401/403)。kick 是**瞬态**(仅当前会话),持续封禁靠 `banned` 在登录与业务层阻断。
 
-**服务端节流/配额防护**:同一会话 `last_seen_at` 至少隔 60s 写一次 D1(写节流,`connected_at` 永不被触碰 → 在线时长单调准确);per-token 最小心跳间隔 3s(防换 sessionId 刷写配额);每用户在线会话数上限 3(超出删最旧)。
+**服务端节流/配额防护**:每个有效活动心跳必须原子写入安全 sequence;在线展示投影的 `last_seen_at` 仍至少隔 60s 更新一次,且 `connected_at` 永不被更新。per-token 最小心跳间隔 3s;被限速请求返回 429,不会收到签名租约。stale `session_leases` 随在线会话清理窗口回收。
 
 ---
 
