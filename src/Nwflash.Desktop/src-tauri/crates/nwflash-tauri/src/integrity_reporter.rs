@@ -134,7 +134,12 @@ impl IntegrityReporter {
             && reason == IntegrityReportReason::PinMismatch
         {
             if let Some(marker_path) = self.marker_path.as_deref() {
-                let _ = write_minimal_marker(marker_path, &event_id, occurred_at, sequence);
+                let marker_path = marker_path.to_path_buf();
+                let marker_event_id = event_id.clone();
+                let marker = tokio::task::spawn_blocking(move || {
+                    write_minimal_marker(&marker_path, &marker_event_id, occurred_at, sequence)
+                });
+                let _ = timeout_at(deadline, marker).await;
             }
             return IntegrityReportOutcome::SkippedSameChannelSpkiMismatch;
         }

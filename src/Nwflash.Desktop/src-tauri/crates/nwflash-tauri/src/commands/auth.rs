@@ -44,7 +44,7 @@ async fn auth_login_inner(
         .process_identity
         .fresh_generation()
         .map_err(|error| error.to_string())?;
-    let session = state
+    let session = match state
         .auth_service
         .login(
             &username,
@@ -53,7 +53,21 @@ async fn auth_login_inner(
             &session_id,
         )
         .await
-        .map_err(|error| error.user_message())?;
+    {
+        Ok(session) => session,
+        Err(error @ nwflash_infrastructure::CloudflareError::Integrity(_)) => {
+            let nwflash_infrastructure::CloudflareError::Integrity(failure) = &error else {
+                unreachable!();
+            };
+            let mut request = crate::exit_request_for_integrity(None, failure.clone());
+            if request.phase != crate::exit_supervisor::ExitPhase::PinValidation {
+                request.phase = crate::exit_supervisor::ExitPhase::Login;
+            }
+            let _ = state.exit_supervisor.request(request);
+            return Err(error.user_message());
+        }
+        Err(error) => return Err(error.user_message()),
+    };
     let dto = AuthSessionDto {
         username: session.username.clone(),
         name: session.name.clone(),
@@ -192,6 +206,7 @@ pub(crate) fn clear_session_token(slot: &mut Option<SecretToken>) -> Option<Secr
 mod tests {
     use std::{
         fs,
+        sync::{Arc, Mutex},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -204,6 +219,7 @@ mod tests {
         SignedEnvelope, TokenDigest,
     };
     use rand_core::OsRng;
+    use tokio::sync::Notify;
     use wiremock::{matchers::*, Mock, MockServer, Request, ResponseTemplate};
     use zeroize::Zeroizing;
 
@@ -216,6 +232,18 @@ mod tests {
         exit_supervisor::{ExitMode, ExitPhase, ExitReason, ExitRequest, ExitRequestDisposition},
         AppState,
     };
+
+    struct RecordingTerminator {
+        calls: Arc<Mutex<Vec<i32>>>,
+        called: Arc<Notify>,
+    }
+
+    impl crate::exit_supervisor::ProcessTerminator for RecordingTerminator {
+        fn terminate(&self, exit_code: i32) {
+            self.calls.lock().unwrap().push(exit_code);
+            self.called.notify_waiters();
+        }
+    }
 
     fn verified_auth_session(token: &str, session_id: &str) -> AuthSession {
         let signing_key = SigningKey::generate(&mut OsRng);
@@ -421,6 +449,55 @@ mod tests {
                 generation: Some(dto.generation),
             }),
             ExitRequestDisposition::IgnoredStaleGeneration
+        );
+    }
+
+    #[tokio::test]
+    async fn login_lease_integrity_failure_requests_immediate_tamper_exit() {
+        let server = MockServer::start().await;
+        let response_signing_key = SigningKey::generate(&mut OsRng);
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+        mount_runtime_signed_login(&server, &response_signing_key, "tampered-token").await;
+        Mock::given(method("POST"))
+            .and(path("/api/integrity/report"))
+            .and(body_partial_json(serde_json::json!({
+                "phase": "login",
+                "reason": "lease_signature_invalid"
+            })))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let called = Arc::new(Notify::new());
+        let terminator = Arc::new(RecordingTerminator {
+            calls: calls.clone(),
+            called: called.clone(),
+        });
+        let client = CloudflareClient::new_injected_with_lease_key(
+            server.uri(),
+            DEFAULT_APP_VERSION,
+            client_signing_key.verifying_key(),
+        );
+        let state = AppState::try_with_client_and_terminator(client, terminator).unwrap();
+        let worker = state.exit_supervisor_worker.lock().unwrap().take().unwrap();
+        tokio::spawn(worker.run());
+        let terminated = called.notified();
+
+        let result = auth_login_inner(
+            &state,
+            "user".to_string(),
+            Zeroizing::new("password".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(1), terminated)
+            .await
+            .expect("login integrity failure must terminate through Rust supervisor");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [crate::exit_supervisor::PROTECTED_EXIT_CODE]
         );
     }
 

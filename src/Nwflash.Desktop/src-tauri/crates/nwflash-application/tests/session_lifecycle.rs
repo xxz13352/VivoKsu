@@ -18,7 +18,10 @@ use nwflash_protection::{
     LeaseBinding, LeaseClaims, LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
 };
 use rand_core::OsRng;
-use tokio::{sync::mpsc, time::timeout};
+use tokio::{
+    sync::mpsc,
+    time::{timeout, timeout_at, Instant},
+};
 
 const TOKEN: &str = "lifecycle-token";
 const USERNAME: &str = "lifecycle-user";
@@ -87,6 +90,31 @@ async fn exit_stop_bounds_pending_goodbye_and_clears_retained_session() {
     .await
     .expect("exit closeout must honor the supplied goodbye timeout")
     .expect("retained session should be cleared after timeout");
+
+    assert!(lifecycle.generation().await.is_none());
+    assert!(!lifecycle.is_running().await);
+}
+
+#[tokio::test]
+async fn absolute_deadline_boundary_clears_session_before_outer_timeout() {
+    let (active_tx, mut active_rx) = mpsc::unbounded_channel();
+    let callback: HeartbeatCallback = Arc::new(move |input| {
+        let active_tx = active_tx.clone();
+        Box::pin(async move {
+            if input.active {
+                active_tx.send(()).unwrap();
+                Ok(HeartbeatAdmission::Accepted(signed_lease(2)))
+            } else {
+                futures::future::pending().await
+            }
+        })
+    });
+    let lifecycle = short_lifecycle(callback, None, None);
+    lifecycle.start(lifecycle_session(1)).await.unwrap();
+    active_rx.recv().await.unwrap();
+    let deadline = Instant::now() + Duration::from_millis(20);
+
+    let _ = timeout_at(deadline, lifecycle.stop_until(deadline)).await;
 
     assert!(lifecycle.generation().await.is_none());
     assert!(!lifecycle.is_running().await);

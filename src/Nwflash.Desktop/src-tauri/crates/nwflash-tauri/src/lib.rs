@@ -74,11 +74,16 @@ pub struct AppState {
     pub(crate) operation_log_store: Arc<OperationLogStore>,
 }
 
-struct ClosureExitCleanup(Arc<dyn Fn(&OperationIdleLease) + Send + Sync + 'static>);
+type ExitCleanupFn = dyn Fn(&OperationIdleLease) -> Vec<std::path::PathBuf> + Send + Sync + 'static;
+
+struct ClosureExitCleanup(Arc<ExitCleanupFn>);
 
 impl exit_supervisor::ExitCleanup for ClosureExitCleanup {
-    fn revoke_capability_and_clear_token(&self, idle: &OperationIdleLease) {
-        (self.0)(idle);
+    fn revoke_capability_and_clear_token(
+        &self,
+        idle: &OperationIdleLease,
+    ) -> Vec<std::path::PathBuf> {
+        (self.0)(idle)
     }
 }
 
@@ -122,7 +127,7 @@ fn authorization_for_error(error: &CloudflareError) -> OperationAuthorization {
     }
 }
 
-fn exit_request_for_integrity(
+pub(crate) fn exit_request_for_integrity(
     generation: Option<String>,
     failure: nwflash_infrastructure::IntegrityFailure,
 ) -> exit_supervisor::ExitRequest {
@@ -214,8 +219,10 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
 
 impl AppState {
     pub fn try_new() -> Result<Self, CloudflareError> {
-        let client = CloudflareClient::new_default()?;
-        Self::try_with_client(client)
+        Self::try_with_client_result(
+            CloudflareClient::new_default(),
+            Arc::new(exit_supervisor::ProductionProcessTerminator),
+        )
     }
 
     #[cfg(not(test))]
@@ -232,7 +239,32 @@ impl AppState {
         .expect("debug AppState identity should initialize")
     }
 
+    #[cfg(test)]
     fn try_with_client(client: CloudflareClient) -> Result<Self, CloudflareError> {
+        Self::try_with_client_and_terminator(
+            client,
+            Arc::new(exit_supervisor::ProductionProcessTerminator),
+        )
+    }
+
+    fn try_with_client_result(
+        client: Result<CloudflareClient, CloudflareError>,
+        terminator: Arc<dyn exit_supervisor::ProcessTerminator>,
+    ) -> Result<Self, CloudflareError> {
+        match client {
+            Ok(client) => Self::try_with_client_and_terminator(client, terminator),
+            Err(error @ CloudflareError::Integrity(_)) => {
+                terminator.terminate(exit_supervisor::PROTECTED_EXIT_CODE);
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn try_with_client_and_terminator(
+        client: CloudflareClient,
+        terminator: Arc<dyn exit_supervisor::ProcessTerminator>,
+    ) -> Result<Self, CloudflareError> {
         let (session_events_tx, session_events_rx) = unbounded_channel();
         let process_identity = ProcessIdentity::generate().map_err(CloudflareError::Integrity)?;
         let session_token = Arc::new(RwLock::new(None));
@@ -399,12 +431,10 @@ impl AppState {
                     dual.clear();
                     owned_roots
                 });
-                for owned_root in owned_roots {
-                    let _ = std::fs::remove_dir_all(owned_root);
-                }
                 if let Ok(mut token) = token.write() {
                     let _ = commands::auth::clear_session_token(&mut token);
                 }
+                owned_roots
             })))
         };
         let integrity_reporter = integrity_reporter::IntegrityReporter::new(
@@ -422,7 +452,7 @@ impl AppState {
             operation_coordinator.clone(),
             closeout,
             cleanup,
-            Arc::new(exit_supervisor::ProductionProcessTerminator),
+            terminator,
         );
         *supervisor_slot
             .lock()
@@ -735,7 +765,7 @@ mod device_monitor_tests {
         fs,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -750,6 +780,19 @@ mod device_monitor_tests {
     };
     use nwflash_domain::{DomainError, OperationKind, OperationLogLevel};
     use nwflash_infrastructure::{CloudflareError, IntegrityFailure};
+    use tokio::sync::Notify;
+
+    struct RecordingBootstrapTerminator {
+        calls: Arc<Mutex<Vec<i32>>>,
+        called: Arc<Notify>,
+    }
+
+    impl crate::exit_supervisor::ProcessTerminator for RecordingBootstrapTerminator {
+        fn terminate(&self, exit_code: i32) {
+            self.calls.lock().unwrap().push(exit_code);
+            self.called.notify_waiters();
+        }
+    }
 
     struct DenyAllOperations;
 
@@ -780,6 +823,29 @@ mod device_monitor_tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("完整性")));
+    }
+
+    #[test]
+    fn bootstrap_pin_policy_integrity_failure_uses_injected_fatal_terminator() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let terminator = Arc::new(RecordingBootstrapTerminator {
+            calls: calls.clone(),
+            called: Arc::new(Notify::new()),
+        });
+
+        let result = AppState::try_with_client_result(
+            Err(CloudflareError::Integrity(IntegrityFailure::SpkiMismatch)),
+            terminator,
+        );
+
+        assert!(matches!(
+            result,
+            Err(CloudflareError::Integrity(IntegrityFailure::SpkiMismatch))
+        ));
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [crate::exit_supervisor::PROTECTED_EXIT_CODE]
+        );
     }
 
     #[test]

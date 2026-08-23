@@ -88,7 +88,16 @@ impl ProcessTerminator for ProductionProcessTerminator {
 }
 
 pub trait ExitCleanup: Send + Sync + 'static {
-    fn revoke_capability_and_clear_token(&self, idle: &OperationIdleLease);
+    fn revoke_capability_and_clear_token(
+        &self,
+        idle: &OperationIdleLease,
+    ) -> Vec<std::path::PathBuf>;
+
+    fn cleanup_files(&self, paths: Vec<std::path::PathBuf>) {
+        for path in paths {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 pub trait ExitCloseout: Send + Sync + 'static {
@@ -131,9 +140,8 @@ impl ExitCloseout for RuntimeExitCloseout {
         let usage = self.usage_reporter.clone();
         let reporter = self.integrity_reporter.clone();
         async move {
-            let remaining = deadline.saturating_duration_since(Instant::now());
             let goodbye = async move {
-                let _ = lifecycle.stop_with_goodbye_timeout(remaining).await;
+                let _ = lifecycle.stop_until(deadline).await;
             };
             let flush = async move {
                 usage.flush().await;
@@ -235,9 +243,6 @@ impl ExitSupervisorHandle {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.terminating || state.terminator_called {
-            return ExitRequestDisposition::AlreadyTerminating;
-        }
         let generation_matches = request
             .generation
             .as_deref()
@@ -246,6 +251,7 @@ impl ExitSupervisorHandle {
             return ExitRequestDisposition::IgnoredStaleGeneration;
         }
 
+        let running_worker = state.terminating;
         if let Some(accepted) = state.accepted.as_mut() {
             if accepted.request.mode == ExitMode::Delayed
                 && request.mode == ExitMode::ImmediateTamper
@@ -254,9 +260,18 @@ impl ExitSupervisorHandle {
                     request,
                     authenticated_report: generation_matches,
                 };
+                if running_worker {
+                    let _ = self.control.sender.send(());
+                }
                 return ExitRequestDisposition::EscalatedToTamper;
             }
+            if state.terminating || state.terminator_called {
+                return ExitRequestDisposition::AlreadyTerminating;
+            }
             return ExitRequestDisposition::Coalesced;
+        }
+        if state.terminating || state.terminator_called {
+            return ExitRequestDisposition::AlreadyTerminating;
         }
 
         self.control.coordinator.request_exit_pending();
@@ -341,29 +356,56 @@ impl ExitSupervisorWorker {
             state.terminating = true;
             state.accepted.clone()
         };
-        let Some(accepted) = request else {
+        let Some(mut accepted) = request else {
             return;
         };
         let _ = self.control.coordinator.begin_terminating(&idle);
 
-        let budget = match accepted.request.mode {
-            ExitMode::Delayed => DELAYED_CLOSEOUT_DEADLINE,
-            ExitMode::ImmediateTamper => TAMPER_CLOSEOUT_DEADLINE,
+        let final_deadline = loop {
+            let budget = match accepted.request.mode {
+                ExitMode::Delayed => DELAYED_CLOSEOUT_DEADLINE,
+                ExitMode::ImmediateTamper => TAMPER_CLOSEOUT_DEADLINE,
+            };
+            let deadline = Instant::now() + budget;
+            let closeout = AssertUnwindSafe(self.closeout.closeout(
+                accepted.request.clone(),
+                deadline,
+                accepted.authenticated_report,
+            ))
+            .catch_unwind();
+
+            if accepted.request.mode == ExitMode::ImmediateTamper {
+                let _ = timeout_at(deadline, closeout).await;
+                break deadline;
+            }
+
+            tokio::select! {
+                _ = timeout_at(deadline, closeout) => break deadline,
+                signal = self.receiver.recv() => {
+                    if signal.is_none() {
+                        break deadline;
+                    }
+                    let upgraded = self.control.state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .accepted
+                        .clone();
+                    if let Some(upgraded) = upgraded {
+                        accepted = upgraded;
+                    }
+                }
+            }
         };
-        let deadline = Instant::now() + budget;
-        let closeout = AssertUnwindSafe(self.closeout.closeout(
-            accepted.request,
-            deadline,
-            accepted.authenticated_report,
-        ))
-        .catch_unwind();
-        let _ = timeout_at(deadline, closeout).await;
 
         let cleanup = self.cleanup.clone();
-        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        let paths = panic::catch_unwind(AssertUnwindSafe(|| {
             cleanup.revoke_capability_and_clear_token(&idle)
-        }));
+        }))
+        .unwrap_or_default();
         drop(idle);
+
+        let cleanup_task = tokio::task::spawn_blocking(move || cleanup.cleanup_files(paths));
+        let _ = timeout_at(final_deadline, cleanup_task).await;
 
         {
             let mut state = self
@@ -433,14 +475,62 @@ mod tests {
         fn revoke_capability_and_clear_token(
             &self,
             _idle: &nwflash_application::OperationIdleLease,
-        ) {
+        ) -> Vec<std::path::PathBuf> {
             self.events.lock().unwrap().push("cleanup");
+            Vec::new()
+        }
+    }
+
+    struct BlockingFileCleanup {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        started: Arc<Notify>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ExitCleanup for BlockingFileCleanup {
+        fn revoke_capability_and_clear_token(
+            &self,
+            _idle: &nwflash_application::OperationIdleLease,
+        ) -> Vec<std::path::PathBuf> {
+            self.events.lock().unwrap().push("cleanup");
+            vec![std::path::PathBuf::from("blocking-cleanup-sentinel")]
+        }
+
+        fn cleanup_files(&self, _paths: Vec<std::path::PathBuf>) {
+            self.started.notify_waiters();
+            let _ = self.release.lock().unwrap().recv();
         }
     }
 
     struct RecordingTerminator {
         events: Arc<Mutex<Vec<&'static str>>>,
         called: Arc<Notify>,
+    }
+
+    struct EscalatingCloseout {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        delayed_started: Arc<Notify>,
+    }
+
+    impl ExitCloseout for EscalatingCloseout {
+        fn closeout(
+            &self,
+            request: ExitRequest,
+            _deadline: Instant,
+            _authenticated_report: bool,
+        ) -> BoxFuture<'static, ()> {
+            match request.mode {
+                ExitMode::Delayed => {
+                    self.events.lock().unwrap().push("delayed-closeout");
+                    self.delayed_started.notify_waiters();
+                    futures::future::pending().boxed()
+                }
+                ExitMode::ImmediateTamper => {
+                    self.events.lock().unwrap().push("tamper-closeout");
+                    futures::future::ready(()).boxed()
+                }
+            }
+        }
     }
 
     impl ProcessTerminator for RecordingTerminator {
@@ -700,6 +790,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tamper_after_delayed_closeout_start_cancels_and_tightens_worker() {
+        let coordinator = OperationCoordinator::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let delayed_started = Arc::new(Notify::new());
+        let terminated = Arc::new(Notify::new());
+        let (handle, worker) = ExitSupervisor::build(
+            coordinator,
+            Arc::new(EscalatingCloseout {
+                events: events.clone(),
+                delayed_started: delayed_started.clone(),
+            }),
+            Arc::new(RecordingCleanup {
+                events: events.clone(),
+            }),
+            Arc::new(RecordingTerminator {
+                events: events.clone(),
+                called: terminated.clone(),
+            }),
+        );
+        tokio::spawn(worker.run());
+        handle
+            .install_generation("generation-a".to_string())
+            .unwrap();
+        let closeout_started = delayed_started.notified();
+        let termination = terminated.notified();
+
+        assert_eq!(
+            handle.request(delayed("generation-a")),
+            ExitRequestDisposition::Accepted
+        );
+        tokio::time::timeout(Duration::from_secs(1), closeout_started)
+            .await
+            .expect("delayed closeout should start");
+        assert_eq!(
+            handle.request(tamper()),
+            ExitRequestDisposition::EscalatedToTamper
+        );
+        tokio::time::timeout(Duration::from_secs(1), termination)
+            .await
+            .expect("late tamper must tighten the running worker");
+
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [
+                "delayed-closeout",
+                "tamper-closeout",
+                "cleanup",
+                "terminate"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn pending_tamper_closeout_is_abandoned_at_one_750_ms_deadline() {
         let coordinator = OperationCoordinator::default();
         let (handle, events, terminated) = harness(coordinator, true);
@@ -717,5 +860,49 @@ mod tests {
             events.lock().unwrap().as_slice(),
             ["tamper-closeout", "cleanup", "terminate"]
         );
+    }
+
+    #[tokio::test]
+    async fn blocked_file_cleanup_cannot_extend_tamper_deadline() {
+        let coordinator = OperationCoordinator::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cleanup_started = Arc::new(Notify::new());
+        let terminated = Arc::new(Notify::new());
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (handle, worker) = ExitSupervisor::build(
+            coordinator,
+            Arc::new(RecordingCloseout {
+                events: events.clone(),
+                pending: false,
+            }),
+            Arc::new(BlockingFileCleanup {
+                events: events.clone(),
+                started: cleanup_started.clone(),
+                release: Mutex::new(release_rx),
+            }),
+            Arc::new(RecordingTerminator {
+                events: events.clone(),
+                called: terminated.clone(),
+            }),
+        );
+        tokio::spawn(worker.run());
+        let cleanup_wait = cleanup_started.notified();
+        let termination_wait = terminated.notified();
+        let started = Instant::now();
+
+        assert_eq!(handle.request(tamper()), ExitRequestDisposition::Accepted);
+        tokio::time::timeout(Duration::from_secs(1), cleanup_wait)
+            .await
+            .expect("blocking cleanup should start off the supervisor task");
+        tokio::time::timeout(Duration::from_secs(1), termination_wait)
+            .await
+            .expect("blocking cleanup must not suppress termination");
+
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            ["tamper-closeout", "cleanup", "terminate"]
+        );
+        release_tx.send(()).unwrap();
     }
 }

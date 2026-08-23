@@ -284,11 +284,20 @@ impl SessionLifecycle {
         &self,
         goodbye_timeout: Duration,
     ) -> Result<(), SessionLifecycleError> {
-        if self.state.session.read().await.is_none() {
-            return Err(SessionLifecycleError::NotStarted);
-        }
+        self.stop_until(Instant::now() + goodbye_timeout).await
+    }
 
-        let deadline = Instant::now() + goodbye_timeout;
+    pub async fn stop_until(&self, deadline: Instant) -> Result<(), SessionLifecycleError> {
+        let Some(goodbye_input) = self.heartbeat_input(false).await else {
+            return Err(SessionLifecycleError::NotStarted);
+        };
+
+        if let Some(mut session) = self.state.session.write().await.take() {
+            session.token.zeroize();
+        }
+        self.state.running.store(false, Ordering::Release);
+        self.state.healthy.store(false, Ordering::Release);
+        self.state.transient_failures.store(0, Ordering::Release);
 
         if let Some(stop_token) = self.state.stop_token.lock().await.take() {
             stop_token.cancel();
@@ -302,25 +311,11 @@ impl SessionLifecycle {
             }
         }
 
-        self.send_goodbye_until(deadline).await;
-        if let Some(mut session) = self.state.session.write().await.take() {
-            session.token.zeroize();
+        if deadline > Instant::now() {
+            let call = (self.heartbeat_fn)(goodbye_input);
+            let _ = timeout_at(deadline, call).await;
         }
-        self.state.running.store(false, Ordering::Release);
-        self.state.healthy.store(false, Ordering::Release);
-        self.state.transient_failures.store(0, Ordering::Release);
         Ok(())
-    }
-
-    async fn send_goodbye_until(&self, deadline: Instant) {
-        if deadline <= Instant::now() {
-            return;
-        }
-        let Some(input) = self.heartbeat_input(false).await else {
-            return;
-        };
-        let call = (self.heartbeat_fn)(input);
-        let _ = timeout_at(deadline, call).await;
     }
 
     async fn heartbeat_input(&self, active: bool) -> Option<HeartbeatInput> {
