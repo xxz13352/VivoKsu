@@ -1,64 +1,40 @@
-# user.nwflash.cc.cd —— Nwflash 用户自助门户
+# Personal Ops user portal
 
-面向 **Nwflash 授权客户**的个人账户后台(Cloudflare Worker `nwflash-user`,高级白 + 毛玻璃设计),与 `api.nwflash.cc.cd` / `web.nwflash.cc.cd` 共用 D1 数据库 `nwflash-db`。
+`cloudflare/user` is the Personal Ops self-service portal for an authorized user's account. It has four primary views: overview, activity, devices and sessions, and security.
 
-## 功能
+## Authentication and privacy
 
-| 功能 | 说明 |
-| --- | --- |
-| **登录** | 账号 + 密码(自含 PBKDF2,与桌面端同账号);返回该用户的 API token,后续请求带 `Authorization: Bearer` |
-| **我的查询日志** | 只看**自己**的 `access_logs`(PD / 版本 / 状态 / URL),分页 + PD 过滤;✓ OKAY / ✕ FAILED 双墨 |
-| **在线会话** | 自己账户的桌面端在线会话(版本 / IP / 上线 / 时长),实时「当前在线」身份片,**⟠ 强制下线**仅限本人会话 |
-| **修改密码** | 校验当前密码后更新(≥6 位,新旧不可相同) |
+Login creates the `__Host-nwflash_user` cookie. It is `Secure`, `HttpOnly`, `SameSite=Strict`, and scoped to `/`; an optional remembered login lasts 30 days. The browser never receives, persists, or sends a bearer token through JavaScript. Non-GET API requests also require `X-Requested-With: XMLHttpRequest`.
 
-## 界面「高级白 + 毛玻璃」
+Activities are restricted to the authenticated owner and return only safe summaries. Operation detail currently returns `steps_state: "unavailable"`, an empty `steps` array, and `steps_message: "无更详细数据"`; the portal must not invent steps. Sessions expose only `ip_masked`, never the raw IP.
 
-客户面向表面 = **冷白画布 `#F5F7F9` + 磨砂玻璃卡片**(与暗色管理台形成明暗双面):
+Changing a password replaces the authoritative `api_users.token` with a `revoked:` marker and deletes that user's leases and online sessions. The response expires the cookie and requires reauthentication. Any later request authenticated by a revoked or missing token returns 401 and expires the cookie.
 
-- **磨砂玻璃**(Double-Bezel):外层衬底壳 + 内层 `linear-gradient(150deg, rgba(255,255,255,.78), rgba(255,255,255,.5))` + `backdrop-filter: blur(18px) saturate(160%)` + 内顶高光。
-- **单一深青强调 `#0E7A6F`**(在线/激活/OKAY/主操作)+ rose `#C23E38`(危险/强制下线);零 em-dash;系统字体栈(Segoe UI Variable + Cascadia Mono)。
-- **签名**:顶栏实时「当前在线 · N 会话」身份片(青点呼吸,reduced-motion 静止)+ ⟠ 玫瑰急停。
-- WCAG AA(ink 14.6 / faint 4.6 / teal 4.9 / rose 4.8)、焦点环、`aria-live`、移动端折叠。
+## Current API
 
-## 目录
+All responses are JSON. All non-login endpoints require the HttpOnly cookie. All non-GET endpoints require the XMLHttpRequest header.
 
-```
-user/
-├─ wrangler.toml       # D1 绑定 + 自定义域 user.nwflash.cc.cd
-├─ src/index.ts        # Worker:登录 + 自助 API + 鉴权 + 安全头 + SPA 托管
-└─ src/user.html       # 用户门户单页(登录 / 我的日志 / 在线会话 / 修改密码)
-```
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/api/login` | POST | Authenticate and set the cookie |
+| `/api/logout` | POST | Expire the cookie |
+| `/api/me` | GET | Current identity and active-session count |
+| `/api/me/overview` | GET | Activity and session totals |
+| `/api/me/activities?type&status&limit&offset` | GET | Owned, sanitized activity list |
+| `/api/me/activities/{activityId}` | GET | Owned activity detail; unknown or unowned is 404 |
+| `/api/me/sessions` | GET | Owned active sessions with masked IPs |
+| `/api/me/sessions/kick` | POST | Request exit for an owned session |
+| `/api/me/password` | POST | Change password and force reauthentication |
 
-## API(user.nwflash.cc.cd)
+The frozen request and response shapes are in [docs/client-api-handoff.md](docs/client-api-handoff.md). The subsystem design and security boundaries are in [docs/architecture.md](docs/architecture.md).
 
-| 端点 | 方法 | 鉴权 | 说明 |
-| --- | --- | --- | --- |
-| `/api/login` | POST | 免 | `{username,password}` → `{ok, token, username, name}` |
-| `/api/me` | GET | Bearer | 用户信息 + `online`(活跃会话数) |
-| `/api/me/logs?limit&offset&pd` | GET | Bearer | 本人 `access_logs`,返回 `{logs, total}` |
-| `/api/me/password` | POST | Bearer | `{current, newPassword}` → 校验当前密码后更新 |
-| `/api/me/sessions` | GET | Bearer | 本人在线会话(含 `force_exit`) |
-| `/api/me/sessions/kick` | POST | Bearer | `{sessionId}` → 仅限本人会话设 `force_exit` |
+## Local verification
 
-> 鉴权 = 与桌面端同源的 API token(`api_users.token`);写操作额外校验 `X-Requested-With: XMLHttpRequest`(CSRF 兜底)。
+Run from `cloudflare/user`:
 
-## 安全(与 api/web 同规格)
-
-- 全站 HTTPS(Cloudflare 边缘 TLS 1.3)、HSTS、CSP(`script-src 'self' 'unsafe-inline'`)、`X-Frame-Options: DENY`、no-store。
-- 密码 PBKDF2-SHA256(100k 迭代)+ 随机盐;token 仅存 `api_users`,门户只在本浏览器会话持有(可「记住登录」存 localStorage)。
-- **越权隔离**:所有 `/api/me/*` 查询与写操作按 `api_user_id` 过滤,用户只能看/改自己账户的数据。
-
-## 部署
-
-```bash
-cd cloudflare/user
-npx wrangler deploy          # 绑定自定义域 user.nwflash.cc.cd
+```powershell
+npm test
+npm run typecheck
 ```
 
-> D1(`nwflash-db`)已由 api / web 建好,用户门户只读/写同一库,无需额外建表。
-
-## 功能记录
-
-| 日期 | 变更 |
-| --- | --- |
-| 2026-08-14 | 初始上线:Worker `nwflash-user` + 自定义域 `user.nwflash.cc.cd`;高级白 + 毛玻璃门户;登录 / 我的日志 / 在线会话(⟠ 强制下线)/ 修改密码;PBKDF2 + Bearer token + CSRF |
+These commands run local tests and a dry-run Worker build only. Verification does **not** authorize or perform a deployment. Client integration remains on hold until the coordinating task implements and contract-tests the shared API Worker revoked-marker behavior.
