@@ -48,7 +48,7 @@ npm run deploy                # 预检远端签名 secret 后部署
 ```
 
 > D1(`nwflash-db`)建库 / 建表见 [web/README.md](web/README.md);`/api/rom` 依赖 D1 做版本控制与访问日志。
-> 必须先应用 `web/schema.sql` 中的 `session_leases`、`integrity_events` 与 `integrity_rate_limits` 表。`npm run deploy` 缺少 `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 时失败;不要直接调用 `wrangler deploy` 绕过预检。
+> 必须先应用 `web/schema.sql` 中的 `session_leases`、`integrity_event_claims`、`integrity_events` 与 `integrity_rate_limits` 表。`npm run deploy` 缺少 `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 时失败;不要直接调用 `wrangler deploy` 绕过预检。
 
 部署后验证:
 

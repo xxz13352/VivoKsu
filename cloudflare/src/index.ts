@@ -78,7 +78,7 @@ export default {
       }
 
       if (url.pathname === "/api/integrity/report" && request.method === "POST") {
-        return acceptIntegrityReport(env, request);
+        return await acceptIntegrityReport(env, request);
       }
 
       // Nwflash 版本策略(免登录,桌面端启动拦截用)。
@@ -288,14 +288,52 @@ async function acceptIntegrityReport(env: Env, request: Request): Promise<Respon
     trusted = 1;
   }
 
-  const claimed = await env.DB.prepare(
-    `INSERT INTO integrity_events
-       (event_id, api_user_id, trusted, phase, reason, client_version, build_id, occurred_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(event_id) DO NOTHING
-     RETURNING event_id`,
-  )
-    .bind(
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = Math.floor(now / INTEGRITY_RATE_WINDOW_SECONDS) * INTEGRITY_RATE_WINDOW_SECONDS;
+  const ipHash = await integrityIpHash(request.headers.get("CF-Connecting-IP") || "unknown");
+  const claimToken = crypto.randomUUID();
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO integrity_event_claims (event_id, claim_token, outcome, created_at, updated_at)
+       VALUES (?, ?, 'pending', ?, ?)
+       ON CONFLICT(event_id) DO NOTHING
+       RETURNING claim_token`,
+    ).bind(report.event_id, claimToken, now, now),
+    env.DB.prepare(
+      `INSERT INTO integrity_rate_limits (ip_hash, window_start, count)
+       SELECT ?, ?, 1
+       WHERE EXISTS (
+         SELECT 1 FROM integrity_event_claims
+         WHERE event_id = ? AND claim_token = ? AND outcome = 'pending'
+       )
+       ON CONFLICT(ip_hash, window_start) DO UPDATE SET count = integrity_rate_limits.count + 1
+       WHERE EXISTS (
+         SELECT 1 FROM integrity_event_claims
+         WHERE event_id = ? AND claim_token = ? AND outcome = 'pending'
+       )
+       RETURNING count`,
+    ).bind(ipHash, windowStart, report.event_id, claimToken, report.event_id, claimToken),
+    env.DB.prepare(
+      `UPDATE integrity_event_claims
+       SET outcome = CASE
+           WHEN COALESCE((
+             SELECT count FROM integrity_rate_limits WHERE ip_hash = ? AND window_start = ?
+           ), ?) <= ? THEN 'accepted' ELSE 'rejected' END,
+           updated_at = ?
+       WHERE event_id = ? AND claim_token = ? AND outcome = 'pending'
+       RETURNING outcome`,
+    ).bind(ipHash, windowStart, INTEGRITY_RATE_LIMIT + 1, INTEGRITY_RATE_LIMIT, now, report.event_id, claimToken),
+    env.DB.prepare(
+      `INSERT INTO integrity_events
+         (event_id, api_user_id, trusted, phase, reason, client_version, build_id, occurred_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM integrity_event_claims
+         WHERE event_id = ? AND claim_token = ? AND outcome = 'accepted'
+       )
+       ON CONFLICT(event_id) DO NOTHING
+       RETURNING event_id`,
+    ).bind(
       report.event_id,
       userId,
       trusted,
@@ -304,36 +342,28 @@ async function acceptIntegrityReport(env: Env, request: Request): Promise<Respon
       report.client_version,
       report.build_id,
       report.occurred_at,
-    )
-    .first<{ event_id: string }>();
-  if (!claimed) return json({ ok: true, duplicate: true }, 200);
+      report.event_id,
+      claimToken,
+    ),
+  ]);
 
-  const now = Math.floor(Date.now() / 1000);
-  const windowStart = Math.floor(now / INTEGRITY_RATE_WINDOW_SECONDS) * INTEGRITY_RATE_WINDOW_SECONDS;
-  const ipHash = await integrityIpHash(request.headers.get("CF-Connecting-IP") || "unknown");
-  let rate: { count: number } | null;
-  try {
-    rate = await env.DB.prepare(
-      `INSERT INTO integrity_rate_limits (ip_hash, window_start, count)
-       VALUES (?, ?, 1)
-       ON CONFLICT(ip_hash, window_start) DO UPDATE SET count = integrity_rate_limits.count + 1
-       RETURNING count`,
-    )
-      .bind(ipHash, windowStart)
-      .first<{ count: number }>();
-  } catch (error) {
-    await releaseIntegrityClaim(env, report.event_id);
-    throw error;
+  const claimed = (results[0] as D1Result<{ claim_token: string }>).results[0];
+  if (claimed) {
+    const outcome = (results[2] as D1Result<{ outcome: string }>).results[0]?.outcome;
+    const inserted = (results[3] as D1Result<{ event_id: string }>).results[0];
+    if (outcome === "accepted" && inserted) return json({ ok: true, accepted: true }, 202);
+    if (outcome === "rejected" && !inserted) return json({ error: "完整性事件上报过于频繁。" }, 429);
+    throw new Error("integrity claim transaction returned an inconsistent outcome");
   }
-  if (!rate || rate.count > INTEGRITY_RATE_LIMIT) {
-    await releaseIntegrityClaim(env, report.event_id);
-    return json({ error: "完整性事件上报过于频繁。" }, 429);
-  }
-  return json({ ok: true, accepted: true }, 202);
-}
 
-async function releaseIntegrityClaim(env: Env, eventId: string): Promise<void> {
-  await env.DB.prepare("DELETE FROM integrity_events WHERE event_id = ?").bind(eventId).run();
+  const committed = await env.DB.prepare(
+    "SELECT outcome FROM integrity_event_claims WHERE event_id = ?",
+  )
+    .bind(report.event_id)
+    .first<{ outcome: string }>();
+  if (committed?.outcome === "accepted") return json({ ok: true, duplicate: true }, 200);
+  if (committed?.outcome === "rejected") return json({ error: "完整性事件上报过于频繁。" }, 429);
+  throw new Error("integrity duplicate has no committed outcome");
 }
 
 async function purgeIntegrityRateLimits(env: Env): Promise<void> {

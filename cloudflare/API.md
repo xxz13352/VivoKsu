@@ -82,7 +82,7 @@
 - `reason` 闭集:`image_crc_invalid`、`lease_signature_invalid`、`lease_binding_invalid`、`lease_expired`、`sequence_rollback`、`pin_mismatch`、`debugger_detected`、`virtual_machine_detected`、`authenticode_invalid`、`release_manifest_invalid`。
 - `event_id`、`build_id` 只允许 URL-safe 标识字符;时间为正整数 epoch 秒。
 
-服务端先用 `INSERT ... ON CONFLICT DO NOTHING RETURNING` 原子认领 `event_id`;只有认领成功的唯一请求才递增 IP 配额。并发重复请求返回 `200 { "ok": true, "duplicate": true }`,D1 只保留一行且总共只消耗一个配额。每个 IP 的 SHA-256 base64url 摘要按 60 秒窗口最多接收 20 个不同事件;第 21 个会删除本次刚认领的事件后返回 `429`,不会留下超额事件。首次成功返回 `202`;D1 不保存原始 IP。请求体超限返回 `413`。
+服务端用单个 D1 transactional batch 完成 event claim、条件配额递增、accepted/rejected outcome 提交和 accepted event 写入。`integrity_event_claims` 的 `pending` 只存在于事务内部;外部请求只能看到已提交的 `accepted` 或 `rejected`。并发重复请求只有在 outcome 已 durable accepted 时返回 `200 { "ok": true, "duplicate": true }`;rejected claim 的重复请求返回 `429`。每个 IP 的 SHA-256 base64url 摘要按 60 秒窗口最多接收 20 个不同事件;第 21 个提交 rejected outcome 且不写 `integrity_events`。若配额语句报错,整个 batch(含 pending claim)回滚,竞争请求可重新认领,不会观察到 provisional success。首次 accepted 返回 `202`;D1 不保存原始 IP。请求体超限返回 `413`。
 
 ---
 
@@ -226,7 +226,7 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 { "ok": true, "force_exit": true, "reason": "违规下线" }
 ```
 
-活动心跳必须与 D1 中的用户、session ID、client version、build ID、process nonce 和当前 sequence **全部精确匹配**。服务端先签名 `sequence + 1` 候选,再用完整绑定元组和旧 sequence 执行原子 compare-and-swap;只有 CAS 获胜才返回候选。并发同序号最多一个成功;重放、回退、跳号、绑定变更、未知 session 或跨用户 ownership 返回 `409` 且不返回签名字段。签名失败发生在 CAS 之前,因此不会推进服务端 sequence。per-token 3 秒限速返回 `429`,同样不签发、不推进。强制退出响应不创建新能力。
+活动心跳必须与 D1 中的用户、session ID、client version、build ID、process nonce 和当前 sequence **全部精确匹配**。服务端先签名 `sequence + 1` 候选,再用完整绑定元组和旧 sequence 执行原子 compare-and-swap;CAS 同时要求 `online_sessions.force_exit_at` 仍为空,所以在读取后、CAS 前发生的强制退出也会阻止租约返回和 sequence 推进。只有 CAS 获胜才返回候选。并发同序号最多一个成功;重放、回退、跳号、绑定变更、未知 session 或跨用户 ownership 返回 `409` 且不返回签名字段。签名失败发生在 CAS 之前,因此不会推进服务端 sequence。per-token 3 秒限速返回 `429`,同样不签发、不推进。强制退出响应不创建新能力。
 
 goodbye 只需 `sessionId` 和 `active = false`;它删除当前用户的 `session_leases` 与 `online_sessions` 行并返回 `{ "ok": true, "force_exit": false }`,不要求签名 secret,也不创建新租约。
 

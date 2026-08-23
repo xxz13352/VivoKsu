@@ -33,6 +33,11 @@ interface StoredIntegrityEvent {
   occurredAt: number;
 }
 
+interface StoredIntegrityClaim {
+  outcome: "pending" | "accepted" | "rejected";
+  claimToken: string;
+}
+
 interface StoredSessionLease {
   session_id: string;
   user_id: number;
@@ -55,33 +60,151 @@ class FakeD1Database {
   }>();
   readonly sessionLeases = new Map<string, StoredSessionLease>();
   readonly integrityEvents = new Map<string, StoredIntegrityEvent>();
+  readonly integrityClaims = new Map<string, StoredIntegrityClaim>();
   readonly rateLimits = new Map<string, number>();
-  private integritySelectTarget = 0;
-  private integritySelectCount = 0;
-  private releaseIntegritySelects: (() => void) | null = null;
-  private integritySelectGate: Promise<void> = Promise.resolve();
+  private integrityClaimTarget = 0;
+  private integrityClaimCount = 0;
+  private releaseIntegrityClaims: (() => void) | null = null;
+  private integrityClaimGate: Promise<void> = Promise.resolve();
+  private initialRateCount = 0;
+  private shouldFailNextRateUpdate = false;
+  private sessionCasReached: (() => void) | null = null;
+  private sessionCasReachedPromise: Promise<void> = Promise.resolve();
+  private releaseSessionCas: (() => void) | null = null;
+  private sessionCasGate: Promise<void> = Promise.resolve();
+  private integrityTransactionTail: Promise<void> = Promise.resolve();
 
   prepare(query: string): FakeD1PreparedStatement {
     return new FakeD1PreparedStatement(this, query);
   }
 
   async batch(statements: FakeD1PreparedStatement[]): Promise<unknown[]> {
+    if (statements[0]?.normalizedQuery().startsWith("insert into integrity_event_claims")) {
+      await this.waitForIntegrityClaimBarrier();
+      return this.withIntegrityTransaction(() => this.executeIntegrityTransaction(statements));
+    }
     return Promise.all(statements.map((statement) => statement.run()));
   }
 
-  synchronizeIntegritySelects(count: number): void {
-    this.integritySelectTarget = count;
-    this.integritySelectCount = 0;
-    this.integritySelectGate = new Promise((resolve) => {
-      this.releaseIntegritySelects = resolve;
+  synchronizeIntegrityClaims(count: number): void {
+    this.integrityClaimTarget = count;
+    this.integrityClaimCount = 0;
+    this.integrityClaimGate = new Promise((resolve) => {
+      this.releaseIntegrityClaims = resolve;
     });
   }
 
-  async waitForIntegritySelectBarrier(): Promise<void> {
-    if (this.integritySelectTarget === 0) return;
-    this.integritySelectCount += 1;
-    if (this.integritySelectCount === this.integritySelectTarget) this.releaseIntegritySelects?.();
-    await this.integritySelectGate;
+  async waitForIntegrityClaimBarrier(): Promise<void> {
+    if (this.integrityClaimTarget === 0) return;
+    this.integrityClaimCount += 1;
+    if (this.integrityClaimCount === this.integrityClaimTarget) {
+      this.integrityClaimTarget = 0;
+      this.releaseIntegrityClaims?.();
+    }
+    await this.integrityClaimGate;
+  }
+
+  seedRateCount(count: number): void {
+    this.initialRateCount = count;
+  }
+
+  consumeInitialRateCount(): number {
+    const count = this.initialRateCount;
+    this.initialRateCount = 0;
+    return count;
+  }
+
+  failNextRateUpdate(): void {
+    this.shouldFailNextRateUpdate = true;
+  }
+
+  consumeRateUpdateFailure(): boolean {
+    if (!this.shouldFailNextRateUpdate) return false;
+    this.shouldFailNextRateUpdate = false;
+    return true;
+  }
+
+  pauseNextSessionCas(): { reached: Promise<void>; release: () => void } {
+    this.sessionCasReachedPromise = new Promise((resolve) => {
+      this.sessionCasReached = resolve;
+    });
+    this.sessionCasGate = new Promise((resolve) => {
+      this.releaseSessionCas = resolve;
+    });
+    return {
+      reached: this.sessionCasReachedPromise,
+      release: () => this.releaseSessionCas?.(),
+    };
+  }
+
+  async waitBeforeSessionCas(): Promise<void> {
+    if (!this.releaseSessionCas) return;
+    this.sessionCasReached?.();
+    await this.sessionCasGate;
+    this.sessionCasReached = null;
+    this.releaseSessionCas = null;
+  }
+
+  private async withIntegrityTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.integrityTransactionTail;
+    let release!: () => void;
+    this.integrityTransactionTail = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async executeIntegrityTransaction(statements: FakeD1PreparedStatement[]): Promise<unknown[]> {
+    const claimSnapshot = new Map([...this.integrityClaims].map(([key, value]) => [key, { ...value }]));
+    const eventSnapshot = new Map([...this.integrityEvents].map(([key, value]) => [key, { ...value }]));
+    const rateSnapshot = new Map(this.rateLimits);
+    try {
+      const [eventIdValue, claimTokenValue] = statements[0].bindings();
+      const eventId = String(eventIdValue);
+      const claimToken = String(claimTokenValue);
+      if (this.integrityClaims.has(eventId)) return emptyIntegrityBatchResults();
+
+      this.integrityClaims.set(eventId, { outcome: "pending", claimToken });
+      if (this.consumeRateUpdateFailure()) throw new Error("injected integrity rate update failure");
+
+      const [ipHashValue, windowStartValue] = statements[1].bindings();
+      const rateKey = `${String(ipHashValue)}|${Number(windowStartValue)}`;
+      const count = (this.rateLimits.get(rateKey) ?? this.consumeInitialRateCount()) + 1;
+      this.rateLimits.set(rateKey, count);
+      const outcome = count <= 20 ? "accepted" : "rejected";
+      this.integrityClaims.set(eventId, { outcome, claimToken });
+
+      if (outcome === "accepted") {
+        const [storedEventId, userId, trusted, phase, reason, clientVersion, buildId, occurredAt] = statements[3].bindings();
+        this.integrityEvents.set(eventId, {
+          eventId: String(storedEventId),
+          userId: userId == null ? null : Number(userId),
+          trusted: Number(trusted),
+          phase: String(phase),
+          reason: String(reason),
+          clientVersion: String(clientVersion),
+          buildId: String(buildId),
+          occurredAt: Number(occurredAt),
+        });
+      }
+
+      return [
+        d1Rows([{ claim_token: claimToken }]),
+        d1Rows([{ count }]),
+        d1Rows([{ outcome }]),
+        d1Rows(outcome === "accepted" ? [{ event_id: eventId }] : []),
+      ];
+    } catch (error) {
+      restoreMap(this.integrityClaims, claimSnapshot);
+      restoreMap(this.integrityEvents, eventSnapshot);
+      restoreMap(this.rateLimits, rateSnapshot);
+      throw error;
+    }
   }
 }
 
@@ -96,6 +219,14 @@ class FakeD1PreparedStatement {
   bind(...values: unknown[]): this {
     this.values = values;
     return this;
+  }
+
+  normalizedQuery(): string {
+    return normalizedSql(this.query);
+  }
+
+  bindings(): readonly unknown[] {
+    return this.values;
   }
 
   async first<T>(): Promise<T | null> {
@@ -119,10 +250,9 @@ class FakeD1PreparedStatement {
     if (sql.includes("from session_leases where session_id = ?")) {
       return (this.db.sessionLeases.get(String(this.values[0])) ?? null) as T | null;
     }
-    if (sql.includes("from integrity_events where event_id = ?")) {
-      const event = this.db.integrityEvents.get(String(this.values[0]));
-      await this.db.waitForIntegritySelectBarrier();
-      return (event ? { event_id: event.eventId } : null) as T | null;
+    if (sql.includes("from integrity_event_claims where event_id = ?")) {
+      const claim = this.db.integrityClaims.get(String(this.values[0]));
+      return (claim ? { outcome: claim.outcome } : null) as T | null;
     }
     if (sql.startsWith("insert into session_leases")) {
       const [sessionId, userId, username, clientVersion, buildId, processNonce, createdAt, updatedAt] = this.values;
@@ -143,10 +273,13 @@ class FakeD1PreparedStatement {
       return { sequence: 1 } as T;
     }
     if (sql.startsWith("update session_leases")) {
+      await this.db.waitBeforeSessionCas();
       const [nextSequence, updatedAt, sessionId, userId, username, clientVersion, buildId, processNonce, previousSequence] = this.values;
       const lease = this.db.sessionLeases.get(String(sessionId));
+      const online = this.db.sessions.get(String(sessionId));
       if (
         !lease
+        || online?.force_exit_at != null
         || lease.user_id !== Number(userId)
         || lease.username !== String(username)
         || lease.client_version !== String(clientVersion)
@@ -157,28 +290,6 @@ class FakeD1PreparedStatement {
       lease.sequence = Number(nextSequence);
       lease.updated_at = Number(updatedAt);
       return { sequence: lease.sequence } as T;
-    }
-    if (sql.startsWith("insert into integrity_events") && sql.includes("returning event_id")) {
-      const [eventId, userId, trusted, phase, reason, clientVersion, buildId, occurredAt] = this.values;
-      const key = String(eventId);
-      if (this.db.integrityEvents.has(key)) return null;
-      this.db.integrityEvents.set(key, {
-        eventId: key,
-        userId: userId == null ? null : Number(userId),
-        trusted: Number(trusted),
-        phase: String(phase),
-        reason: String(reason),
-        clientVersion: String(clientVersion),
-        buildId: String(buildId),
-        occurredAt: Number(occurredAt),
-      });
-      return { event_id: key } as T;
-    }
-    if (sql.startsWith("insert into integrity_rate_limits")) {
-      const key = `${String(this.values[0])}|${Number(this.values[1])}`;
-      const count = (this.db.rateLimits.get(key) ?? 0) + 1;
-      this.db.rateLimits.set(key, count);
-      return { count } as T;
     }
     throw new Error(`Unhandled D1 first(): ${this.query}`);
   }
@@ -225,25 +336,6 @@ class FakeD1PreparedStatement {
       return changed(current ? 1 : 0);
     }
     if (sql.startsWith("delete from session_leases")) return changed(0);
-    if (sql.startsWith("delete from integrity_events where event_id = ?")) {
-      return changed(this.db.integrityEvents.delete(String(this.values[0])) ? 1 : 0);
-    }
-    if (sql.startsWith("insert into integrity_events")) {
-      const [eventId, userId, trusted, phase, reason, clientVersion, buildId, occurredAt] = this.values;
-      const key = String(eventId);
-      if (this.db.integrityEvents.has(key)) return changed(0);
-      this.db.integrityEvents.set(key, {
-        eventId: key,
-        userId: userId == null ? null : Number(userId),
-        trusted: Number(trusted),
-        phase: String(phase),
-        reason: String(reason),
-        clientVersion: String(clientVersion),
-        buildId: String(buildId),
-        occurredAt: Number(occurredAt),
-      });
-      return changed();
-    }
     throw new Error(`Unhandled D1 run(): ${this.query}`);
   }
 }
@@ -256,8 +348,35 @@ function changed(changes = 1): { success: boolean; meta: { changes: number } } {
   return { success: true, meta: { changes } };
 }
 
+function d1Rows(results: unknown[]): { results: unknown[]; success: boolean; meta: { changes: number } } {
+  return { results, success: true, meta: { changes: results.length } };
+}
+
+function emptyIntegrityBatchResults(): unknown[] {
+  return [d1Rows([]), d1Rows([]), d1Rows([]), d1Rows([])];
+}
+
+function restoreMap<K, V>(target: Map<K, V>, snapshot: Map<K, V>): void {
+  target.clear();
+  for (const [key, value] of snapshot) target.set(key, value);
+}
+
 function totalRateCount(db: FakeD1Database): number {
   return [...db.rateLimits.values()].reduce((total, count) => total + count, 0);
+}
+
+async function withTimeout<T>(promise: Promise<T>, label: string, milliseconds = 1_000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 }
 
 function base64Url(bytes: ArrayBuffer | Uint8Array): string {
@@ -700,6 +819,33 @@ describe("signed lease routes", () => {
     expect(db.sessionLeases.get("session-abc")?.sequence).toBe(2);
   });
 
+  it("rejects the signed candidate when force-exit is set after the read but before CAS", async () => {
+    const { env, db, token } = await testEnv({ token: "force-exit-cas-race-token" });
+    expect((await postLogin(env)).status).toBe(200);
+    db.sessions.set("session-abc", {
+      user_id: 7,
+      last_seen_at: Math.floor(FIXED_NOW_MS / 1000),
+      force_exit_at: null,
+      force_exit_reason: null,
+    });
+    const cas = db.pauseNextSessionCas();
+
+    const heartbeatPromise = postHeartbeat(env, token);
+    await withTimeout(cas.reached, "heartbeat CAS");
+    const online = db.sessions.get("session-abc");
+    if (!online) throw new Error("expected online session at CAS barrier");
+    online.force_exit_at = Math.floor(FIXED_NOW_MS / 1000);
+    online.force_exit_reason = "force-exit race";
+    cas.release();
+    const response = await withTimeout(heartbeatPromise, "heartbeat response after CAS release");
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(409);
+    expect(body).not.toHaveProperty("lease_payload");
+    expect(body).not.toHaveProperty("lease_signature");
+    expect(db.sessionLeases.get("session-abc")?.sequence).toBe(1);
+  });
+
   it("preserves request, account, password, banned, and disabled failures during a signing outage", async () => {
     const malformed = await testEnv({ signingSecret: false });
     const unknown = await testEnv({ signingSecret: false });
@@ -909,7 +1055,7 @@ describe("integrity telemetry route", () => {
   it("atomically claims a concurrent duplicate event so exactly one request consumes quota", async () => {
     const { env, db } = await testEnv();
     const concurrency = 8;
-    db.synchronizeIntegritySelects(concurrency);
+    db.synchronizeIntegrityClaims(concurrency);
     const request = () => fetchWorker(env, "/api/integrity/report", {
       method: "POST",
       headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.31" },
@@ -922,6 +1068,45 @@ describe("integrity telemetry route", () => {
     expect(statuses.filter((status) => status === 202)).toHaveLength(1);
     expect(statuses.filter((status) => status === 200)).toHaveLength(concurrency - 1);
     expect(db.integrityEvents.size).toBe(1);
+    expect(db.integrityClaims.get("event-concurrent-idempotent")?.outcome).toBe("accepted");
+    expect(totalRateCount(db)).toBe(1);
+  });
+
+  it("never reports duplicate success while the winning concurrent claim is rejected over quota", async () => {
+    const { env, db } = await testEnv();
+    db.seedRateCount(20);
+    db.synchronizeIntegrityClaims(2);
+    const request = () => fetchWorker(env, "/api/integrity/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.32" },
+      body: JSON.stringify(telemetry("event-concurrent-over-quota")),
+    });
+
+    const responses = await Promise.all([request(), request()]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([429, 429]);
+    expect(db.integrityEvents.size).toBe(0);
+    expect(db.integrityClaims.get("event-concurrent-over-quota")?.outcome).toBe("rejected");
+    expect(totalRateCount(db)).toBe(21);
+  });
+
+  it("never exposes provisional duplicate success when the winning rate update errors", async () => {
+    const { env, db } = await testEnv();
+    db.failNextRateUpdate();
+    db.synchronizeIntegrityClaims(2);
+    const request = () => fetchWorker(env, "/api/integrity/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.33" },
+      body: JSON.stringify(telemetry("event-concurrent-rate-error")),
+    });
+
+    const responses = await Promise.all([request(), request()]);
+    const statuses = responses.map((response) => response.status).sort();
+
+    expect(statuses).toEqual([202, 500]);
+    expect(statuses).not.toContain(200);
+    expect(db.integrityEvents.size).toBe(1);
+    expect(db.integrityClaims.get("event-concurrent-rate-error")?.outcome).toBe("accepted");
     expect(totalRateCount(db)).toBe(1);
   });
 });
