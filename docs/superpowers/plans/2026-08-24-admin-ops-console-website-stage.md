@@ -1344,6 +1344,7 @@ git commit -m "test(admin): verify accessible responsive ops console"
 
 **Files:**
 - Create: `docs/superpowers/notes/2026-08-24-structured-trace-client-handoff.md`
+- Create: `docs/architecture/admin-website-subsystem.md`
 - Modify only files required by findings from the independent review.
 
 **Interfaces:**
@@ -1392,14 +1393,68 @@ The handoff must include:
 - explicit prohibition on modifying website contract without a version bump
 ```
 
-- [ ] **Step 5: Rerun the complete gate after review fixes**
+- [ ] **Step 5: Write the administrator website subsystem architecture**
+
+Create `docs/architecture/admin-website-subsystem.md` with exactly these scopes:
+
+```text
+1. Purpose and ownership boundary (`cloudflare/web` plus website trace contract only)
+2. Browser module tree and one responsibility per module
+3. Admin Worker route split, static asset delivery, CSP, no-store, and security headers
+4. D1 V1/V2 tables, indexes, retention windows, projection and deduplication
+5. Bearer upload authentication versus administrator session-cookie query authentication
+6. V2 flow: upload contract → credential boundary → D1 transaction/ack → admin keyset queries → five-level UI
+7. Browser URL router, page lifecycle, loading/empty/partial/stale/error/retry and mutation states
+8. Node/Workerd/Playwright/axe test layers and the exact nondeployment release gate
+9. Deployment boundary: schema/API before UI, dry-run only in this task, client producer deferred to Plan C
+```
+
+Do not describe the desktop application, user portal, VMP, release pipeline, or whole-project architecture beyond the interface boundary required to explain the website.
+
+- [ ] **Step 6: Safely remove only task-generated temporary/build/preview output**
+
+First configure Playwright output under the exact task-owned directory `cloudflare/web/.artifacts/admin-website/`. After tests and review, resolve each candidate and verify it is inside the isolated worktree and one of these roots:
+
+```text
+cloudflare/.wrangler/website-stage-api
+cloudflare/.wrangler/website-stage-web
+cloudflare/web/.artifacts/admin-website/test-results
+cloudflare/web/.artifacts/admin-website/playwright-report
+```
+
+Use this guarded PowerShell shape from the isolated worktree root:
+
+```powershell
+$taskRoot = (Resolve-Path '.').Path
+$relativeTargets = @(
+  'cloudflare\.wrangler\website-stage-api',
+  'cloudflare\.wrangler\website-stage-web',
+  'cloudflare\web\.artifacts\admin-website\test-results',
+  'cloudflare\web\.artifacts\admin-website\playwright-report'
+)
+$approvedTargets = $relativeTargets | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $taskRoot $_)) }
+foreach ($relativeTarget in $relativeTargets) {
+  $candidate = Join-Path $taskRoot $relativeTarget
+  if (-not (Test-Path -LiteralPath $candidate)) { continue }
+  $resolved = (Resolve-Path -LiteralPath $candidate).Path
+  if (-not $resolved.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove path outside task worktree: $resolved"
+  }
+  if ($resolved -notin $approvedTargets) { throw "Unapproved cleanup target: $resolved" }
+  Remove-Item -LiteralPath $resolved -Recurse -Force
+}
+```
+
+Then run `git status --short` and inspect every remaining untracked path. Do not use `git clean`; do not delete `.superpowers/sdd/**`, browser brainstorm sessions, dependency caches, unknown untracked files, or any path outside the four exact targets.
+
+- [ ] **Step 7: Rerun the complete gate after review fixes and cleanup**
 
 Run the Step 1 command block again. Expected: all exit `0`.
 
-- [ ] **Step 6: Commit website acceptance and handoff**
+- [ ] **Step 8: Commit website acceptance, subsystem architecture, and handoff**
 
 ```powershell
-git add cloudflare docs/superpowers/notes/2026-08-24-structured-trace-client-handoff.md
+git add cloudflare docs/architecture/admin-website-subsystem.md docs/superpowers/notes/2026-08-24-structured-trace-client-handoff.md
 git commit -m "docs: hand off structured trace v2 client contract"
 ```
 
