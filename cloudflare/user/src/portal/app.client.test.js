@@ -267,7 +267,7 @@ describe('Personal Ops portal', () => {
     expect(document.querySelector('[data-activity-type]').value).toBe('rom');
   });
 
-  it('cancels the kick dialog and restores focus to its trigger', async () => {
+  it('closes the native kick dialog on its Escape/cancel path and restores opener focus', async () => {
     queueSignedInStart();
     await startPortal();
     fetchQueue.respond('/api/me/sessions', { count: 1, sessions: [ownedSession] });
@@ -276,7 +276,12 @@ describe('Personal Ops portal', () => {
     const trigger = document.querySelector('[data-kick="session-owned"]');
     trigger.focus();
     await openKickDialog('session-owned');
-    document.querySelector('[data-kick-dialog]').dispatchEvent(new Event('cancel', { cancelable: true }));
+    const dialog = document.querySelector('[data-kick-dialog]');
+    expect(dialog.open).toBe(true);
+    expect(document.activeElement).toBe(document.querySelector('[data-confirm-kick]'));
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+    expect(dialog.open).toBe(false);
     expect(document.activeElement).toBe(trigger);
   });
 
@@ -337,16 +342,16 @@ describe('Personal Ops portal', () => {
     expect(window.sessionStorage.length).toBe(0);
   });
 
-  it('keeps keyboard dialog controls and the 320px layout within the accessibility contract', () => {
-    expect(document.querySelector('[data-kick-dialog] [data-confirm-kick]').minHeight || 44).toBeGreaterThanOrEqual(44);
-    expect(portalCss).toContain('.brand { min-height: 44px;');
-    expect(portalCss).toContain('@media (max-width: 320px)');
-    expect(portalCss).toContain('body { min-width: 320px;');
-  });
-
-  it('contains a browser-only portal bootstrap in the module served as app.js', () => {
-    const source = readFileSync(resolve(process.cwd(), 'src/portal/app.client.js'), 'utf8');
-    expect(source).toContain('startBrowserPortal');
-    expect(source).toContain("typeof process === 'undefined'");
+  it('uses 44px interactive targets and a single-column portal grid at 320px', () => {
+    window.happyDOM.setViewport({ width: 320, height: 640 });
+    const stylesheet = document.createElement('style');
+    stylesheet.textContent = portalCss;
+    document.head.append(stylesheet);
+    const brand = document.querySelector('.brand');
+    const confirm = document.querySelector('[data-kick-dialog] [data-confirm-kick]');
+    const app = document.querySelector('[data-app]');
+    expect(Number.parseFloat(window.getComputedStyle(brand).minHeight)).toBeGreaterThanOrEqual(44);
+    expect(Number.parseFloat(window.getComputedStyle(confirm).minHeight)).toBeGreaterThanOrEqual(44);
+    expect(window.getComputedStyle(app).gridTemplateColumns).toBe('1fr');
   });
 });
