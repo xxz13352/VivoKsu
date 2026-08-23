@@ -5,11 +5,16 @@
   "description": "VivoKsu ROM OTA 链接代理(Cloudflare Worker),上游 VOTA api.otau.cc.cd",
   "type": "module",
   "scripts": {
+    "predeploy": "wrangler secret list --format json | node -e \"let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>{const secrets=JSON.parse(input);if(!secrets.some(secret=>secret.name==='SESSION_SIGNING_PRIVATE_KEY_PKCS8')){console.error('Missing Cloudflare secret: SESSION_SIGNING_PRIVATE_KEY_PKCS8');process.exit(1)}})\"",
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/index.ts src/security.ts && wrangler deploy --dry-run --outdir .wrangler/task-2-dry-run"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260811.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7",
     "wrangler": "^4.122.0"
   }
 }

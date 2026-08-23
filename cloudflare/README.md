@@ -22,9 +22,11 @@ Nwflash 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 | 端点 | 说明 |
 | --- | --- |
 | `GET /health` | 健康检查 |
-| `POST /api/login` | 账号密码 → API token(桌面端登录门禁) |
+| `POST /api/login` | 账号密码 → API token + Ed25519 签名登录租约 |
 | `GET /api/me` | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
-| `POST /api/heartbeat` | 在线会话心跳(登录后每 5s;检测强制下线 / 封禁 / 426) |
+| `POST /api/heartbeat` | 在线会话心跳;活动请求返回严格递增的签名租约,goodbye 保持可用 |
+| `GET /api/security/pins` | `api.nwflash.cc.cd` 的签名叶证书 + WE1 备用 SPKI pin 清单 |
+| `POST /api/integrity/report` | 匿名/鉴权最小完整性事件(4 KiB 上限、闭集字段、IP 限流、event ID 幂等) |
 | `GET /api/online` | 在线用户列表(鉴权;显示名/版本/时长,不含 username/IP) |
 | `POST /api/operation/authorize` | 操作许可门禁(每个用户操作运行前询问;默认放行、封禁/停用拒绝) |
 | `POST /api/usage/logs` | 使用日志批量上传(按操作分类存储) |
@@ -39,10 +41,14 @@ cd cloudflare
 npm install
 npx wrangler login            # 浏览器登录 Cloudflare 账户(域名 nwflash.cc.cd 需已在账户内)
 npx wrangler secret put VOTA_API_TOKEN    # 粘贴 VOTA 的 API Token
-npx wrangler deploy           # 部署并绑定自定义域 api.nwflash.cc.cd
+npx wrangler secret put SESSION_SIGNING_PRIVATE_KEY_PKCS8  # 无填充 base64url PKCS#8 Ed25519 DER
+npm test
+npm run typecheck             # strict tsc + Wrangler dry-run,不会部署
+npm run deploy                # 预检远端签名 secret 后部署
 ```
 
 > D1(`nwflash-db`)建库 / 建表见 [web/README.md](web/README.md);`/api/rom` 依赖 D1 做版本控制与访问日志。
+> 必须先应用 `web/schema.sql` 中的 `integrity_events` / `integrity_rate_limits` 表。`npm run deploy` 缺少 `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 时失败;不要直接调用 `wrangler deploy` 绕过预检。
 
 部署后验证:
 
@@ -58,5 +64,7 @@ curl "https://api.nwflash.cc.cd/api/rom?pd=PD2417&version=16.2.12.0.W10.V000L1"
 
 ## 机密
 
-- `VOTA_API_TOKEN` 用 secret 存,不进代码。非机密项在 `wrangler.toml [vars]`:
+- `VOTA_API_TOKEN` 用 secret 存,不进代码。
+- `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 是 Ed25519 PKCS#8 DER 的无填充 base64url,只从 Worker Env 导入为 non-extractable signing key;缺失/无效时登录、活动心跳和 pin 清单返回 `503`,不回退到无签名能力。仓库不保存固定测试 seed、PKCS#8 fixture 或任何私钥。
+- 非机密项在 `wrangler.toml [vars]`:
   `VOTA_BASE_URL`(默认 https://api.otau.cc.cd)、`VOTA_ACTION`(resolve_url / resolve_flash_url)、`VOTA_VER`(0.1.0)。

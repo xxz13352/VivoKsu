@@ -7,7 +7,10 @@ binding = "DB"
 database_name = "nwflash-db"
 database_id = "a35d1ea1-620f-436c-9eb5-7f58312c1cf6"
 
-# 变量(非机密)。机密 VOTA_API_TOKEN 用 `wrangler secret put VOTA_API_TOKEN` 设置。
+# 变量(非机密)。生产机密必须用 `wrangler secret put` 设置,不得写入本文件:
+# - VOTA_API_TOKEN
+# - SESSION_SIGNING_PRIVATE_KEY_PKCS8(无填充 base64url PKCS#8 Ed25519 private-key DER)
+# `npm run deploy` 会先读取远端 secret 清单;缺少签名 secret 时部署预检失败。
 [vars]
 VOTA_BASE_URL = "https://api.otau.cc.cd"
 VOTA_ACTION = "resolve_url"
@@ -19,7 +22,7 @@ ONLINE_TIMEOUT_MS = "120000"
 # 每用户同时在线会话数上限。默认 3。
 ONLINE_SESSION_CAP = "3"
 
-# Cron:在线会话 stale 行兜底清理(客户端全崩溃时仍能可靠过期)。
+# Cron:在线会话 stale 行兜底清理 + 完整性遥测限流窗口清理。
 [triggers]
 crons = ["*/3 * * * *"]
 

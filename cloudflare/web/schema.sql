@@ -114,3 +114,28 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   PRIMARY KEY (k, window_start)
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_window ON login_attempts(window_start);
+
+-- 客户端完整性事件。只保存闭集枚举和构建元数据;不保存 token/password/path/URL/serial/raw output。
+CREATE TABLE IF NOT EXISTS integrity_events (
+  event_id TEXT PRIMARY KEY,              -- 客户端随机事件 ID;重试幂等键
+  api_user_id INTEGER,                    -- 匿名事件为 NULL
+  trusted INTEGER NOT NULL DEFAULT 0 CHECK (trusted IN (0, 1)),
+  phase TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  client_version TEXT NOT NULL,
+  build_id TEXT NOT NULL,
+  occurred_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_integrity_created ON integrity_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_integrity_user ON integrity_events(api_user_id);
+CREATE INDEX IF NOT EXISTS idx_integrity_reason ON integrity_events(reason);
+
+-- 完整性上报 IP 窗口计数。仅保存原始 IP 的 SHA-256(base64url),不保存原始 IP。
+CREATE TABLE IF NOT EXISTS integrity_rate_limits (
+  ip_hash TEXT NOT NULL,
+  window_start INTEGER NOT NULL,
+  count INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (ip_hash, window_start)
+);
+CREATE INDEX IF NOT EXISTS idx_integrity_rate_window ON integrity_rate_limits(window_start);

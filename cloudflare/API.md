@@ -11,6 +11,7 @@
 - **日志**: 每次查询记入 D1(按用户),可在 `web.nwflash.cc.cd` 查看
 - **在线会话**: 登录后客户端每 5s 心跳(`POST /api/heartbeat`)保持在线、接收强制下线;`GET /api/online` 查在线用户(显示名/时长)。管理端「在线状态」可强制下线。心跳数据存 D1 `online_sessions`,会话超过 120s 未心跳即视为离线(Worker Cron 兜底清理)
 - **操作门禁**: 客户端每个用户操作运行前询问 `POST /api/operation/authorize`(默认放行;封禁/停用拒绝);执行后批量上传 `POST /api/usage/logs` 使用日志(按操作分类存储)
+- **网络完整性**: 登录/活动心跳返回 Ed25519 签名短期租约;`GET /api/security/pins` 返回签名双 pin 清单;`POST /api/integrity/report` 接收严格脱敏、限流、幂等的最小事件
 
 ## 端点
 
@@ -27,6 +28,61 @@
 | --- | --- | --- |
 | `status` | string | 固定 `ok` |
 | `source` | string | 数据源类型(当前恒为 `VotaApiRomSource`,即真实 VOTA 代理) |
+
+---
+
+### `GET /api/security/pins`
+
+公共签名 pin 清单,仅授权主机 `api.nwflash.cc.cd`。响应含当前叶证书 SPKI pin 与 Google Trust Services WE1 中间证书备用 pin:
+
+```json
+{
+  "pinset_payload": "<unpadded-base64url-json>",
+  "pinset_signature": "<unpadded-base64url-ed25519-signature>"
+}
+```
+
+`pinset_payload` 解码后固定包含:
+
+```json
+{
+  "version": 1,
+  "host": "api.nwflash.cc.cd",
+  "not_before": 1787444740,
+  "expires_at": 1788049600,
+  "primary_pin": "kavrs5Bk3Tjn+0G+uPjWGBqJsXzW5kHFNPzgxuvrcKY=",
+  "backup_pin": "kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4="
+}
+```
+
+`not_before` 为签发时刻前 60 秒,`expires_at` 为签发时刻后 7 天。签名输入是原始 `pinset_payload` ASCII。客户端必须验签并严格检查 host、version、有效期和两个 pin;服务端缺少/无法导入签名 secret 时返回 `503`。
+
+---
+
+### `POST /api/integrity/report`
+
+接收退出前的最小完整性事件。可匿名调用;携带有效 bearer token 时绑定 `api_user_id` 并标记 trusted。携带了 Authorization 但 token 无效时返回 `401`;匿名事件始终是 untrusted telemetry,不能直接触发封号。
+
+请求体最大 **4096 bytes**。Worker 先检查 `Content-Length`,再以流方式读取并在超限时立即取消,只有完整请求保持在上限内才执行 JSON 解析。
+
+```json
+{
+  "event_id": "event-550e8400-e29b-41d4-a716-446655440000",
+  "phase": "startup",
+  "reason": "image_crc_invalid",
+  "client_version": "1.4.0",
+  "build_id": "build-2026-08-23",
+  "occurred_at": 1787444800
+}
+```
+
+只允许以上六个字段,缺字段或任何额外字段均返回 `400`。特别禁止 token、password、path、URL、serial 和 raw output。
+
+- `phase` 闭集:`startup`、`login`、`session_restore`、`heartbeat`、`operation_admission`、`pin_validation`。
+- `reason` 闭集:`image_crc_invalid`、`lease_signature_invalid`、`lease_binding_invalid`、`lease_expired`、`sequence_rollback`、`pin_mismatch`、`debugger_detected`、`virtual_machine_detected`、`authenticode_invalid`、`release_manifest_invalid`。
+- `event_id`、`build_id` 只允许 URL-safe 标识字符;时间为正整数 epoch 秒。
+
+成功首次写入返回 `202`;同一 `event_id` 重试返回 `200 { "ok": true, "duplicate": true }`,D1 只保留一行。每个 IP 的 SHA-256 base64url 摘要按 60 秒窗口最多接收 20 个不同事件,第 21 个返回 `429`;D1 不保存原始 IP。超限请求返回 `413`。
 
 ---
 
@@ -86,19 +142,35 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 ### `POST /api/login`
 
-桌面端登录(商业工具门禁)。提交账号密码,成功返回该用户的 **API token**(供 `/api/rom` 用)。
+桌面端登录(商业工具门禁)。保留原账号/密码校验与版本门禁;成功后同时返回 API token 和 120 秒 Ed25519 签名租约。生产签名私钥只从 Worker secret `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 导入;缺失或无效时返回 `503`,不回退到无签名响应。
 
 **请求体**
 ```json
-{ "username": "demo", "password": "DemoPass123" }
+{
+  "username": "demo",
+  "password": "DemoPass123",
+  "client_version": "1.4.0",
+  "build_id": "build-2026-08-23",
+  "process_nonce": "nonce-abc",
+  "session_id": "session-abc"
+}
 ```
 
 **成功 200**
 ```json
-{ "ok": true, "token": "<64位hex>", "username": "demo", "name": "演示用户" }
+{
+  "ok": true,
+  "token": "<64位hex>",
+  "username": "demo",
+  "name": "演示用户",
+  "lease_payload": "<unpadded-base64url-json>",
+  "lease_signature": "<unpadded-base64url-ed25519-signature>"
+}
 ```
 
-**失败**:`401` —— `用户名或密码错误` / `账号已被封禁,请联系管理员。` / `账号已被停用。`;`400` 缺参数。
+`lease_payload` 解码后的 UTF-8 JSON 字段固定为 snake_case:`version = 1`、`kind = "login"`、`username`、`token_sha256`、`client_version`、`build_id`、`process_nonce`、`session_id`、`sequence = 1`、`issued_at`、`expires_at`。`token_sha256` 是 bearer token 原始 UTF-8 字节 SHA-256 的无填充 base64url。签名输入是响应中**原始、未补 `=` 的 `lease_payload` ASCII 字节**,客户端必须先验签再解码 JSON。
+
+**失败**:`401` —— `用户名或密码错误` / `账号已被封禁,请联系管理员。` / `账号已被停用。`;`400` 缺少或非法字段;`503` 签名服务不可用。
 
 ---
 
@@ -118,24 +190,43 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 **在线会话心跳**(登录后客户端每 5s 一次):保持「在线」并可接收服务端指令(强制下线 / 封禁 / 强制更新)。必须带 `Authorization: Bearer <token>`;也走版本门禁(低于最低版本 → 426,客户端弹更新窗)。
 
-**请求体**
+**活动心跳请求体**
 ```json
-{ "sessionId": "<客户端启动时生成的 GUID>", "clientVersion": "1.0.0", "active": true }
+{
+  "sessionId": "<客户端启动时生成的 GUID>",
+  "clientVersion": "1.4.0",
+  "active": true,
+  "build_id": "build-2026-08-23",
+  "process_nonce": "nonce-abc",
+  "sequence": 41
+}
 ```
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `sessionId` | ✅ | 客户端每次启动生成,标识本次会话(在线列表/踢人/时长以此为单位) |
-| `clientVersion` | 否 | 客户端版本号 |
+| `clientVersion` | ✅ | 客户端版本号;也接受 snake_case `client_version` |
 | `active` | 否 | `false` = goodbye:服务端删除该会话行(正常退出/强制退出前发送) |
+| `build_id` | 活动时 ✅ | 当前受保护构建 ID |
+| `process_nonce` | 活动时 ✅ | 本进程随机 nonce |
+| `sequence` | 活动时 ✅ | 当前租约正整数序号;必须小于 JS 安全整数上限 |
 
-**成功 200**
+**活动成功 200**
 ```json
-{ "ok": true, "force_exit": false }
+{
+  "ok": true,
+  "force_exit": false,
+  "lease_payload": "<unpadded-base64url-json>",
+  "lease_signature": "<unpadded-base64url-ed25519-signature>"
+}
 ```
 ```json
 { "ok": true, "force_exit": true, "reason": "违规下线" }
 ```
+
+活动成功租约字段与登录租约相同,但 `kind = "heartbeat"` 且返回 `sequence = 请求 sequence + 1`,保证严格递增。用户、token 摘要、版本、构建、进程 nonce 和 session 均绑定到签名 claims。强制退出响应不创建新能力。
+
+goodbye 只需 `sessionId` 和 `active = false`;它继续删除当前用户的会话并返回 `{ "ok": true, "force_exit": false }`,不要求签名 secret,也不创建新租约。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -317,6 +408,7 @@ curl "https://api.nwflash.cc.cd/api/rom?pd=PD2417&version=99.99"
 | 机密 | 说明 |
 | --- | --- |
 | `VOTA_API_TOKEN` | VOTA 的 API Token(Authorization: Bearer)。**只在 worker 上,绝不下发客户端** |
+| `SESSION_SIGNING_PRIVATE_KEY_PKCS8` | Ed25519 私钥 PKCS#8 DER 的**无填充 base64url**。只用于签名租约/pin 清单,不得记录、返回或提交仓库 |
 
 ## 部署
 
@@ -325,8 +417,13 @@ cd cloudflare
 npm install
 npx wrangler login
 npx wrangler secret put VOTA_API_TOKEN    # 粘贴 token
-npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
+npx wrangler secret put SESSION_SIGNING_PRIVATE_KEY_PKCS8
+npm test                                  # 先跑 Worker 安全测试
+npm run typecheck                         # strict tsc + Wrangler dry-run,不部署
+npm run deploy                            # 先检查远端签名 secret,再部署
 ```
+
+`npm run deploy` 的 `predeploy` 会读取远端 secret 清单,缺少 `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 时失败。不要用直接 `wrangler deploy` 绕过预检。仓库不包含生产/测试 Ed25519 私钥;测试在运行时生成临时 WebCrypto 密钥材料,生产仅从 Env secret 导入为 non-extractable `CryptoKey`。
 
 ## 功能记录(Changelog)
 
@@ -340,6 +437,7 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 | 2026-08-14 | **Nwflash 版本门禁(强制更新)**:新增 `GET /api/app/version`(免登录策略查询);所有请求带 `X-Nwflash-Version` 头,低于后台最低版本 → **426 UPDATE_REQUIRED**;**移除 ROM 白名单** —— `/api/rom` 不再做 PD+版本门禁,登录即可解析任意版本 |
 | 2026-08-14 | **在线会话心跳 + 强制下线**:D1 新增 `online_sessions` / `admin_audit_log`;`POST /api/heartbeat`(每 5s,检测强制下线/封禁/426)、`GET /api/online`(客户端视角在线列表,仅显示名/版本/时长,不含 username/IP);管理端「在线状态」可强制下线。服务端:per-token 心跳限速 + 每用户会话数上限 + 60s 写节流 + epoch 秒时间戳 + `last_seen` 索引 + Cron 兜底清理 |
 | 2026-08-14 | **操作许可门禁 + 使用日志**:`POST /api/operation/authorize`(客户端每个用户操作运行前询问,默认放行、封禁/停用拒绝);`POST /api/usage/logs`(使用日志批量上传,按 `operation_kind` 分类存储);D1 新增 `usage_logs` 表;管理端「使用日志」查看/筛选 |
+| 2026-08-23 | **签名租约 + pin 清单 + 完整性遥测**:登录/活动心跳签发绑定 token 摘要、build/process/session/sequence 的 Ed25519 租约;新增签名双 pin `/api/security/pins`;新增 4 KiB 严格遥测 `/api/integrity/report`,D1 event ID 幂等与 hash-IP 60s/20 次限流 |
 
 ## 管理后台
 
@@ -350,7 +448,9 @@ npx wrangler deploy                       # 绑定 api.nwflash.cc.cd
 
 ```
 cloudflare/
-├─ src/index.ts        # Worker 入口:路由 + resolveRom + 心跳/在线 + 错误映射
+├─ src/index.ts        # Worker 入口:路由 + resolveRom + 心跳/在线 + 完整性遥测
+├─ src/security.ts     # Ed25519 签名、pin 清单、严格限长遥测解析
+├─ test/security.test.ts # 实际安全 helper + Worker/D1 边界测试
 ├─ wrangler.toml       # 变量与自定义域路由 + Cron 触发器
 ├─ README.md           # 部署/使用说明
 └─ API.md              # 本文档(接口契约)

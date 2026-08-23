@@ -1,3 +1,19 @@
+import {
+  INTEGRITY_RATE_LIMIT,
+  INTEGRITY_RATE_WINDOW_SECONDS,
+  LEASE_TTL_SECONDS,
+  IntegrityBodyTooLargeError,
+  InvalidIntegrityReportError,
+  SigningConfigurationError,
+  createPinset,
+  integrityIpHash,
+  readIntegrityReport,
+  signLease,
+  signPinset,
+  tokenSha256,
+  type LeaseClaims,
+} from "./security";
+
 /**
  * Cloudflare Worker —— Vivo ROM OTA 链接代理 + Nwflash 版本门禁。
  * 桌面应用带 PD + 版本号查询,Worker 持 VOTA 凭据,
@@ -6,7 +22,9 @@
  * 端点:
  *   GET /health                          -> { status, source }
  *   GET /api/app/version?current=X       -> Nwflash 版本策略(免登录,启动拦截用)
- *   POST /api/heartbeat                  -> 在线会话心跳(鉴权;检测强制下线 / 封禁 / 426)
+ *   GET /api/security/pins               -> Ed25519 签名双 SPKI pin 清单
+ *   POST /api/integrity/report           -> 严格限长/限流/幂等完整性遥测
+ *   POST /api/heartbeat                  -> 在线会话心跳 + 递增签名租约
  *   GET /api/online                      -> 在线用户列表(鉴权;仅显示名/版本/时长,不含 username/IP)
  *   GET /api/rom?pd=X&version=Y          -> { pd, version, url, name, sizeBytes, sha256 }
  *
@@ -19,13 +37,15 @@
 export interface Env {
   /** VOTA API Token(worker secret,通过 `wrangler secret put VOTA_API_TOKEN` 设置)。 */
   VOTA_API_TOKEN: string;
+  /** Ed25519 PKCS#8 DER 的无填充 base64url(worker secret)。缺失或无效时签名端点失败关闭。 */
+  SESSION_SIGNING_PRIVATE_KEY_PKCS8?: string;
   /** 上游 VOTA 基地址,默认 https://api.otau.cc.cd。 */
   VOTA_BASE_URL?: string;
   /** 调用 action:resolve_url(OTA,-1 信用点)/ resolve_flash_url(线刷,-3)。默认 resolve_url。 */
   VOTA_ACTION?: string;
   /** 平台版本白名单,默认 0.1.0。 */
   VOTA_VER?: string;
-  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):访问日志 + Nwflash 版本控制 + 在线会话。 */
+  /** D1 绑定(nwflash-db,与 web.nwflash.cc.cd 共用):访问/版本/在线会话 + 完整性事件/限流。 */
   DB: D1Database;
   /** 心跳写节流(ms):同一会话 last_seen 至少隔这么久才写一次 D1。默认 60000。 */
   HEARTBEAT_WRITE_INTERVAL_MS?: string;
@@ -53,6 +73,14 @@ export default {
         return json({ status: "ok", source: "VotaApiRomSource" }, 200);
       }
 
+      if (url.pathname === "/api/security/pins" && request.method === "GET") {
+        return securityPins(env);
+      }
+
+      if (url.pathname === "/api/integrity/report" && request.method === "POST") {
+        return acceptIntegrityReport(env, request);
+      }
+
       // Nwflash 版本策略(免登录,桌面端启动拦截用)。
       if (url.pathname === "/api/app/version" && request.method === "GET") {
         return appVersion(env, request, url);
@@ -70,7 +98,7 @@ export default {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
         const user = await authenticateUser(env, request);
-        if (user instanceof Response) return json({ loggedIn: false }, 200);
+        if (user instanceof Response || user === null) return json({ loggedIn: false }, 200);
         return json({ loggedIn: true, name: user.name }, 200);
       }
 
@@ -128,6 +156,7 @@ export default {
    */
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     await purgeStaleSessions(env, /* force */ true);
+    await purgeIntegrityRateLimits(env);
   },
 };
 
@@ -160,7 +189,7 @@ async function resolveRom(env: Env, pd: string, version: string, request: Reques
     return json({ error: "无法连接上游 ROM API。" }, 502);
   }
 
-  const data = await resp.json().catch(() => null);
+  const data = await resp.json().catch(() => null) as Record<string, unknown> | null;
   if (!data || typeof data.ok !== "boolean") {
     await logAccess(env, userId, userName, pd, version, null, 502);
     return json({ error: "上游返回异常。" }, 502);
@@ -186,17 +215,20 @@ async function resolveRom(env: Env, pd: string, version: string, request: Reques
 }
 
 /** 从 Authorization: Bearer 头解析 API 用户。无 token → null;token 无效/停用 → 401 Response。 */
-async function authenticateUser(env: Env, request: Request): Promise<{ id: number; name: string; banned: boolean } | null | Response> {
+async function authenticateUser(
+  env: Env,
+  request: Request,
+): Promise<{ id: number; username: string; name: string; banned: boolean } | null | Response> {
   const header = request.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) return null;
 
   const user = await env.DB
-    .prepare("SELECT id, name, enabled, banned FROM api_users WHERE token = ?")
+    .prepare("SELECT id, username, name, enabled, banned FROM api_users WHERE token = ?")
     .bind(token)
-    .first<{ id: number; name: string; enabled: number; banned: number }>();
+    .first<{ id: number; username: string; name: string; enabled: number; banned: number }>();
   if (!user || !user.enabled) return json({ error: "API token 无效或已停用。" }, 401);
-  return { id: user.id, name: user.name, banned: user.banned === 1 };
+  return { id: user.id, username: user.username, name: user.name, banned: user.banned === 1 };
 }
 
 /** 写一条访问日志(D1 失败不影响主流程)。 */
@@ -219,6 +251,104 @@ async function logAccess(
   } catch {
     // 日志写失败不阻塞解析。
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 签名 pin 清单 + 最小完整性遥测                                      */
+/* ------------------------------------------------------------------ */
+
+async function securityPins(env: Env): Promise<Response> {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    return json(await signPinset(createPinset(now), env.SESSION_SIGNING_PRIVATE_KEY_PKCS8), 200);
+  } catch (error) {
+    if (error instanceof SigningConfigurationError) return signingUnavailable();
+    throw error;
+  }
+}
+
+async function acceptIntegrityReport(env: Env, request: Request): Promise<Response> {
+  let report;
+  try {
+    report = await readIntegrityReport(request);
+  } catch (error) {
+    if (error instanceof IntegrityBodyTooLargeError) return json({ error: "请求体过大。" }, 413);
+    if (error instanceof InvalidIntegrityReportError) return json({ error: "完整性事件不合法。" }, 400);
+    throw error;
+  }
+
+  const authHeader = request.headers.get("Authorization");
+  let userId: number | null = null;
+  let trusted = 0;
+  if (authHeader !== null) {
+    const auth = await authenticateUser(env, request);
+    if (auth instanceof Response) return auth;
+    if (auth === null) return json({ error: "API token 无效或已停用。" }, 401);
+    userId = auth.id;
+    trusted = 1;
+  }
+
+  const duplicate = await env.DB
+    .prepare("SELECT event_id FROM integrity_events WHERE event_id = ?")
+    .bind(report.event_id)
+    .first<{ event_id: string }>();
+  if (duplicate) return json({ ok: true, duplicate: true }, 200);
+
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = Math.floor(now / INTEGRITY_RATE_WINDOW_SECONDS) * INTEGRITY_RATE_WINDOW_SECONDS;
+  const ipHash = await integrityIpHash(request.headers.get("CF-Connecting-IP") || "unknown");
+  const rate = await env.DB.prepare(
+    `INSERT INTO integrity_rate_limits (ip_hash, window_start, count)
+     VALUES (?, ?, 1)
+     ON CONFLICT(ip_hash, window_start) DO UPDATE SET count = integrity_rate_limits.count + 1
+     RETURNING count`,
+  )
+    .bind(ipHash, windowStart)
+    .first<{ count: number }>();
+  if (!rate || rate.count > INTEGRITY_RATE_LIMIT) {
+    return json({ error: "完整性事件上报过于频繁。" }, 429);
+  }
+
+  const inserted = await env.DB.prepare(
+    `INSERT INTO integrity_events
+       (event_id, api_user_id, trusted, phase, reason, client_version, build_id, occurred_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(event_id) DO NOTHING`,
+  )
+    .bind(
+      report.event_id,
+      userId,
+      trusted,
+      report.phase,
+      report.reason,
+      report.client_version,
+      report.build_id,
+      report.occurred_at,
+    )
+    .run();
+  if ((inserted.meta?.changes ?? 0) === 0) return json({ ok: true, duplicate: true }, 200);
+  return json({ ok: true, accepted: true }, 202);
+}
+
+async function purgeIntegrityRateLimits(env: Env): Promise<void> {
+  const cutoff = Math.floor(Date.now() / 1000) - 2 * INTEGRITY_RATE_WINDOW_SECONDS;
+  try {
+    await env.DB.prepare("DELETE FROM integrity_rate_limits WHERE window_start < ?").bind(cutoff).run();
+  } catch {
+    // 遥测限流清理失败不影响在线会话 Cron;后续 Cron 会再次尝试。
+  }
+}
+
+function signingUnavailable(): Response {
+  return json({ error: "签名服务不可用。" }, 503);
+}
+
+function isBoundIdentifier(value: string, maxLength: number): boolean {
+  return value.length <= maxLength && /^[A-Za-z0-9._:-]+$/.test(value);
+}
+
+function isClientVersion(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$/.test(value);
 }
 
 /* ------------------------------------------------------------------ */
@@ -272,8 +402,9 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
   if (auth === null) return json({ error: "请先登录。" }, 401);
   if (auth.banned) return json({ ok: true, force_exit: true, reason: "账号已被封禁,请联系管理员。" }, 200);
 
-  const body = await request.json().catch(() => null);
-  const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
+  const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+  const rawSessionId = body?.session_id ?? body?.sessionId;
+  const sessionId = typeof rawSessionId === "string" ? rawSessionId.trim() : "";
   // 字符集白名单:sessionId 只允许 URL 安全字符,杜绝任意字符串进库(配合后台 XSS 修复,纵深防御)。
   if (!/^[A-Za-z0-9._:-]{1,64}$/.test(sessionId)) return json({ error: "sessionId 不合法。" }, 400);
 
@@ -285,6 +416,18 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
     return json({ ok: true, force_exit: false }, 200);
   }
 
+  const rawClientVersion = body?.client_version ?? body?.clientVersion;
+  const clientVersion = typeof rawClientVersion === "string" ? rawClientVersion.trim() : "";
+  const buildId = typeof body?.build_id === "string" ? body.build_id.trim() : "";
+  const processNonce = typeof body?.process_nonce === "string" ? body.process_nonce.trim() : "";
+  const sequence = body?.sequence;
+  if (!isClientVersion(clientVersion)) return json({ error: "client_version 不合法。" }, 400);
+  if (!isBoundIdentifier(buildId, 128)) return json({ error: "build_id 不合法。" }, 400);
+  if (!isBoundIdentifier(processNonce, 128)) return json({ error: "process_nonce 不合法。" }, 400);
+  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1 || sequence >= Number.MAX_SAFE_INTEGER) {
+    return json({ error: "sequence 不合法。" }, 400);
+  }
+
   // per-token 限速只拦「写入」,不拦「读取」:被限速的心跳仍要读 force_exit,避免吞掉 kick 一轮。
   const header = request.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
@@ -293,7 +436,6 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
   const now = Math.floor(Date.now() / 1000);
   const writeIntervalSec = Math.floor((Number(env.HEARTBEAT_WRITE_INTERVAL_MS) || 60_000) / 1000);
   const sessionCap = Number(env.ONLINE_SESSION_CAP) || 3;
-  const clientVersion = typeof body?.clientVersion === "string" ? body.clientVersion.slice(0, 32) : "";
   // 仅展示用,绝不作鉴权依据(仅 Cloudflare 边缘覆写,不可伪造,但 wrangler dev 等环境可能被伪造)。
   const ip = request.headers.get("CF-Connecting-IP") || "";
 
@@ -306,7 +448,7 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
   if (!row) {
     // 新会话(或被裁掉的会话):若被限速则跳过建行(下个心跳再建),否则插入 + 清理多余 stale 行。
     if (rateLimited) {
-      return json({ ok: true, force_exit: false }, 200);
+      return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
     }
 
     // ON CONFLICT 仅当归属相同用户才更新(防并发竞态/跨用户篡改),且绝不触碰 connected_at。
@@ -334,12 +476,12 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
       .run();
 
     await purgeStaleSessions(env);
-    return json({ ok: true, force_exit: false }, 200);
+    return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
   }
 
   // 会话已存在但归属其它用户 → 不触碰(防跨用户保活/伪造离线)。
   if (row.user_id !== auth.id) {
-    return json({ ok: true, force_exit: false }, 200);
+    return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
   }
 
   // 先判强制下线:被 kick 的会话不再刷新 last_seen(拒绝退出的客户端也不能靠心跳保活永不超时)。
@@ -355,7 +497,39 @@ async function heartbeat(env: Env, request: Request): Promise<Response> {
       .run();
   }
 
-  return json({ ok: true, force_exit: false }, 200);
+  return signedHeartbeat(env, auth.username, token, clientVersion, buildId, processNonce, sessionId, sequence);
+}
+
+async function signedHeartbeat(
+  env: Env,
+  username: string,
+  token: string,
+  clientVersion: string,
+  buildId: string,
+  processNonce: string,
+  sessionId: string,
+  previousSequence: number,
+): Promise<Response> {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const claims: LeaseClaims = {
+    version: 1,
+    kind: "heartbeat",
+    username,
+    token_sha256: await tokenSha256(token),
+    client_version: clientVersion,
+    build_id: buildId,
+    process_nonce: processNonce,
+    session_id: sessionId,
+    sequence: previousSequence + 1,
+    issued_at: issuedAt,
+    expires_at: issuedAt + LEASE_TTL_SECONDS,
+  };
+  try {
+    return json({ ok: true, force_exit: false, ...await signLease(claims, env.SESSION_SIGNING_PRIVATE_KEY_PKCS8) }, 200);
+  } catch (error) {
+    if (error instanceof SigningConfigurationError) return signingUnavailable();
+    throw error;
+  }
 }
 
 /** GET /api/online(客户端视角)—— 在线总数 + 各会话显示名/版本/时长,不含 username/IP/user_id。 */
@@ -414,8 +588,8 @@ async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
   if (auth === null) return json({ error: "请先登录。" }, 401);
   if (auth.banned) return json({ error: "账号已被封禁。" }, 403);
 
-  const body = await request.json().catch(() => null);
-  const logs = Array.isArray(body?.logs) ? body.logs : [];
+  const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+  const logs = Array.isArray(body?.logs) ? body.logs as Array<Record<string, unknown> | null> : [];
   if (logs.length === 0) return json({ ok: true, received: 0 }, 200);
   if (logs.length > 100) return json({ error: "单批日志最多 100 条。" }, 400);
 
@@ -532,17 +706,27 @@ async function checkAppVersion(env: Env, request: Request): Promise<Response | n
 
 const PBKDF2_ITERATIONS = 100_000;
 
-/** POST /api/login { username, password } → { ok, token, username, name }。 */
+/** POST /api/login —— 密码验证成功后返回 token 与绑定当前进程/会话的短期签名租约。 */
 async function login(env: Env, request: Request): Promise<Response> {
-  const body = await request.json().catch(() => null);
+  if (!env.SESSION_SIGNING_PRIVATE_KEY_PKCS8) return signingUnavailable();
+  const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const username = (body?.username as string || "").trim();
   const password = body?.password as string || "";
   if (!username || !password) return json({ error: "缺少用户名或密码。" }, 400);
 
+  const clientVersion = typeof body?.client_version === "string" ? body.client_version.trim() : "";
+  const buildId = typeof body?.build_id === "string" ? body.build_id.trim() : "";
+  const processNonce = typeof body?.process_nonce === "string" ? body.process_nonce.trim() : "";
+  const sessionId = typeof body?.session_id === "string" ? body.session_id.trim() : "";
+  if (!isClientVersion(clientVersion)) return json({ error: "client_version 不合法。" }, 400);
+  if (!isBoundIdentifier(buildId, 128)) return json({ error: "build_id 不合法。" }, 400);
+  if (!isBoundIdentifier(processNonce, 128)) return json({ error: "process_nonce 不合法。" }, 400);
+  if (!isBoundIdentifier(sessionId, 64)) return json({ error: "session_id 不合法。" }, 400);
+
   const user = await env.DB
     .prepare("SELECT * FROM api_users WHERE username = ?")
     .bind(username)
-    .first<{ id: number; name: string; token: string; password: string | null; salt: string | null; enabled: number; banned: number }>();
+    .first<{ id: number; username: string; name: string; token: string; password: string | null; salt: string | null; enabled: number; banned: number }>();
   if (!user) return json({ error: "用户名或密码错误。" }, 401);
   if (user.banned === 1) return json({ error: "账号已被封禁,请联系管理员。" }, 401);
   if (user.enabled !== 1) return json({ error: "账号已被停用。" }, 401);
@@ -551,7 +735,27 @@ async function login(env: Env, request: Request): Promise<Response> {
   const hash = await pbkdf2(password, user.salt);
   if (hash !== user.password) return json({ error: "用户名或密码错误。" }, 401);
 
-  return json({ ok: true, token: user.token, username, name: user.name }, 200);
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const claims: LeaseClaims = {
+    version: 1,
+    kind: "login",
+    username: user.username,
+    token_sha256: await tokenSha256(user.token),
+    client_version: clientVersion,
+    build_id: buildId,
+    process_nonce: processNonce,
+    session_id: sessionId,
+    sequence: 1,
+    issued_at: issuedAt,
+    expires_at: issuedAt + LEASE_TTL_SECONDS,
+  };
+  try {
+    const envelope = await signLease(claims, env.SESSION_SIGNING_PRIVATE_KEY_PKCS8);
+    return json({ ok: true, token: user.token, username: user.username, name: user.name, ...envelope }, 200);
+  } catch (error) {
+    if (error instanceof SigningConfigurationError) return signingUnavailable();
+    throw error;
+  }
 }
 
 async function pbkdf2(password: string, saltHex: string): Promise<string> {
@@ -570,7 +774,7 @@ function randomHex(bytes: number): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function hexToBytes(hex: string): Uint8Array {
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
