@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nwflash.cc.cd/contracts/trace-v2/usage-trace-v2.schema.json",
+  "title": "Nwflash usage trace V2 upload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "upload_id", "runs", "events", "output_chunks"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "upload_id": { "$ref": "#/$defs/uuidV7" },
+    "runs": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/run" } },
+    "events": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/event" } },
+    "output_chunks": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/outputChunk" } }
+  },
+  "$defs": {
+    "uuidV7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "shortText": { "type": "string", "maxLength": 1024 },
+    "text": { "type": "string", "maxLength": 16384 },
+    "nullableShortText": { "type": ["string", "null"], "maxLength": 1024 },
+    "nullableText": { "type": ["string", "null"], "maxLength": 16384 },
+    "stringList": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/text" } },
+    "safeInteger": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "nullableSafeInteger": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 },
+    "outcome": { "enum": ["running", "success", "failed", "canceled", "denied", "aborted", "unknown"] },
+    "eventKind": { "enum": ["authorization", "stage", "partition", "command", "skip", "verification", "terminal"] },
+    "eventStatus": { "enum": ["started", "success", "failed", "canceled", "skipped", "unknown"] },
+    "stream": { "enum": ["stdout", "stderr"] },
+    "redaction": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "count"],
+      "properties": { "kind": { "$ref": "#/$defs/shortText" }, "count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } }
+    },
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "required": ["program", "argv", "display_command", "working_directory", "paths", "urls", "serial"],
+      "properties": {
+        "program": { "$ref": "#/$defs/text" }, "argv": { "$ref": "#/$defs/stringList" }, "display_command": { "$ref": "#/$defs/text" },
+        "working_directory": { "$ref": "#/$defs/nullableText" }, "paths": { "$ref": "#/$defs/stringList" }, "urls": { "$ref": "#/$defs/stringList" }, "serial": { "$ref": "#/$defs/nullableShortText" }
+      }
+    },
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "operation_kind", "title", "outcome", "device_serial", "source_paths", "source_urls", "client_version", "started_at_ms", "ended_at_ms", "duration_ms", "error_class", "error_code", "error_message", "final_sequence", "trace_complete", "trace_loss_reason"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/uuidV7" }, "operation_kind": { "$ref": "#/$defs/shortText" }, "title": { "$ref": "#/$defs/text" }, "outcome": { "$ref": "#/$defs/outcome" }, "device_serial": { "$ref": "#/$defs/nullableShortText" }, "source_paths": { "$ref": "#/$defs/stringList" }, "source_urls": { "$ref": "#/$defs/stringList" }, "client_version": { "$ref": "#/$defs/shortText" }, "started_at_ms": { "$ref": "#/$defs/safeInteger" }, "ended_at_ms": { "$ref": "#/$defs/nullableSafeInteger" }, "duration_ms": { "$ref": "#/$defs/nullableSafeInteger" }, "error_class": { "$ref": "#/$defs/nullableShortText" }, "error_code": { "$ref": "#/$defs/nullableShortText" }, "error_message": { "$ref": "#/$defs/nullableText" }, "final_sequence": { "$ref": "#/$defs/nullableSafeInteger" }, "trace_complete": { "type": "boolean" }, "trace_loss_reason": { "$ref": "#/$defs/nullableText" }
+      }
+    },
+    "event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "run_id", "sequence", "kind", "step_name", "partition_name", "status", "started_at_ms", "ended_at_ms", "duration_ms", "command", "exit_code", "stdout_chunks", "stderr_chunks", "verification", "device_state", "retry_safe", "remedies", "error_class", "error_code", "error_message", "credential_redactions"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuidV7" }, "run_id": { "$ref": "#/$defs/uuidV7" }, "sequence": { "$ref": "#/$defs/safeInteger" }, "kind": { "$ref": "#/$defs/eventKind" }, "step_name": { "$ref": "#/$defs/shortText" }, "partition_name": { "$ref": "#/$defs/nullableShortText" }, "status": { "$ref": "#/$defs/eventStatus" }, "started_at_ms": { "$ref": "#/$defs/safeInteger" }, "ended_at_ms": { "$ref": "#/$defs/nullableSafeInteger" }, "duration_ms": { "$ref": "#/$defs/nullableSafeInteger" }, "command": { "anyOf": [{ "$ref": "#/$defs/command" }, { "type": "null" }] }, "exit_code": { "type": ["integer", "null"], "minimum": -2147483648, "maximum": 2147483647 }, "stdout_chunks": { "type": "integer", "minimum": 0, "maximum": 200 }, "stderr_chunks": { "type": "integer", "minimum": 0, "maximum": 200 }, "verification": { "$ref": "#/$defs/nullableText" }, "device_state": { "$ref": "#/$defs/nullableShortText" }, "retry_safe": { "type": ["boolean", "null"] }, "remedies": { "$ref": "#/$defs/stringList" }, "error_class": { "$ref": "#/$defs/nullableShortText" }, "error_code": { "$ref": "#/$defs/nullableShortText" }, "error_message": { "$ref": "#/$defs/nullableText" }, "credential_redactions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/redaction" } }
+      }
+    },
+    "outputChunk": {
+      "type": "object", "additionalProperties": false,
+      "required": ["chunk_id", "event_id", "stream", "chunk_index", "text", "byte_count", "sha256"],
+      "properties": { "chunk_id": { "$ref": "#/$defs/uuidV7" }, "event_id": { "$ref": "#/$defs/uuidV7" }, "stream": { "$ref": "#/$defs/stream" }, "chunk_index": { "$ref": "#/$defs/safeInteger" }, "text": { "type": "string", "maxLength": 32768 }, "byte_count": { "type": "integer", "minimum": 0, "maximum": 32768 }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+    }
+  }
+}

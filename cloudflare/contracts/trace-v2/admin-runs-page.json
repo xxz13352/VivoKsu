@@ -1,0 +1,21 @@
+{
+  "items": [{
+    "source_schema": 2,
+    "trace_ref": "v2:019d9c40-7b3c-7000-8000-000000000002",
+    "run_id": "019d9c40-7b3c-7000-8000-000000000002",
+    "legacy_id": null,
+    "user_id": 7,
+    "username": "alice",
+    "user_name": "Alice Zhang",
+    "operation_kind": "fastboot_flash",
+    "title": "VIVO line flash",
+    "outcome": "success",
+    "client_version": "1.4.0",
+    "started_at_ms": 1787500000000,
+    "ended_at_ms": 1787500002500,
+    "duration_ms": 2500,
+    "trace_complete": true,
+    "trace_loss_reason": null
+  }],
+  "next_cursor": "eyJ2IjoxLCJzdGFydGVkX2F0X21zIjoxNzg3NTAwMDAwMDAwLCJydW5faWQiOiIwMTlkOWM0MC03YjNjLTcwMDAtODAwMC0wMDAwMDAwMDAwMDIifQ"
+}
