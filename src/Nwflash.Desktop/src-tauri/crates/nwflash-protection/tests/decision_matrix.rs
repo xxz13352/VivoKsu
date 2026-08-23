@@ -5,14 +5,16 @@ use nwflash_protection::{
     verify_signed_lease, DecisionInput, LeaseBinding, LeaseClaims, LeaseKind, OperationDecision,
     ProtectionDecision, ProtectionFailure, ProtectionSelector, SignedEnvelope, TokenDigest,
 };
+use rand_core::OsRng;
 
 fn accepted_login(expires_at: i64) -> nwflash_protection::SessionLease {
-    let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+    let mut rng = OsRng;
+    let signing_key = SigningKey::generate(&mut rng);
     let claims = LeaseClaims {
         version: 1,
         kind: LeaseKind::Login,
         username: "alice".into(),
-        token_sha256: URL_SAFE_NO_PAD.encode([9_u8; 32]),
+        token_sha256: TokenDigest::from_bytes([9_u8; 32]),
         client_version: "1.0.1".into(),
         build_id: "build-123".into(),
         process_nonce: "nonce-abc".into(),

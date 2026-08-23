@@ -2,7 +2,7 @@ use std::fmt;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
@@ -28,12 +28,12 @@ impl fmt::Debug for SignedEnvelope {
 }
 
 /// Claims contained in a signed session lease.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseClaims {
     pub version: u8,
     pub kind: LeaseKind,
     pub username: String,
-    pub token_sha256: String,
+    pub token_sha256: TokenDigest,
     pub client_version: String,
     pub build_id: String,
     pub process_nonce: String,
@@ -71,7 +71,7 @@ pub enum LeaseKind {
 }
 
 /// An opaque lease that can only be created by successful signature verification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct VerifiedLease(LeaseClaims);
 
 impl VerifiedLease {
@@ -95,9 +95,7 @@ impl TokenDigest {
     /// Hashes a bearer token before it enters a normalized lease decision.
     pub fn sha256(token: &[u8]) -> Self {
         let digest = Zeroizing::new(Sha256::digest(token).to_vec());
-        let mut bytes = [0_u8; 32];
-        bytes.copy_from_slice(&digest);
-        Self::from_bytes(bytes)
+        Self::from_decoded(digest).expect("SHA-256 digest is always 32 bytes")
     }
 
     /// Replaces the digest after zeroizing the previous bytes.
@@ -105,16 +103,58 @@ impl TokenDigest {
         self.bytes.replace(replacement);
     }
 
-    fn matches_base64url(&self, encoded: &str) -> bool {
-        let decoded = match URL_SAFE_NO_PAD.decode(encoded) {
-            Ok(bytes) => Zeroizing::new(bytes),
-            Err(_) => return false,
-        };
-        let candidate: [u8; 32] = match decoded.as_slice().try_into() {
-            Ok(candidate) => candidate,
-            Err(_) => return false,
-        };
-        self.bytes.value.ct_eq(&candidate).into()
+    fn from_decoded(decoded: Zeroizing<Vec<u8>>) -> Option<Self> {
+        if decoded.len() != 32 {
+            return None;
+        }
+
+        let mut bytes = Zeroizing::new([0_u8; 32]);
+        bytes.copy_from_slice(&decoded);
+        Some(Self {
+            bytes: SecretBuffer::from_zeroizing(bytes),
+        })
+    }
+
+    fn ct_eq(&self, other: &Self) -> bool {
+        self.bytes
+            .value
+            .as_slice()
+            .ct_eq(other.bytes.value.as_slice())
+            .into()
+    }
+}
+
+impl PartialEq for TokenDigest {
+    fn eq(&self, other: &Self) -> bool {
+        self.ct_eq(other)
+    }
+}
+
+impl Eq for TokenDigest {}
+
+impl Serialize for TokenDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(self.bytes.value.as_slice()));
+        serializer.serialize_str(&encoded)
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = Zeroizing::new(String::deserialize(deserializer)?);
+        let decoded = Zeroizing::new(
+            URL_SAFE_NO_PAD
+                .decode(encoded.as_bytes())
+                .map_err(D::Error::custom)?,
+        );
+        Self::from_decoded(decoded)
+            .ok_or_else(|| D::Error::custom("token SHA-256 must be 32 bytes"))
     }
 }
 
@@ -309,7 +349,7 @@ fn validate_lease(
     if claims.username != binding.username {
         return Err(LeaseRejection::UsernameMismatch);
     }
-    if !binding.token_sha256.matches_base64url(&claims.token_sha256) {
+    if !binding.token_sha256.ct_eq(&claims.token_sha256) {
         return Err(LeaseRejection::TokenDigestMismatch);
     }
     if claims.client_version != binding.client_version {
@@ -345,23 +385,22 @@ fn validate_lease(
 }
 
 struct SecretBuffer<T: Zeroize> {
-    value: T,
+    value: Zeroizing<T>,
 }
 
 impl<T: Zeroize> SecretBuffer<T> {
     fn new(value: T) -> Self {
+        Self {
+            value: Zeroizing::new(value),
+        }
+    }
+
+    fn from_zeroizing(value: Zeroizing<T>) -> Self {
         Self { value }
     }
 
     fn replace(&mut self, replacement: T) {
-        self.value.zeroize();
-        self.value = replacement;
-    }
-}
-
-impl<T: Zeroize> Drop for SecretBuffer<T> {
-    fn drop(&mut self) {
-        self.value.zeroize();
+        self.value = Zeroizing::new(replacement);
     }
 }
 
