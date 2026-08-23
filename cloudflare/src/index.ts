@@ -13,6 +13,7 @@ import {
   tokenSha256,
   type LeaseClaims,
 } from "./security";
+import { ingestTraceUploadV2 } from "./trace-v2-ingest";
 
 /**
  * Cloudflare Worker —— Vivo ROM OTA 链接代理 + Nwflash 版本门禁。
@@ -128,6 +129,17 @@ export default {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
         return acceptUsageLogs(env, request);
+      }
+
+      if (url.pathname === "/api/usage/traces/v2" && request.method === "POST") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
+        const auth = await authenticateUser(env, request);
+        if (auth instanceof Response) return auth;
+        if (auth === null) return json({ error: "请先登录。" }, 401);
+        if (auth.banned) return json({ error: "账号已被封禁。" }, 403);
+        const bearerToken = request.headers.get("Authorization")?.slice(7).trim() ?? "";
+        return ingestTraceUploadV2(env, request, { ...auth, bearer_token: bearerToken });
       }
 
       if (url.pathname === "/api/rom") {
