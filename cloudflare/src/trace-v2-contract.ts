@@ -205,7 +205,7 @@ function parseChunkV2(value: unknown, field: string): TraceOutputChunkV2 {
   if (actualBytes.byteLength !== byte_count) throw invalid(`${field}.byte_count does not match UTF-8 text`);
   const sha256 = requireText(root.sha256, 64, `${field}.sha256`);
   if (!SHA256.test(sha256)) throw invalid(`${field}.sha256 must be lowercase SHA-256 hex`);
-  if (sha256Hex(actualBytes) !== sha256) throw invalid(`${field}.sha256 does not match UTF-8 text`);
+  if (sha256HexV2(actualBytes) !== sha256) throw invalid(`${field}.sha256 does not match UTF-8 text`);
   return { chunk_id: requireUuidV7(root.chunk_id, `${field}.chunk_id`), event_id: requireUuidV7(root.event_id, `${field}.event_id`), stream: requireEnum(root.stream, ["stdout", "stderr"], `${field}.stream`), chunk_index: requireSafeInteger(root.chunk_index, 0, Number.MAX_SAFE_INTEGER, `${field}.chunk_index`), text, byte_count, sha256 };
 }
 
@@ -280,7 +280,7 @@ function invalid(message: string): TraceValidationError { return new TraceValida
 function bytesToBase64Url(bytes: Uint8Array): string { let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); }
 function base64UrlToBytes(value: string): Uint8Array { if (!/^[A-Za-z0-9_-]+$/.test(value) || value.length % 4 === 1) throw new Error("invalid base64url"); const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=")); return Uint8Array.from(binary, (character) => character.charCodeAt(0)); }
 
-function sha256Hex(bytes: Uint8Array): string {
+export function sha256HexV2(bytes: Uint8Array): string {
   const words: number[] = []; for (let i = 0; i < bytes.length; i += 1) words[i >> 2] = (words[i >> 2] ?? 0) | (bytes[i] << (24 - (i % 4) * 8));
   const bitLength = bytes.length * 8; words[bitLength >> 5] = (words[bitLength >> 5] ?? 0) | (0x80 << (24 - (bitLength % 32))); const final = (((bitLength + 64) >> 9) << 4) + 15; words[final] = bitLength;
   const hash = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
