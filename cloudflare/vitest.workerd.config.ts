@@ -13,6 +13,11 @@ export default defineConfig({
       const schema = await readFile(path.join(import.meta.dirname, "web", "schema.sql"), "utf8");
       await writeFile(path.join(migrationDirectory, "0001_schema.sql"), schema, "utf8");
       const migrations = await readD1Migrations(migrationDirectory);
+      const traceMigrationDirectory = await mkdtemp(path.join(tmpdir(), "nwflash-workerd-trace-v2-migrations-"));
+      const traceMigration = await readFile(path.join(import.meta.dirname, "web", "migrate-usage-traces-v2.sql"));
+      await writeFile(path.join(traceMigrationDirectory, "0001_trace_v2.sql"), traceMigration);
+      await writeFile(path.join(traceMigrationDirectory, "0002_trace_v2.sql"), traceMigration);
+      const traceV2Migrations = await readD1Migrations(traceMigrationDirectory);
 
       const generated = await webcrypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
       const pkcs8 = await webcrypto.subtle.exportKey("pkcs8", generated.privateKey);
@@ -26,6 +31,7 @@ export default defineConfig({
           ],
           bindings: {
             TEST_MIGRATIONS: migrations,
+            TEST_TRACE_V2_MIGRATIONS: traceV2Migrations,
             SESSION_SIGNING_PRIVATE_KEY_PKCS8: signingSecret,
             VOTA_API_TOKEN: "unused-in-workerd-tests",
           },
