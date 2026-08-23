@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Personal Ops</title>
+    <link rel="stylesheet" href="/portal/styles.css">
+  </head>
+  <body>
+    <main class="portal-shell">
+      <section class="login-surface" data-view="login" aria-labelledby="login-title">
+        <p class="eyebrow">PERSONAL OPS</p>
+        <h1 id="login-title">登录以继续</h1>
+        <p>请使用您的帐户凭据进入个人工作区。</p>
+      </section>
+
+      <section class="application" data-app data-view="app" hidden>
+        <aside class="navigation-rail" aria-label="个人工作区">
+          <a class="brand" href="/">NWF / PERSONAL OPS</a>
+          <nav aria-label="主导航">
+            <button type="button" data-nav="overview">概览</button>
+            <button type="button" data-nav="activity">我的活动</button>
+            <button type="button" data-nav="sessions">设备与会话</button>
+            <button type="button" data-nav="security">安全设置</button>
+          </nav>
+          <p class="account-name" data-user-name></p>
+        </aside>
+
+        <section class="workspace" aria-live="polite" data-live-status>
+          <section data-view="overview" aria-labelledby="overview-title">
+            <p class="eyebrow">工作区</p>
+            <h2 id="overview-title">概览</h2>
+            <div data-overview-loading>正在加载概览…</div>
+            <div data-overview-empty hidden>暂无可显示的活动。</div>
+            <div data-overview-error hidden>
+              <p data-overview-error-message>暂时无法加载概览。</p>
+              <button type="button" data-overview-retry>重试</button>
+            </div>
+            <dl class="metric-grid" data-overview-content hidden>
+              <div><dt>活动总数</dt><dd data-overview-total></dd></div>
+              <div><dt>工具操作</dt><dd data-overview-operations></dd></div>
+              <div><dt>ROM 查询</dt><dd data-overview-rom></dd></div>
+              <div><dt>成功</dt><dd data-overview-successes></dd></div>
+              <div><dt>失败</dt><dd data-overview-failures></dd></div>
+              <div><dt>活跃会话</dt><dd data-overview-sessions></dd></div>
+            </dl>
+          </section>
+
+          <section data-view="activity" hidden aria-labelledby="activity-title">
+            <p class="eyebrow">记录</p>
+            <h2 id="activity-title">我的活动</h2>
+            <div class="filter-row" aria-label="活动筛选">
+              <label>类型<select data-activity-type><option value="all">全部活动</option><option value="operation">工具操作</option><option value="rom">ROM 查询</option></select></label>
+              <label>状态<select data-activity-status><option value="all">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="canceled">已取消</option></select></label>
+            </div>
+            <div data-activity-loading>正在加载活动…</div>
+            <div data-activity-empty hidden>暂无活动记录。</div>
+            <div data-activity-error hidden>
+              <p data-activity-error-message>暂时无法加载活动。</p>
+              <button type="button" data-activity-retry hidden>重试</button>
+            </div>
+            <div class="activity-layout">
+              <div data-activity-list aria-label="活动列表"></div>
+              <aside data-activity-detail aria-live="polite">
+                <p data-step-state>选择一项活动以查看安全摘要。</p>
+                <div data-step-list></div>
+              </aside>
+            </div>
+          </section>
+
+          <section data-view="sessions" hidden aria-labelledby="sessions-title">
+            <p class="eyebrow">设备</p>
+            <h2 id="sessions-title">设备与会话</h2>
+            <div data-sessions-loading>正在加载会话…</div>
+            <div data-sessions-empty hidden>当前没有活跃会话。</div>
+            <div data-sessions-error hidden>
+              <p data-sessions-error-message>暂时无法加载会话。</p>
+              <button type="button" data-sessions-retry hidden>重试</button>
+            </div>
+            <div data-session-list></div>
+          </section>
+
+          <section data-view="security" hidden aria-labelledby="security-title">
+            <p class="eyebrow">帐户</p>
+            <h2 id="security-title">安全设置</h2>
+            <p>更改密码会立即使旧令牌和所有会话失效，之后需要重新登录。</p>
+            <button type="button" data-open-password-dialog>更改密码</button>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <dialog data-kick-dialog aria-labelledby="kick-dialog-title">
+      <form method="dialog">
+        <h2 id="kick-dialog-title">结束此会话？</h2>
+        <p>服务器确认该会话消失前，它会保持“请求已发送”状态。</p>
+        <menu><button type="button" data-cancel-kick>取消</button><button type="button" data-confirm-kick>发送请求</button></menu>
+      </form>
+    </dialog>
+
+    <dialog data-password-dialog aria-labelledby="password-dialog-title">
+      <form data-password-form>
+        <h2 id="password-dialog-title">更改密码</h2>
+        <p>成功后，旧令牌和全部会话将立即失效。</p>
+        <label>当前密码<input required type="password" data-password-current autocomplete="current-password"></label>
+        <label>新密码<input required type="password" minlength="8" data-password-new autocomplete="new-password"></label>
+        <p data-password-error role="alert"></p>
+        <menu><button type="button" data-cancel-password>取消</button><button type="submit">确认更改</button></menu>
+      </form>
+    </dialog>
+    <script type="module" src="/portal/app.js"></script>
+  </body>
+</html>
