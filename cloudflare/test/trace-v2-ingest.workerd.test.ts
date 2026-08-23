@@ -276,7 +276,7 @@ describe("POST /api/usage/traces/v2", () => {
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
   });
 
-  it("returns only durable item rejections after every retry loses a different natural-key race", async () => {
+  it("returns a durable run ack plus item rejections after every retry loses a natural-key race", async () => {
     await seedUser("trace-bearer", 7);
     await seedRunOwnedBy(7, successFixture.runs[0].run_id);
     const payload = retryExhaustionPayload();
@@ -297,7 +297,7 @@ describe("POST /api/usage/traces/v2", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       ok: true,
-      accepted: { runs: [], events: [], output_chunks: [] },
+      accepted: { runs: [payload.runs[0].run_id], events: [], output_chunks: [] },
       rejected: payload.events.map((event: any) => ({
         entity: "event",
         id: event.event_id,
@@ -353,6 +353,98 @@ describe("POST /api/usage/traces/v2", () => {
       payload.runs[0].run_id,
     )).toBe(2);
     expect(await text("SELECT title AS value FROM usage_operation_runs WHERE run_id = ?", payload.runs[0].run_id)).toBe("Seed run");
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_trace_ingest_guards")).toBe(0);
+  });
+
+  it("acks exact run event and chunk IDs made durable across all exhausted retries", async () => {
+    await seedUser("trace-bearer", 7);
+    const payload = exactRetryExhaustionPayload();
+    const db = collisionPerBatchDatabase(async (attempt) => {
+      if (attempt === 1) {
+        await seedRunOwnedBy(7, payload.runs[0].run_id);
+        await seedEvent(payload.events[0].event_id, payload.runs[0].run_id, 1);
+        return;
+      }
+      if (attempt === 2) {
+        await seedEvent(
+          payload.events[1].event_id,
+          payload.runs[0].run_id,
+          2,
+          payload.events[1].stdout_chunks,
+          payload.events[1].stderr_chunks,
+        );
+        return;
+      }
+      await seedEvent(payload.events[2].event_id, payload.runs[0].run_id, 3);
+      for (const chunk of payload.output_chunks) {
+        await seedChunk(chunk.chunk_id, chunk.event_id, chunk.stream, chunk.chunk_index);
+      }
+    });
+
+    const response = await ingestTraceUploadV2(
+      { DB: db },
+      traceRequest(payload, "trace-bearer", "203.0.113.53"),
+      { id: 7, username: "user-7", name: "User 7", bearer_token: "trace-bearer" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(successAckFixture);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_runs")).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(3);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
+    expect(await text("SELECT title AS value FROM usage_operation_runs")).toBe("Seed run");
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_trace_ingest_guards")).toBe(0);
+  });
+
+  it("returns durable duplicate IDs together with a final natural-key rejection", async () => {
+    await seedUser("trace-bearer", 7);
+    const payload = retryExhaustionPayload();
+    const db = collisionPerBatchDatabase(async (attempt) => {
+      if (attempt === 1) {
+        await seedRunOwnedBy(7, payload.runs[0].run_id);
+        await seedEvent(payload.events[0].event_id, payload.runs[0].run_id, 1);
+        return;
+      }
+      if (attempt === 2) {
+        await seedEvent(
+          "019d9c40-7b3c-7000-8000-000000000097",
+          payload.runs[0].run_id,
+          2,
+        );
+        return;
+      }
+      await seedEvent(payload.events[2].event_id, payload.runs[0].run_id, 3);
+    });
+
+    const response = await ingestTraceUploadV2(
+      { DB: db },
+      traceRequest(payload, "trace-bearer", "203.0.113.54"),
+      { id: 7, username: "user-7", name: "User 7", bearer_token: "trace-bearer" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      accepted: {
+        runs: [payload.runs[0].run_id],
+        events: [payload.events[0].event_id, payload.events[2].event_id],
+        output_chunks: [],
+      },
+      rejected: [{
+        entity: "event",
+        id: payload.events[1].event_id,
+        code: "sequence_conflict",
+        message: "同一运行序号已由其他事件占用。",
+      }],
+    });
+    expect(await scalar(
+      `SELECT COUNT(*) AS value FROM usage_operation_events
+       WHERE event_id IN (?, ?)`,
+      payload.events[0].event_id,
+      payload.events[2].event_id,
+    )).toBe(2);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_trace_ingest_guards")).toBe(0);
   });
@@ -589,6 +681,17 @@ function retryExhaustionPayload(): any {
     stderr_chunks: 0,
   }));
   payload.output_chunks = [];
+  return payload;
+}
+
+function exactRetryExhaustionPayload(): any {
+  const payload = copySuccess();
+  payload.upload_id = "019d9c40-7b3c-7000-8000-000000000077";
+  payload.runs[0].outcome = "running";
+  payload.runs[0].ended_at_ms = null;
+  payload.runs[0].duration_ms = null;
+  payload.runs[0].final_sequence = null;
+  payload.runs[0].trace_complete = false;
   return payload;
 }
 

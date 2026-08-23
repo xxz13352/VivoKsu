@@ -46,6 +46,8 @@ interface PersistedChunkRow {
 
 interface PreparedTraceUpload {
   accepted: TraceUploadResponseV2["accepted"];
+  durableAccepted: TraceUploadResponseV2["accepted"];
+  pendingWrites: TraceUploadResponseV2["accepted"];
   rejected: TraceRejectedItemV2[];
   newEvents: TraceEventV2[];
   newChunks: TraceOutputChunkV2[];
@@ -108,10 +110,10 @@ export async function ingestTraceUploadV2(
       return traceError(409, "TRACE_OWNERSHIP_CONFLICT", "日志标识已属于其他用户。", finalConflict);
     }
     const finalPrepared = await prepareTraceUpload(env.DB, sanitized.payload);
-    if (finalPrepared.rejected.length > 0) {
+    if (!hasTraceItemIds(finalPrepared.pendingWrites)) {
       return traceJson({
         ok: true,
-        accepted: { runs: [], events: [], output_chunks: [] },
+        accepted: finalPrepared.durableAccepted,
         rejected: finalPrepared.rejected,
       } satisfies TraceUploadResponseV2, 200);
     }
@@ -134,6 +136,7 @@ async function prepareTraceUpload(
   const runIds = payload.runs.map((run) => run.run_id);
   const eventIds = payload.events.map((event) => event.event_id);
   const persistedRuns = await readPersistedRuns(db, runIds);
+  const persistedRunIds = new Set(persistedRuns.map((run) => run.run_id));
   const completedRunIds = new Set(
     persistedRuns.filter((run) => run.trace_complete === 1).map((run) => run.run_id),
   );
@@ -144,11 +147,13 @@ async function prepareTraceUpload(
   );
 
   const acceptedEvents: string[] = [];
+  const durableEvents: string[] = [];
   const rejected: TraceRejectedItemV2[] = [];
   const newEvents: TraceEventV2[] = [];
   for (const event of payload.events) {
     if (persistedEventById.has(event.event_id)) {
       acceptedEvents.push(event.event_id);
+      durableEvents.push(event.event_id);
       continue;
     }
     if (completedRunIds.has(event.run_id)) {
@@ -188,6 +193,7 @@ async function prepareTraceUpload(
     persistedChunks.map((chunk) => [chunkKey(chunk.event_id, chunk.stream, chunk.chunk_index), chunk]),
   );
   const acceptedChunks: string[] = [];
+  const durableChunks: string[] = [];
   const newChunks: TraceOutputChunkV2[] = [];
   const eventRunIds = new Map([
     ...persistedEvents.map((event) => [event.event_id, event.run_id] as const),
@@ -196,6 +202,7 @@ async function prepareTraceUpload(
   for (const chunk of payload.output_chunks) {
     if (persistedChunkById.has(chunk.chunk_id)) {
       acceptedChunks.push(chunk.chunk_id);
+      durableChunks.push(chunk.chunk_id);
       continue;
     }
     if (completedRunIds.has(eventRunIds.get(chunk.event_id) ?? "")) {
@@ -235,6 +242,16 @@ async function prepareTraceUpload(
       events: acceptedEvents,
       output_chunks: acceptedChunks,
     },
+    durableAccepted: {
+      runs: payload.runs.filter((run) => persistedRunIds.has(run.run_id)).map((run) => run.run_id),
+      events: durableEvents,
+      output_chunks: durableChunks,
+    },
+    pendingWrites: {
+      runs: payload.runs.filter((run) => !persistedRunIds.has(run.run_id)).map((run) => run.run_id),
+      events: newEvents.map((event) => event.event_id),
+      output_chunks: newChunks.map((chunk) => chunk.chunk_id),
+    },
     rejected,
     newEvents,
     newChunks,
@@ -242,6 +259,10 @@ async function prepareTraceUpload(
     persistedEvents,
     persistedChunks,
   };
+}
+
+function hasTraceItemIds(items: TraceUploadResponseV2["accepted"]): boolean {
+  return items.runs.length > 0 || items.events.length > 0 || items.output_chunks.length > 0;
 }
 
 async function readPersistedRuns(db: D1Database, runIds: string[]): Promise<PersistedRunRow[]> {
