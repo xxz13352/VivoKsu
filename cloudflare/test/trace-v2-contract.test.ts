@@ -3,11 +3,24 @@ import { describe, expect, it } from "vitest";
 import {
   decodeTraceCursorV2,
   encodeTraceCursorV2,
+  readTraceUploadV2,
   validateTraceUploadV2,
 } from "../src/trace-v2-contract";
 
 const valid = JSON.parse(readFileSync(
   new URL("../contracts/trace-v2/upload.success.json", import.meta.url),
+  "utf8",
+));
+const failed = JSON.parse(readFileSync(
+  new URL("../contracts/trace-v2/upload.failed.json", import.meta.url),
+  "utf8",
+));
+const adminFailed = JSON.parse(readFileSync(
+  new URL("../contracts/trace-v2/admin-run-failed.json", import.meta.url),
+  "utf8",
+));
+const schema = JSON.parse(readFileSync(
+  new URL("../contracts/trace-v2/usage-trace-v2.schema.json", import.meta.url),
   "utf8",
 ));
 
@@ -18,6 +31,23 @@ function copy(): Record<string, any> {
 describe("trace v2 contract", () => {
   it("accepts the canonical success fixture", () => {
     expect(validateTraceUploadV2(valid)).toEqual(valid);
+  });
+
+  it("freezes failure traces with persisted skipped remainder instead of evidence loss", () => {
+    expect(validateTraceUploadV2(failed)).toEqual(failed);
+    expect(failed.runs[0]).toMatchObject({ trace_complete: true, trace_loss_reason: null, final_sequence: 3 });
+    expect(failed.events.map((event: { status: string }) => event.status)).toEqual(["failed", "skipped", "failed"]);
+    expect(adminFailed.run).toMatchObject({ trace_complete: true, trace_loss_reason: null });
+    expect(adminFailed.events.map((event: { status: string }) => event.status)).toEqual(["failed", "skipped", "failed"]);
+  });
+
+  it("reads a canonical upload body through the bounded request reader", async () => {
+    const request = new Request("https://api.nwflash.cc.cd/api/usage/traces/v2", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(valid),
+    });
+    await expect(readTraceUploadV2(request)).resolves.toEqual(valid);
   });
 
   it("rejects unknown fields", () => {
@@ -54,6 +84,19 @@ describe("trace v2 contract", () => {
     expect(() => validateTraceUploadV2(inconsistent)).toThrow(/duration_ms/);
   });
 
+  it("rejects sequence zero even when it is declared as the final event", () => {
+    const zero = copy();
+    zero.events[0].sequence = 0;
+    zero.runs[0].final_sequence = 0;
+    expect(() => validateTraceUploadV2(zero)).toThrow(/sequence/);
+  });
+
+  it("rejects a persisted event whose sequence exceeds its declared final sequence", () => {
+    const beyondFinal = copy();
+    beyondFinal.events[2].sequence = 4;
+    expect(() => validateTraceUploadV2(beyondFinal)).toThrow(/final_sequence/);
+  });
+
   it("rejects duplicate identities and parent relationships that do not exist", () => {
     const duplicateRun = copy();
     duplicateRun.runs.push({ ...duplicateRun.runs[0] });
@@ -66,6 +109,15 @@ describe("trace v2 contract", () => {
     const missingParent = copy();
     missingParent.events[0].run_id = "019d9c40-7b3c-7000-8000-000000000088";
     expect(() => validateTraceUploadV2(missingParent)).toThrow(/unknown run_id/);
+  });
+
+  it("rejects duplicate output chunk tuples independently of chunk IDs", () => {
+    const duplicateTuple = copy();
+    duplicateTuple.output_chunks.push({
+      ...duplicateTuple.output_chunks[0],
+      chunk_id: "019d9c40-7b3c-7000-8000-000000000099",
+    });
+    expect(() => validateTraceUploadV2(duplicateTuple)).toThrow(/duplicate \(event_id, stream, chunk_index\)/);
   });
 
   it("checks UTF-8 chunk byte counts and SHA-256 values", () => {
@@ -87,5 +139,18 @@ describe("trace v2 contract", () => {
     const encoded = btoa(JSON.stringify({ v: 1, started_at_ms: 1, run_id: valid.runs[0].run_id, extra: true }))
       .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
     expect(() => decodeTraceCursorV2(encoded)).toThrow(/unknown field: extra/);
+  });
+
+  it("publishes UTF-8 byte-limit metadata that matches executable multibyte rejection", () => {
+    expect(schema.$defs.shortText["x-maxUtf8Bytes"]).toBe(1_024);
+    expect(schema.$defs.text["x-maxUtf8Bytes"]).toBe(16_384);
+    expect(schema.$defs.nullableShortText["x-maxUtf8Bytes"]).toBe(1_024);
+    expect(schema.$defs.nullableText["x-maxUtf8Bytes"]).toBe(16_384);
+    expect(schema.$defs.outputChunk.properties.text["x-maxUtf8Bytes"]).toBe(32_768);
+    expect(schema.$defs.outputChunk.properties.sha256["x-maxUtf8Bytes"]).toBe(64);
+
+    const multibyte = copy();
+    multibyte.events[0].step_name = "你".repeat(342);
+    expect(() => validateTraceUploadV2(multibyte)).toThrow(/UTF-8 byte limit of 1024/);
   });
 });
