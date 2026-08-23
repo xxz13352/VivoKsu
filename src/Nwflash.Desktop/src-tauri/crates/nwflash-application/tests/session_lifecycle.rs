@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey};
 use nwflash_application::{
     HeartbeatCallback, HeartbeatInput, SessionLifecycle, SessionLifecycleError,
-    SessionLifecycleSession,
+    SessionLifecycleSession, SERVER_FORCE_EXIT_MESSAGE,
 };
 use nwflash_infrastructure::{
     CloudflareError, HeartbeatAdmission, IntegrityFailure, SecretToken, UpdateRequiredInfo,
@@ -215,9 +215,7 @@ async fn force_exit_is_terminal_once_and_does_not_send_goodbye_early() {
         let active_tx = active_tx.clone();
         Box::pin(async move {
             active_tx.send(input.active).unwrap();
-            Ok(HeartbeatAdmission::ForceExit(
-                "server force exit".to_string(),
-            ))
+            Ok(HeartbeatAdmission::ForceExit)
         })
     });
     let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
@@ -234,7 +232,7 @@ async fn force_exit_is_terminal_once_and_does_not_send_goodbye_early() {
         timeout(Duration::from_millis(150), terminal_rx.recv())
             .await
             .unwrap(),
-        Some("server force exit".to_string())
+        Some(SERVER_FORCE_EXIT_MESSAGE.to_string())
     );
     assert_eq!(active_rx.recv().await, Some(true));
     assert!(timeout(Duration::from_millis(40), active_rx.recv())
@@ -446,9 +444,8 @@ async fn start_rejects_an_empty_secret_and_stop_without_context_is_not_started()
 
 #[tokio::test]
 async fn terminal_callback_carries_the_rust_issued_session_generation() {
-    let callback: HeartbeatCallback = Arc::new(|_input| {
-        Box::pin(async { Ok(HeartbeatAdmission::ForceExit("terminal".to_string())) })
-    });
+    let callback: HeartbeatCallback =
+        Arc::new(|_input| Box::pin(async { Ok(HeartbeatAdmission::ForceExit) }));
     let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
     let lifecycle = short_lifecycle(
         callback,
@@ -471,7 +468,10 @@ async fn terminal_callback_carries_the_rust_issued_session_generation() {
         timeout(Duration::from_millis(150), terminal_rx.recv())
             .await
             .unwrap(),
-        Some(("generation-runtime".to_string(), "terminal".to_string()))
+        Some((
+            "generation-runtime".to_string(),
+            SERVER_FORCE_EXIT_MESSAGE.to_string()
+        ))
     );
     assert_eq!(
         lifecycle.generation().await.as_deref(),
@@ -505,9 +505,8 @@ async fn prepared_activation_rejects_fallible_start_inputs_before_state_mutation
     assert!(invalid_username.is_err());
     assert!(invalid_generation.is_err());
 
-    let callback: HeartbeatCallback = Arc::new(|_input| {
-        Box::pin(async { Ok(HeartbeatAdmission::ForceExit("terminal".to_string())) })
-    });
+    let callback: HeartbeatCallback =
+        Arc::new(|_input| Box::pin(async { Ok(HeartbeatAdmission::ForceExit) }));
     let lifecycle = SessionLifecycle::new(callback, None, None);
     assert!(!lifecycle.is_running().await);
     assert!(lifecycle.session_id().await.is_none());
@@ -516,9 +515,8 @@ async fn prepared_activation_rejects_fallible_start_inputs_before_state_mutation
 
 #[tokio::test]
 async fn prepared_activation_start_has_no_post_teardown_error_path() {
-    let callback: HeartbeatCallback = Arc::new(|_input| {
-        Box::pin(async { Ok(HeartbeatAdmission::ForceExit("terminal".to_string())) })
-    });
+    let callback: HeartbeatCallback =
+        Arc::new(|_input| Box::pin(async { Ok(HeartbeatAdmission::ForceExit) }));
     let lifecycle = SessionLifecycle::new(callback, None, None);
     let prepared = SessionLifecycleSession::prepare(
         SecretToken::new(TOKEN.to_string()),

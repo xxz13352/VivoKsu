@@ -567,7 +567,7 @@ async fn force_exit_heartbeat_is_terminal_without_a_signed_envelope() {
         .and(path("/api/heartbeat"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "force_exit": true,
-            "reason": "terminal fixture"
+            "reason": "echo-token echo-password C:\\private\\firmware.img"
         })))
         .mount(&server)
         .await;
@@ -583,10 +583,11 @@ async fn force_exit_heartbeat_is_terminal_without_a_signed_envelope() {
         .await
         .expect("force exit is a terminal server admission");
 
-    assert_eq!(
-        admission,
-        HeartbeatAdmission::ForceExit("terminal fixture".to_string())
-    );
+    assert_eq!(admission, HeartbeatAdmission::ForceExit);
+    let debug = format!("{admission:?}");
+    assert!(!debug.contains("echo-token"));
+    assert!(!debug.contains("echo-password"));
+    assert!(!debug.contains("private"));
 }
 
 #[tokio::test]

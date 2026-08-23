@@ -1,7 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { App } from './app/App';
+import { App, rememberBoundedTerminalGeneration } from './app/App';
 import { IPC_EVENTS } from './app/ipc-events';
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -204,6 +204,138 @@ describe('登录态界面', () => {
     expect(
       invokeMock.mock.calls.some(([command]) => command === 'auth_validate_token'),
     ).toBe(false);
+  });
+
+  test('旧启动校验在新登录成功后失败时不能登出新一代会话', async () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    let rejectStartupValidation: ((reason: unknown) => void) | undefined;
+    const startupValidation = new Promise<never>((_resolve, reject) => {
+      rejectStartupValidation = reject;
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'version_check') {
+        return { update_required: false, force_update: false };
+      }
+      if (command === 'session_state') {
+        return {
+          has_token: true,
+          healthy: true,
+          running: true,
+          session_id: 'startup-session',
+          generation: 'generation-startup',
+        };
+      }
+      if (command === 'auth_validate_token') {
+        return startupValidation;
+      }
+      if (command === 'auth_login') {
+        return { username: 'new-user', name: 'New User', generation: 'generation-new' };
+      }
+      return {};
+    });
+
+    flushSync(() => root.render(<App />));
+    await waitUntil(
+      () => invokeMock.mock.calls.some(([command]) => command === 'auth_validate_token'),
+    );
+    setInputValue(host.querySelector('[aria-label="账号"]') as HTMLInputElement, 'new-user');
+    setInputValue(host.querySelector('[aria-label="密码"]') as HTMLInputElement, 'secret');
+    await waitUntil(
+      () => !(host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).disabled,
+    );
+    (host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).click();
+    await waitUntil(() => host.querySelector('.nw-shell') !== null);
+
+    rejectStartupValidation?.('old startup rejected');
+    await flushPromises();
+    await flushPromises();
+
+    expect(host.querySelector('.nw-shell')).not.toBeNull();
+    expect(host.textContent).toContain('New User');
+  });
+
+  test('未知代旧 update 先到且 session_state 后返回不同新代时不得污染新会话', async () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    const listeners = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    let resolveSessionState:
+      | ((value: {
+          has_token: boolean;
+          healthy: boolean;
+          running: boolean;
+          session_id: string;
+          generation: string;
+        }) => void)
+      | undefined;
+    const pendingSessionState = new Promise<{
+      has_token: boolean;
+      healthy: boolean;
+      running: boolean;
+      session_id: string;
+      generation: string;
+    }>((resolve) => {
+      resolveSessionState = resolve;
+    });
+    (listen as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (event: string, handler: (event: { payload: Record<string, unknown> }) => void) => {
+        listeners.set(event, handler);
+        return () => {};
+      },
+    );
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'version_check') {
+        return { update_required: false, force_update: false };
+      }
+      if (command === 'session_state') {
+        return pendingSessionState;
+      }
+      if (command === 'auth_validate_token') {
+        return 'Live User';
+      }
+      return {};
+    });
+
+    flushSync(() => root.render(<App />));
+    await waitUntil(
+      () =>
+        listeners.has(IPC_EVENTS.sessionUpdateRequired) &&
+        invokeMock.mock.calls.some(([command]) => command === 'session_state'),
+    );
+    listeners.get(IPC_EVENTS.sessionUpdateRequired)?.({
+      payload: {
+        generation: 'generation-old',
+        message: 'stale old update',
+        latest: '9.9.9',
+        minVersion: '9.9.9',
+        downloadUrl: null,
+      },
+    });
+    resolveSessionState?.({
+      has_token: true,
+      healthy: true,
+      running: true,
+      session_id: 'live-session',
+      generation: 'generation-live',
+    });
+
+    await waitUntil(() => host.querySelector('.nw-shell') !== null);
+    expect(host.textContent).toContain('Live User');
+    expect(host.textContent).not.toContain('stale old update');
+    expect(host.querySelector('[role="dialog"][aria-label="奶蛙Flash 需要更新"]')).toBeNull();
+  });
+
+  test('终止代存储容量固定并按插入顺序淘汰最旧代', () => {
+    const terminal = new Map<string, string>();
+    for (let index = 0; index < 33; index += 1) {
+      rememberBoundedTerminalGeneration(
+        terminal,
+        `generation-${index}`,
+        `terminal-${index}`,
+      );
+    }
+
+    expect(terminal.size).toBe(32);
+    expect(terminal.has('generation-0')).toBe(false);
+    expect(terminal.get('generation-32')).toBe('terminal-32');
   });
 
   test('启动版本检查命中更新要求时阻止登录并提示更新', async () => {

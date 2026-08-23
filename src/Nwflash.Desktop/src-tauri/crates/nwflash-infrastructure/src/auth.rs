@@ -41,7 +41,7 @@ impl fmt::Debug for AuthSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatAdmission {
     Accepted(SessionLease),
-    ForceExit(String),
+    ForceExit,
     Goodbye,
 }
 
@@ -119,11 +119,7 @@ impl AuthService {
             return Ok(HeartbeatAdmission::Goodbye);
         }
         if result.force_exit {
-            return Ok(HeartbeatAdmission::ForceExit(
-                result
-                    .reason
-                    .unwrap_or_else(|| "服务端要求退出".to_string()),
-            ));
+            return Ok(HeartbeatAdmission::ForceExit);
         }
 
         // As with login, no payload fields are considered until Ed25519 succeeds.

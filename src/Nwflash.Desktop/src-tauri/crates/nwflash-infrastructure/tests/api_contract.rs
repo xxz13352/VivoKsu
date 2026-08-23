@@ -294,7 +294,7 @@ async fn heartbeat_parses_force_exit_reason() {
         .await
         .expect("heartbeat should parse forced exit");
     assert!(heartbeat.force_exit);
-    assert_eq!(heartbeat.reason.as_deref(), Some("违规下线"));
+    assert!(!format!("{heartbeat:?}").contains("违规下线"));
 }
 
 #[tokio::test]

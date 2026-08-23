@@ -116,6 +116,7 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const GOODBYE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_CONSECUTIVE_TRANSIENT_FAILURES: u8 = 3;
+pub const SERVER_FORCE_EXIT_MESSAGE: &str = "服务端已终止当前会话。";
 
 #[derive(Debug, Error, Clone)]
 pub enum SessionLifecycleError {
@@ -352,8 +353,8 @@ impl SessionLifecycle {
                 self.state.healthy.store(true, Ordering::Release);
                 TickResult::continue_()
             }
-            Ok(Ok(HeartbeatAdmission::ForceExit(reason))) => {
-                self.terminal_force_exit(generation, reason)
+            Ok(Ok(HeartbeatAdmission::ForceExit)) => {
+                self.terminal_force_exit(generation, SERVER_FORCE_EXIT_MESSAGE.to_string())
             }
             Ok(Ok(HeartbeatAdmission::Goodbye)) => {
                 self.terminal_force_exit(generation, "活动心跳响应无有效租约".to_string())

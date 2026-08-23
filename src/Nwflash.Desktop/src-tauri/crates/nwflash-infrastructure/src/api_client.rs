@@ -12,7 +12,7 @@ use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
     Client, Method, Response, StatusCode,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
@@ -239,11 +239,33 @@ struct GoodbyeRequest {
     active: bool,
 }
 
-#[derive(Clone, Deserialize)]
+struct ZeroizingServerText {
+    _value: Zeroizing<String>,
+}
+
+impl<'de> Deserialize<'de> for ZeroizingServerText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|value| Self {
+            _value: Zeroizing::new(value),
+        })
+    }
+}
+
+impl fmt::Debug for ZeroizingServerText {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ZeroizingServerText([REDACTED])")
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HeartbeatResult {
     pub force_exit: bool,
-    pub reason: Option<String>,
+    #[serde(rename = "reason")]
+    _reason: Option<ZeroizingServerText>,
     #[serde(default)]
     pub lease_payload: String,
     #[serde(default)]
@@ -264,7 +286,7 @@ impl fmt::Debug for HeartbeatResult {
         formatter
             .debug_struct("HeartbeatResult")
             .field("force_exit", &self.force_exit)
-            .field("reason", &self.reason)
+            .field("reason", &"[REDACTED]")
             .field("lease_payload", &"[REDACTED]")
             .field("lease_signature", &"[REDACTED]")
             .finish()

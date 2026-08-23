@@ -48,6 +48,28 @@ type VersionCheckPayload = {
 
 type ReadinessDialog = 'resources' | 'drivers' | null;
 const MAX_TERMINAL_GENERATIONS = 32;
+type TerminalGenerationState =
+  | { readonly kind: 'force-exit'; readonly reason: string }
+  | { readonly kind: 'update-required'; readonly payload: SessionUpdateRequiredPayload };
+
+export const rememberBoundedTerminalGeneration = <T,>(
+  generations: Map<string, T>,
+  generation: string,
+  state: T,
+  capacity = MAX_TERMINAL_GENERATIONS,
+): void => {
+  if (generations.has(generation)) {
+    return;
+  }
+  generations.set(generation, state);
+  while (generations.size > capacity) {
+    const oldest = generations.keys().next().value as string | undefined;
+    if (!oldest) {
+      break;
+    }
+    generations.delete(oldest);
+  }
+};
 
 export const formatCurrentTime = (value = new Date()): string => {
   const month = String(value.getMonth() + 1).padStart(2, '0');
@@ -175,10 +197,10 @@ export const App: FC = () => {
   const [readinessBusy, setReadinessBusy] = useState(false);
   const [driverReadinessError, setDriverReadinessError] = useState('');
   const closingWindow = useRef(false);
-  const sessionUpdateRequiredRef = useRef(false);
   const startupCancelledRef = useRef(false);
+  const startupAttemptRef = useRef(0);
   const currentGenerationRef = useRef<string | null>(null);
-  const terminalGenerationsRef = useRef<Set<string>>(new Set());
+  const terminalGenerationsRef = useRef<Map<string, TerminalGenerationState>>(new Map());
 
   const isVersionBlocked = versionBlock !== null;
 
@@ -232,20 +254,12 @@ export const App: FC = () => {
     await showDriverReminderIfNeeded();
   }, [showDriverReminderIfNeeded]);
 
-  const rememberTerminalGeneration = useCallback((generation: string) => {
-    const generations = terminalGenerationsRef.current;
-    if (generations.has(generation)) {
-      return;
-    }
-    generations.add(generation);
-    while (generations.size > MAX_TERMINAL_GENERATIONS) {
-      const oldest = generations.values().next().value as string | undefined;
-      if (!oldest) {
-        break;
-      }
-      generations.delete(oldest);
-    }
-  }, []);
+  const rememberTerminalGeneration = useCallback(
+    (generation: string, state: TerminalGenerationState) => {
+      rememberBoundedTerminalGeneration(terminalGenerationsRef.current, generation, state);
+    },
+    [],
+  );
 
   const isCurrentLiveGeneration = useCallback(
     (generation: string) =>
@@ -254,10 +268,50 @@ export const App: FC = () => {
     [],
   );
 
-  const refreshSessionState = useCallback(async () => {
+  const isStartupAttemptCurrent = useCallback(
+    (attempt: number) =>
+      !startupCancelledRef.current && startupAttemptRef.current === attempt,
+    [],
+  );
+
+  const cancelStartupAttempt = useCallback(() => {
+    startupCancelledRef.current = true;
+    startupAttemptRef.current += 1;
+  }, []);
+
+  const clearVersionBlock = useCallback(() => {
+    setVersionBlock(null);
+  }, []);
+
+  const applyTerminalGeneration = useCallback(
+    (state: TerminalGenerationState) => {
+      setOperations([]);
+      setIsLoggedIn(false);
+      setAccountName('未登录');
+      if (state.kind === 'force-exit') {
+        setSessionNotice(`会话已退出：${state.reason}`);
+        clearVersionBlock();
+        return;
+      }
+
+      const message = state.payload.message || '检测到新版本要求，请立即更新后重新登录。';
+      setSessionNotice(message);
+      setVersionBlock({
+        message,
+        latest: state.payload.latest,
+        minVersion: state.payload.minVersion,
+        downloadUrl: state.payload.downloadUrl,
+      });
+      setReadinessDialog(null);
+    },
+    [clearVersionBlock],
+  );
+
+  const refreshSessionState = useCallback(async (startupAttempt: number) => {
+    let revealedGeneration: string | null = null;
     try {
       const sessionState = await invoke<SessionStateV2Payload>('session_state');
-      if (startupCancelledRef.current) {
+      if (!isStartupAttemptCurrent(startupAttempt)) {
         return;
       }
       if (!sessionState.has_token || !sessionState.running) {
@@ -267,25 +321,30 @@ export const App: FC = () => {
         return;
       }
       const generation = sessionState.generation;
-      if (!generation || terminalGenerationsRef.current.has(generation)) {
+      if (!generation) {
         currentGenerationRef.current = null;
         setIsLoggedIn(false);
         setAccountName('未登录');
         return;
       }
+      revealedGeneration = generation;
+      const terminal = terminalGenerationsRef.current.get(generation);
+      if (terminal) {
+        currentGenerationRef.current = null;
+        applyTerminalGeneration(terminal);
+        return;
+      }
       currentGenerationRef.current = generation;
 
       const validated = await invoke<string | null>('auth_validate_token');
-      if (startupCancelledRef.current || !isCurrentLiveGeneration(generation)) {
+      if (
+        !isStartupAttemptCurrent(startupAttempt) ||
+        !isCurrentLiveGeneration(generation)
+      ) {
         return;
       }
       if (!validated) {
-        setIsLoggedIn(false);
-        setAccountName('未登录');
-        return;
-      }
-
-      if (sessionUpdateRequiredRef.current) {
+        currentGenerationRef.current = null;
         setIsLoggedIn(false);
         setAccountName('未登录');
         return;
@@ -294,27 +353,32 @@ export const App: FC = () => {
       setIsLoggedIn(true);
       setAccountName(validated);
 
-      if (startupCancelledRef.current || sessionUpdateRequiredRef.current) {
-        setIsLoggedIn(false);
-        setAccountName('未登录');
-        return;
-      }
-
       await runPostLoginReadiness();
-      if (!isCurrentLiveGeneration(generation)) {
+      if (
+        !isStartupAttemptCurrent(startupAttempt) ||
+        !isCurrentLiveGeneration(generation)
+      ) {
         return;
       }
     } catch (error) {
+      if (
+        !isStartupAttemptCurrent(startupAttempt) ||
+        (revealedGeneration !== null &&
+          currentGenerationRef.current !== revealedGeneration)
+      ) {
+        return;
+      }
       const updateDetails = updateRequiredDetailsFromError(error);
       if (updateDetails) {
         setVersionBlock(updateDetails);
         setSessionNotice(updateDetails.message);
       }
+      currentGenerationRef.current = null;
       setIsLoggedIn(false);
       setAccountName('未登录');
       console.debug('会话恢复失败:', error);
     }
-  }, [isCurrentLiveGeneration, runPostLoginReadiness]);
+  }, [applyTerminalGeneration, isCurrentLiveGeneration, isStartupAttemptCurrent, runPostLoginReadiness]);
 
   const applyVersionBlock = useCallback(
     (check: VersionCheckPayload, reason = '版本不符合要求，请先更新。') => {
@@ -339,16 +403,11 @@ export const App: FC = () => {
     [],
   );
 
-  const clearVersionBlock = useCallback(() => {
-    setVersionBlock(null);
-  }, []);
-
-  const checkVersionGate = useCallback(async () => {
-    sessionUpdateRequiredRef.current = false;
+  const checkVersionGate = useCallback(async (startupAttempt: number) => {
     try {
       const version = await invoke<VersionCheckPayload>('version_check');
-      if (startupCancelledRef.current) {
-        return true;
+      if (!isStartupAttemptCurrent(startupAttempt)) {
+        return false;
       }
       if (version.force_update || version.update_required) {
         applyVersionBlock(version);
@@ -358,11 +417,14 @@ export const App: FC = () => {
       clearVersionBlock();
       return true;
     } catch (error) {
+      if (!isStartupAttemptCurrent(startupAttempt)) {
+        return false;
+      }
       console.debug('版本检查失败，按容错策略继续启动:', error);
       clearVersionBlock();
       return true;
     }
-  }, [applyVersionBlock, clearVersionBlock]);
+  }, [applyVersionBlock, clearVersionBlock, isStartupAttemptCurrent]);
 
   const stopSession = useCallback(async () => {
     if (!hasTauriRuntime()) {
@@ -492,14 +554,19 @@ export const App: FC = () => {
     try {
       const response = await invoke<AuthSessionPayload>('auth_login', loginPayload);
       const generation = response.generation;
-      if (!generation || terminalGenerationsRef.current.has(generation)) {
+      if (!generation) {
         currentGenerationRef.current = null;
         setIsLoggedIn(false);
         setAccountName('未登录');
         return;
       }
+      const terminal = terminalGenerationsRef.current.get(generation);
+      if (terminal) {
+        currentGenerationRef.current = null;
+        applyTerminalGeneration(terminal);
+        return;
+      }
       currentGenerationRef.current = generation;
-      sessionUpdateRequiredRef.current = false;
       clearVersionBlock();
       setSessionNotice('');
       setAccountName(response.name || response.username || 'admin');
@@ -522,6 +589,8 @@ export const App: FC = () => {
       setIsBusyAction(false);
     }
   }, [
+    applyTerminalGeneration,
+    cancelStartupAttempt,
     clearVersionBlock,
     isCurrentLiveGeneration,
     isVersionBlocked,
@@ -595,6 +664,8 @@ export const App: FC = () => {
 
     let active = true;
     startupCancelledRef.current = false;
+    const startupAttempt = startupAttemptRef.current + 1;
+    startupAttemptRef.current = startupAttempt;
     const unlisteners: Array<() => void> = [];
 
     const captureListener = (listener: Promise<() => void>) => {
@@ -635,19 +706,16 @@ export const App: FC = () => {
             return;
           }
           const generation = event.payload.generation;
-          rememberTerminalGeneration(generation);
-          const currentGeneration = currentGenerationRef.current;
-          if (currentGeneration !== null && currentGeneration !== generation) {
+          const terminal: TerminalGenerationState = {
+            kind: 'force-exit',
+            reason: event.payload.reason,
+          };
+          rememberTerminalGeneration(generation, terminal);
+          if (currentGenerationRef.current !== generation) {
             return;
           }
-          if (currentGeneration === generation) {
-            currentGenerationRef.current = null;
-          }
-          setOperations([]);
-          setSessionNotice(`会话已退出：${event.payload.reason}`);
-          setIsLoggedIn(false);
-          setAccountName('未登录');
-          clearVersionBlock();
+          currentGenerationRef.current = null;
+          applyTerminalGeneration(terminal);
         },
       )),
       captureListener(listen<SessionUpdateRequiredPayload>(
@@ -657,36 +725,28 @@ export const App: FC = () => {
             return;
           }
           const generation = event.payload.generation;
-          rememberTerminalGeneration(generation);
-          const currentGeneration = currentGenerationRef.current;
-          if (currentGeneration !== null && currentGeneration !== generation) {
+          const terminal: TerminalGenerationState = {
+            kind: 'update-required',
+            payload: event.payload,
+          };
+          rememberTerminalGeneration(generation, terminal);
+          if (currentGenerationRef.current !== generation) {
             return;
           }
-          if (currentGeneration === generation) {
-            currentGenerationRef.current = null;
-          }
-          sessionUpdateRequiredRef.current = true;
-          setOperations([]);
-          const message = event.payload.message || '检测到新版本要求，请立即更新后重新登录。';
-          setSessionNotice(message);
-          setVersionBlock({
-            message,
-            latest: event.payload.latest,
-            minVersion: event.payload.minVersion,
-            downloadUrl: event.payload.downloadUrl,
-          });
-          setReadinessDialog(null);
-          setIsLoggedIn(false);
-          setAccountName('未登录');
+          currentGenerationRef.current = null;
+          applyTerminalGeneration(terminal);
         },
       )),
     ]);
 
     const bootstrap = async () => {
       await listenersReady;
-      const canContinue = await checkVersionGate();
-      if (canContinue && !startupCancelledRef.current) {
-        await refreshSessionState();
+      if (!active || !isStartupAttemptCurrent(startupAttempt)) {
+        return;
+      }
+      const canContinue = await checkVersionGate(startupAttempt);
+      if (canContinue && active && isStartupAttemptCurrent(startupAttempt)) {
+        await refreshSessionState(startupAttempt);
       }
     };
 
@@ -694,14 +754,17 @@ export const App: FC = () => {
 
     return () => {
       active = false;
-      startupCancelledRef.current = true;
+      cancelStartupAttempt();
       for (const unlisten of unlisteners) {
         unlisten();
       }
     };
   }, [
+    applyTerminalGeneration,
+    cancelStartupAttempt,
     clearVersionBlock,
     checkVersionGate,
+    isStartupAttemptCurrent,
     refreshSessionState,
     rememberTerminalGeneration,
     upsertOperation,

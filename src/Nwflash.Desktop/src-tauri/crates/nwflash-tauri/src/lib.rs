@@ -577,6 +577,7 @@ mod device_monitor_tests {
     use futures::future::BoxFuture;
     use nwflash_application::{
         OperationAuthorization, OperationCoordinator, OperationLogger, OperationPermissionGate,
+        SERVER_FORCE_EXIT_MESSAGE,
     };
     use nwflash_domain::{DomainError, OperationKind, OperationLogLevel};
     use nwflash_infrastructure::{CloudflareError, IntegrityFailure};
@@ -616,7 +617,7 @@ mod device_monitor_tests {
     fn terminal_event_payloads_expose_generation_without_session_secrets() {
         let force = serde_json::to_value(SessionForceExitPayload {
             generation: "generation-force".to_string(),
-            reason: "terminal".to_string(),
+            reason: SERVER_FORCE_EXIT_MESSAGE.to_string(),
         })
         .unwrap();
         let update = serde_json::to_value(SessionUpdateRequiredPayload::from_generation(
@@ -631,6 +632,7 @@ mod device_monitor_tests {
         .unwrap();
 
         assert_eq!(force["generation"], "generation-force");
+        assert_eq!(force["reason"], SERVER_FORCE_EXIT_MESSAGE);
         assert_eq!(update["generation"], "generation-update");
         for payload in [force, update] {
             let text = payload.to_string();
