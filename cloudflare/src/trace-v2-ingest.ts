@@ -32,6 +32,11 @@ interface PersistedEventRow {
   stderr_chunks: number;
 }
 
+interface PersistedRunRow {
+  run_id: string;
+  trace_complete: number;
+}
+
 interface PersistedChunkRow {
   chunk_id: string;
   event_id: string;
@@ -44,6 +49,7 @@ interface PreparedTraceUpload {
   rejected: TraceRejectedItemV2[];
   newEvents: TraceEventV2[];
   newChunks: TraceOutputChunkV2[];
+  persistedRuns: PersistedRunRow[];
   persistedEvents: PersistedEventRow[];
   persistedChunks: PersistedChunkRow[];
 }
@@ -52,6 +58,7 @@ const TRACE_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Content-Type": "application/json; charset=utf-8",
 };
+const TRACE_INGEST_ATTEMPTS = 3;
 
 export async function ingestTraceUploadV2(
   env: Pick<Env, "DB">,
@@ -61,30 +68,41 @@ export async function ingestTraceUploadV2(
   try {
     const payload = await readTraceUploadV2(request);
     const sanitized = redactTraceUploadV2(payload, [user.bearer_token]);
-    const conflict = await findCrossUserOwnershipConflict(env.DB, sanitized.payload, user.id);
-    if (conflict.length > 0) {
-      return traceError(409, "TRACE_OWNERSHIP_CONFLICT", "日志标识已属于其他用户。", conflict);
-    }
+    const sourceIp = request.headers.get("CF-Connecting-IP") ?? "";
+    let lastBatchError: unknown;
 
-    const prepared = await prepareTraceUpload(env.DB, sanitized.payload);
-    const incomplete = findIncompleteRuns(sanitized.payload, prepared);
-    if (incomplete.length > 0) {
-      return traceError(422, "TRACE_INCOMPLETE", "日志完整性声明与已提交证据不一致。", incomplete);
-    }
+    for (let attempt = 0; attempt < TRACE_INGEST_ATTEMPTS; attempt += 1) {
+      const conflict = await findCrossUserOwnershipConflict(env.DB, sanitized.payload, user.id);
+      if (conflict.length > 0) {
+        return traceError(409, "TRACE_OWNERSHIP_CONFLICT", "日志标识已属于其他用户。", conflict);
+      }
 
-    const statements = buildTraceStatements(
-      env.DB,
-      sanitized,
-      prepared,
-      user,
-      request.headers.get("CF-Connecting-IP") ?? "",
-    );
-    await env.DB.batch(statements);
-    return traceJson({
-      ok: true,
-      accepted: prepared.accepted,
-      rejected: prepared.rejected,
-    } satisfies TraceUploadResponseV2, 200);
+      const prepared = await prepareTraceUpload(env.DB, sanitized.payload);
+      const incomplete = findIncompleteRuns(sanitized.payload, prepared);
+      if (incomplete.length > 0) {
+        return traceError(422, "TRACE_INCOMPLETE", "日志完整性声明与已提交证据不一致。", incomplete);
+      }
+
+      const statements = buildTraceStatements(
+        env.DB,
+        sanitized,
+        prepared,
+        user,
+        sourceIp,
+        crypto.randomUUID(),
+      );
+      try {
+        await env.DB.batch(statements);
+        return traceJson({
+          ok: true,
+          accepted: prepared.accepted,
+          rejected: prepared.rejected,
+        } satisfies TraceUploadResponseV2, 200);
+      } catch (error) {
+        lastBatchError = error;
+      }
+    }
+    throw lastBatchError;
   } catch (error) {
     if (error instanceof TraceUploadTooLargeError) {
       return traceError(413, "TRACE_BODY_TOO_LARGE", "日志上传内容超过大小限制。");
@@ -102,6 +120,10 @@ async function prepareTraceUpload(
 ): Promise<PreparedTraceUpload> {
   const runIds = payload.runs.map((run) => run.run_id);
   const eventIds = payload.events.map((event) => event.event_id);
+  const persistedRuns = await readPersistedRuns(db, runIds);
+  const completedRunIds = new Set(
+    persistedRuns.filter((run) => run.trace_complete === 1).map((run) => run.run_id),
+  );
   const persistedEvents = await readPersistedEvents(db, runIds, eventIds);
   const persistedEventById = new Map(persistedEvents.map((event) => [event.event_id, event]));
   const persistedEventBySequence = new Map(
@@ -114,6 +136,15 @@ async function prepareTraceUpload(
   for (const event of payload.events) {
     if (persistedEventById.has(event.event_id)) {
       acceptedEvents.push(event.event_id);
+      continue;
+    }
+    if (completedRunIds.has(event.run_id)) {
+      rejected.push({
+        entity: "event",
+        id: event.event_id,
+        code: "sequence_conflict",
+        message: "已完成的运行不接受新事件。",
+      });
       continue;
     }
     if (persistedEventBySequence.has(sequenceKey(event.run_id, event.sequence))) {
@@ -145,9 +176,22 @@ async function prepareTraceUpload(
   );
   const acceptedChunks: string[] = [];
   const newChunks: TraceOutputChunkV2[] = [];
+  const eventRunIds = new Map([
+    ...persistedEvents.map((event) => [event.event_id, event.run_id] as const),
+    ...payload.events.map((event) => [event.event_id, event.run_id] as const),
+  ]);
   for (const chunk of payload.output_chunks) {
     if (persistedChunkById.has(chunk.chunk_id)) {
       acceptedChunks.push(chunk.chunk_id);
+      continue;
+    }
+    if (completedRunIds.has(eventRunIds.get(chunk.event_id) ?? "")) {
+      rejected.push({
+        entity: "output_chunk",
+        id: chunk.chunk_id,
+        code: "sequence_conflict",
+        message: "已完成的运行不接受新输出分块。",
+      });
       continue;
     }
     if (!acceptedEventIds.has(chunk.event_id)) {
@@ -181,9 +225,20 @@ async function prepareTraceUpload(
     rejected,
     newEvents,
     newChunks,
+    persistedRuns,
     persistedEvents,
     persistedChunks,
   };
+}
+
+async function readPersistedRuns(db: D1Database, runIds: string[]): Promise<PersistedRunRow[]> {
+  if (runIds.length === 0) return [];
+  const rows = await db.prepare(
+    `SELECT run_id, trace_complete
+     FROM usage_operation_runs
+     WHERE run_id IN (${runIds.map(() => "?").join(",")})`,
+  ).bind(...runIds).all<PersistedRunRow>();
+  return rows.results;
 }
 
 async function readPersistedEvents(
@@ -366,8 +421,11 @@ function buildTraceStatements(
   prepared: PreparedTraceUpload,
   user: AuthenticatedTraceUser,
   sourceIp: string,
+  guardId: string,
 ): D1PreparedStatement[] {
-  const statements: D1PreparedStatement[] = [];
+  const statements: D1PreparedStatement[] = [
+    buildOwnershipGuardStatement(db, sanitized.payload, user.id, guardId),
+  ];
   for (const run of sanitized.payload.runs) {
     statements.push(db.prepare(
       `INSERT INTO usage_operation_runs
@@ -418,7 +476,7 @@ function buildTraceStatements(
       run.error_code,
       run.error_message,
       run.final_sequence,
-      run.trace_complete ? 1 : 0,
+      0,
       run.trace_loss_reason,
       JSON.stringify(sanitized.run_redactions.get(run.run_id) ?? []),
     ));
@@ -434,8 +492,7 @@ function buildTraceStatements(
           command_line, working_directory, paths_json, urls_json, serial, exit_code,
           stdout_chunks, stderr_chunks, verification, device_state, retry_safe, remedies_json,
           error_class, error_code, error_message, credential_redactions_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT DO NOTHING`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       event.event_id,
       event.run_id,
@@ -474,8 +531,7 @@ function buildTraceStatements(
     statements.push(db.prepare(
       `INSERT INTO usage_output_chunks
          (chunk_id, event_id, stream, chunk_index, text, byte_count, sha256, credential_redactions_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT DO NOTHING`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       chunk.chunk_id,
       chunk.event_id,
@@ -486,6 +542,15 @@ function buildTraceStatements(
       chunk.sha256,
       JSON.stringify(sanitized.chunk_redactions.get(chunk.chunk_id) ?? []),
     ));
+  }
+
+  for (const run of sanitized.payload.runs) {
+    if (!run.trace_complete) continue;
+    statements.push(db.prepare(
+      `UPDATE usage_operation_runs
+       SET trace_complete = 1, updated_at = strftime('%s','now')
+       WHERE run_id = ? AND api_user_id = ? AND trace_complete = 0`,
+    ).bind(run.run_id, user.id));
   }
 
   for (const run of sanitized.payload.runs) {
@@ -507,7 +572,72 @@ function buildTraceStatements(
       run.duration_ms,
     ));
   }
+  statements.push(db.prepare(
+    "DELETE FROM usage_trace_ingest_guards WHERE guard_id = ?",
+  ).bind(guardId));
   return statements;
+}
+
+function buildOwnershipGuardStatement(
+  db: D1Database,
+  payload: TraceUploadRequestV2,
+  userId: number,
+  guardId: string,
+): D1PreparedStatement {
+  const checks: string[] = [];
+  const bindings: unknown[] = [guardId];
+  appendOwnershipGuardCheck(
+    checks,
+    bindings,
+    "usage_operation_runs",
+    "run_id",
+    "api_user_id",
+    payload.runs.map((run) => run.run_id),
+    userId,
+  );
+  appendOwnershipGuardCheck(
+    checks,
+    bindings,
+    "usage_operation_events JOIN usage_operation_runs USING (run_id)",
+    "event_id",
+    "usage_operation_runs.api_user_id",
+    payload.events.map((event) => event.event_id),
+    userId,
+  );
+  appendOwnershipGuardCheck(
+    checks,
+    bindings,
+    "usage_output_chunks JOIN usage_operation_events USING (event_id) JOIN usage_operation_runs USING (run_id)",
+    "chunk_id",
+    "usage_operation_runs.api_user_id",
+    payload.output_chunks.map((chunk) => chunk.chunk_id),
+    userId,
+  );
+  const conflict = checks.length === 0 ? "0" : checks.join(" OR ");
+  return db.prepare(
+    `INSERT INTO usage_trace_ingest_guards (guard_id, valid)
+     VALUES (?, CASE WHEN ${conflict} THEN 0 ELSE 1 END)`,
+  ).bind(...bindings);
+}
+
+function appendOwnershipGuardCheck(
+  checks: string[],
+  bindings: unknown[],
+  tableExpression: string,
+  idColumn: string,
+  ownerExpression: string,
+  ids: string[],
+  userId: number,
+): void {
+  if (ids.length === 0) return;
+  checks.push(
+    `EXISTS (
+       SELECT 1 FROM ${tableExpression}
+       WHERE ${idColumn} IN (${ids.map(() => "?").join(",")})
+         AND ${ownerExpression} <> ?
+     )`,
+  );
+  bindings.push(...ids, userId);
 }
 
 function traceError(

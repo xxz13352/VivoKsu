@@ -182,6 +182,99 @@ describe("POST /api/usage/traces/v2", () => {
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(1);
   });
 
+  it("returns 409 to the losing user when two users concurrently claim the same global IDs", async () => {
+    await seedUser("alice-trace-bearer", 7);
+    await seedUser("bob-trace-bearer", 8);
+
+    const responses = await Promise.all([
+      postTrace(successFixture, "alice-trace-bearer", "203.0.113.47"),
+      postTrace(successFixture, "bob-trace-bearer", "203.0.113.48"),
+    ]);
+    const bodies = await Promise.all(responses.map((response) => response.json() as Promise<any>));
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(bodies.filter((body) => body.ok === true)).toEqual([successAckFixture]);
+    expect(bodies.filter((body) => body.ok === false)).toHaveLength(1);
+    expect(bodies.find((body) => body.ok === false)).toMatchObject({
+      error: { code: "TRACE_OWNERSHIP_CONFLICT" },
+    });
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_runs")).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(3);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(1);
+    expect(await scalar(
+      `SELECT COUNT(*) AS value
+       FROM usage_logs AS legacy
+       JOIN usage_operation_runs AS run ON run.run_id = legacy.event_key
+       WHERE legacy.api_user_id = run.api_user_id`,
+    )).toBe(1);
+  });
+
+  it("never commits both completion and a concurrently appended event", async () => {
+    await seedUser("trace-bearer", 7);
+    const appended = appendEventPayload();
+
+    const [completionResponse, appendResponse] = await Promise.all([
+      postTrace(successFixture, "trace-bearer", "203.0.113.49"),
+      postTrace(appended, "trace-bearer", "203.0.113.50"),
+    ]);
+    const completionBody = await completionResponse.json() as any;
+    const appendBody = await appendResponse.json() as any;
+    const complete = await scalar(
+      "SELECT trace_complete AS value FROM usage_operation_runs WHERE run_id = ?",
+      successFixture.runs[0].run_id,
+    );
+    const appendedCount = await scalar(
+      "SELECT COUNT(*) AS value FROM usage_operation_events WHERE event_id = ?",
+      appended.events[0].event_id,
+    );
+
+    expect(appendResponse.status).toBe(200);
+    expect([200, 422]).toContain(completionResponse.status);
+    expect(complete === 1 && appendedCount === 1).toBe(false);
+    if (complete === 1) {
+      expect(completionResponse.status).toBe(200);
+      expect(appendedCount).toBe(0);
+      expect(appendBody.rejected).toContainEqual(expect.objectContaining({
+        entity: "event",
+        id: appended.events[0].event_id,
+        code: "sequence_conflict",
+      }));
+    } else {
+      expect(completionResponse.status).toBe(422);
+      expect(completionBody).toMatchObject({ ok: false, error: { code: "TRACE_INCOMPLETE" } });
+      expect(appendedCount).toBe(1);
+      expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs")).toBe(0);
+    }
+  });
+
+  it("rejects a direct event append after a run is complete", async () => {
+    await seedUser("trace-bearer", 7);
+    expect((await postTrace(successFixture, "trace-bearer", "203.0.113.45")).status).toBe(200);
+
+    await expect(seedEvent(
+      "019d9c40-7b3c-7000-8000-000000000098",
+      successFixture.runs[0].run_id,
+      4,
+    )).rejects.toThrow(/complete/i);
+
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(3);
+  });
+
+  it("rejects a direct output append after a run is complete", async () => {
+    await seedUser("trace-bearer", 7);
+    expect((await postTrace(successFixture, "trace-bearer", "203.0.113.45")).status).toBe(200);
+
+    await expect(seedChunk(
+      "019d9c40-7b3c-7000-8000-000000000098",
+      successFixture.events[1].event_id,
+      "stdout",
+      1,
+    )).rejects.toThrow(/complete/i);
+
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
+  });
+
   it("acks same-user duplicate IDs without duplicating persisted rows", async () => {
     await seedUser("trace-bearer", 7);
     expect((await postTrace(successFixture, "trace-bearer", "203.0.113.45")).status).toBe(200);
@@ -378,6 +471,26 @@ function concurrentPayload(index: number): any {
     }],
     output_chunks: [],
   };
+}
+
+function appendEventPayload(): any {
+  const payload = copySuccess();
+  payload.upload_id = "019d9c40-7b3c-7000-8000-000000000088";
+  payload.runs[0].outcome = "running";
+  payload.runs[0].ended_at_ms = null;
+  payload.runs[0].duration_ms = null;
+  payload.runs[0].final_sequence = null;
+  payload.runs[0].trace_complete = false;
+  payload.events = [{
+    ...payload.events[0],
+    event_id: "019d9c40-7b3c-7000-8000-000000000089",
+    sequence: 4,
+    status: "started",
+    ended_at_ms: null,
+    duration_ms: null,
+  }];
+  payload.output_chunks = [];
+  return payload;
 }
 
 async function seedUser(token: string, id: number, enabled = 1, banned = 0): Promise<void> {

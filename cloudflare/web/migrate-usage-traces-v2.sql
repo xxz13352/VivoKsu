@@ -83,3 +83,101 @@ CREATE INDEX IF NOT EXISTS idx_trace_events_partition_status
   ON usage_operation_events(partition_name, status, started_at_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_trace_output_event_stream
   ON usage_output_chunks(event_id, stream, chunk_index);
+
+CREATE TABLE IF NOT EXISTS usage_trace_ingest_guards (
+  guard_id TEXT PRIMARY KEY,
+  valid INTEGER NOT NULL CHECK(valid = 1)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_events_reject_completed_run
+BEFORE INSERT ON usage_operation_events
+WHEN EXISTS (
+  SELECT 1
+  FROM usage_operation_runs
+  WHERE run_id = NEW.run_id AND trace_complete = 1
+)
+BEGIN
+  SELECT RAISE(ABORT, 'trace run is complete');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_chunks_reject_completed_run
+BEFORE INSERT ON usage_output_chunks
+WHEN EXISTS (
+  SELECT 1
+  FROM usage_operation_events AS event
+  JOIN usage_operation_runs AS run ON run.run_id = event.run_id
+  WHERE event.event_id = NEW.event_id AND run.trace_complete = 1
+)
+BEGIN
+  SELECT RAISE(ABORT, 'trace run is complete');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_runs_validate_completion
+BEFORE UPDATE OF trace_complete ON usage_operation_runs
+WHEN OLD.trace_complete = 0 AND NEW.trace_complete = 1
+BEGIN
+  SELECT RAISE(ABORT, 'trace run is incomplete')
+  WHERE NEW.final_sequence IS NULL
+     OR (
+       SELECT COUNT(*)
+       FROM usage_operation_events
+       WHERE run_id = NEW.run_id
+     ) <> NEW.final_sequence
+     OR (
+       SELECT MIN(sequence)
+       FROM usage_operation_events
+       WHERE run_id = NEW.run_id
+     ) <> 1
+     OR (
+       SELECT MAX(sequence)
+       FROM usage_operation_events
+       WHERE run_id = NEW.run_id
+     ) <> NEW.final_sequence
+     OR EXISTS (
+       SELECT 1
+       FROM usage_operation_events AS event
+       WHERE event.run_id = NEW.run_id
+         AND (
+           event.stdout_chunks <> (
+             SELECT COUNT(*)
+             FROM usage_output_chunks
+             WHERE event_id = event.event_id AND stream = 'stdout'
+           )
+           OR (
+             event.stdout_chunks > 0
+             AND (
+               (
+                 SELECT MIN(chunk_index)
+                 FROM usage_output_chunks
+                 WHERE event_id = event.event_id AND stream = 'stdout'
+               ) <> 0
+               OR (
+                 SELECT MAX(chunk_index)
+                 FROM usage_output_chunks
+                 WHERE event_id = event.event_id AND stream = 'stdout'
+               ) <> event.stdout_chunks - 1
+             )
+           )
+           OR event.stderr_chunks <> (
+             SELECT COUNT(*)
+             FROM usage_output_chunks
+             WHERE event_id = event.event_id AND stream = 'stderr'
+           )
+           OR (
+             event.stderr_chunks > 0
+             AND (
+               (
+                 SELECT MIN(chunk_index)
+                 FROM usage_output_chunks
+                 WHERE event_id = event.event_id AND stream = 'stderr'
+               ) <> 0
+               OR (
+                 SELECT MAX(chunk_index)
+                 FROM usage_output_chunks
+                 WHERE event_id = event.event_id AND stream = 'stderr'
+               ) <> event.stderr_chunks - 1
+             )
+           )
+         )
+     );
+END;
