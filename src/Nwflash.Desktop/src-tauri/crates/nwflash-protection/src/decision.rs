@@ -29,6 +29,9 @@ pub enum DecisionInput {
     LocalOperation {
         session_active: bool,
         lease_current: bool,
+        build_id_matches: bool,
+        process_nonce_matches: bool,
+        sequence_current: bool,
     },
 }
 
@@ -49,6 +52,9 @@ pub enum ProtectionFailure {
     SequenceRollback,
     SessionInactive,
     LeaseExpired,
+    BuildIdentityMismatch,
+    ProcessNonceMismatch,
+    SequenceMismatch,
 }
 
 /// Dispatches a normalized protection decision and denies malformed routes.
@@ -111,6 +117,27 @@ pub fn dispatch_protection_decision(selector: u32, input: DecisionInput) -> Prot
                 ..
             },
         ) => ProtectionDecision::Deny(ProtectionFailure::LeaseExpired),
+        (
+            Some(ProtectionSelector::LocalOperation),
+            DecisionInput::LocalOperation {
+                build_id_matches: false,
+                ..
+            },
+        ) => ProtectionDecision::Deny(ProtectionFailure::BuildIdentityMismatch),
+        (
+            Some(ProtectionSelector::LocalOperation),
+            DecisionInput::LocalOperation {
+                process_nonce_matches: false,
+                ..
+            },
+        ) => ProtectionDecision::Deny(ProtectionFailure::ProcessNonceMismatch),
+        (
+            Some(ProtectionSelector::LocalOperation),
+            DecisionInput::LocalOperation {
+                sequence_current: false,
+                ..
+            },
+        ) => ProtectionDecision::Deny(ProtectionFailure::SequenceMismatch),
         (Some(ProtectionSelector::LocalOperation), DecisionInput::LocalOperation { .. }) => {
             ProtectionDecision::Allow
         }

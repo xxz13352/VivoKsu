@@ -72,6 +72,9 @@ fn dispatcher_allows_each_encoded_selector_only_with_its_validated_input() {
             DecisionInput::LocalOperation {
                 session_active: true,
                 lease_current: true,
+                build_id_matches: true,
+                process_nonce_matches: true,
+                sequence_current: true,
             },
         ),
     ];
@@ -113,9 +116,51 @@ fn dispatcher_denies_each_known_selector_when_its_required_flag_is_false() {
             DecisionInput::LocalOperation {
                 session_active: true,
                 lease_current: false,
+                build_id_matches: true,
+                process_nonce_matches: true,
+                sequence_current: true,
             },
         ),
         ProtectionDecision::Deny(ProtectionFailure::LeaseExpired)
+    );
+    assert_eq!(
+        dispatch_protection_decision(
+            encoded_selector(ProtectionSelector::LocalOperation),
+            DecisionInput::LocalOperation {
+                session_active: true,
+                lease_current: true,
+                build_id_matches: false,
+                process_nonce_matches: true,
+                sequence_current: true,
+            },
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::BuildIdentityMismatch)
+    );
+    assert_eq!(
+        dispatch_protection_decision(
+            encoded_selector(ProtectionSelector::LocalOperation),
+            DecisionInput::LocalOperation {
+                session_active: true,
+                lease_current: true,
+                build_id_matches: true,
+                process_nonce_matches: false,
+                sequence_current: true,
+            },
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::ProcessNonceMismatch)
+    );
+    assert_eq!(
+        dispatch_protection_decision(
+            encoded_selector(ProtectionSelector::LocalOperation),
+            DecisionInput::LocalOperation {
+                session_active: true,
+                lease_current: true,
+                build_id_matches: true,
+                process_nonce_matches: true,
+                sequence_current: false,
+            },
+        ),
+        ProtectionDecision::Deny(ProtectionFailure::SequenceMismatch)
     );
 }
 
@@ -137,6 +182,9 @@ fn dispatcher_fails_closed_for_an_illegal_selector_or_mismatched_input() {
             DecisionInput::LocalOperation {
                 session_active: true,
                 lease_current: true,
+                build_id_matches: true,
+                process_nonce_matches: true,
+                sequence_current: true,
             },
         ),
         ProtectionDecision::Deny(ProtectionFailure::InvalidInput)
@@ -144,10 +192,26 @@ fn dispatcher_fails_closed_for_an_illegal_selector_or_mismatched_input() {
 }
 
 #[test]
-fn local_operation_admission_rejects_an_expired_session() {
+fn local_operation_admission_rechecks_expiry_and_signed_process_binding() {
     let expired = accepted_login(30);
     assert_eq!(
-        admit_local_operation(&expired, 31),
+        admit_local_operation(&expired, "build-123", "nonce-abc", 31),
         OperationDecision::DenyExpired
+    );
+
+    let current = accepted_login(60);
+    assert_eq!(current.build_id(), "build-123");
+    assert_eq!(current.process_nonce(), "nonce-abc");
+    assert_eq!(
+        admit_local_operation(&current, "other-build", "nonce-abc", 20),
+        OperationDecision::DenyBuildIdMismatch
+    );
+    assert_eq!(
+        admit_local_operation(&current, "build-123", "other-nonce", 20),
+        OperationDecision::DenyProcessNonceMismatch
+    );
+    assert_eq!(
+        admit_local_operation(&current, "build-123", "nonce-abc", 20),
+        OperationDecision::Allow
     );
 }

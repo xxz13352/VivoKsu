@@ -335,6 +335,11 @@ impl OperationCoordinator {
         }
     }
 
+    async fn finish_denied_admission(&self, permit: OwnedSemaphorePermit) {
+        self.state.clear_current().await;
+        drop(permit);
+    }
+
     pub async fn run_async<F, Fut>(
         &self,
         kind: OperationKind,
@@ -366,7 +371,7 @@ impl OperationCoordinator {
             let authorization = match gate.authorize(kind, title.clone()).await {
                 Ok(authorization) => authorization,
                 Err(error) => {
-                    self.state.clear_current().await;
+                    self.finish_denied_admission(permit).await;
                     return Err(OperationCoordinatorError::Failed(
                         public_operation_failure_message(&error).to_string(),
                     ));
@@ -380,15 +385,13 @@ impl OperationCoordinator {
                 let message = format!("服务端未许可此操作: {reason}");
                 self.state.emit_blocked(message.clone());
                 self.state.log(OperationLogLevel::Warning, message, None);
-                self.state.clear_current().await;
-                drop(permit);
+                self.finish_denied_admission(permit).await;
                 return Err(OperationCoordinatorError::Denied(reason));
             }
         }
 
         if cancellation.is_cancelled() {
-            self.state.clear_current().await;
-            drop(permit);
+            self.finish_denied_admission(permit).await;
             return Err(OperationCoordinatorError::Canceled);
         }
 
@@ -409,8 +412,7 @@ impl OperationCoordinator {
             }
         };
         if let Some(error) = admission_error {
-            self.state.clear_current().await;
-            drop(permit);
+            self.finish_denied_admission(permit).await;
             return Err(error);
         }
         self.state.log(

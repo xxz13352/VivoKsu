@@ -231,6 +231,8 @@ pub struct SessionLease {
     expires_at: i64,
     sequence: u64,
     session_id: String,
+    build_id: String,
+    process_nonce: String,
 }
 
 impl SessionLease {
@@ -244,6 +246,14 @@ impl SessionLease {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn build_id(&self) -> &str {
+        &self.build_id
+    }
+
+    pub fn process_nonce(&self) -> &str {
+        &self.process_nonce
     }
 }
 
@@ -259,6 +269,8 @@ pub enum HeartbeatDecision {
 pub enum OperationDecision {
     Allow,
     DenyExpired,
+    DenyBuildIdMismatch,
+    DenyProcessNonceMismatch,
 }
 
 /// Verifies an Ed25519 signature over the original base64url payload ASCII bytes.
@@ -336,10 +348,19 @@ pub fn classify_heartbeat_lease(
 /// Rechecks a locally held capability before a sensitive operation begins.
 #[inline(never)]
 #[export_name = "nwflash_protection_admit_local_operation"]
-pub fn admit_local_operation(session: &SessionLease, now: i64) -> OperationDecision {
+pub fn admit_local_operation(
+    session: &SessionLease,
+    expected_build_id: &str,
+    expected_process_nonce: &str,
+    now: i64,
+) -> OperationDecision {
     begin_operation_admission();
     let decision = if session.expires_at <= now {
         OperationDecision::DenyExpired
+    } else if !build_identity_matches(expected_build_id, &session.build_id) {
+        OperationDecision::DenyBuildIdMismatch
+    } else if session.process_nonce != expected_process_nonce {
+        OperationDecision::DenyProcessNonceMismatch
     } else {
         OperationDecision::Allow
     };
@@ -398,6 +419,8 @@ fn validate_lease(
         expires_at: claims.expires_at,
         sequence: claims.sequence,
         session_id: claims.session_id.clone(),
+        build_id: claims.build_id.clone(),
+        process_nonce: claims.process_nonce.clone(),
     })
 }
 
