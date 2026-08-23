@@ -4,7 +4,7 @@ use std::{
     future::Future,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -30,6 +30,10 @@ pub enum OperationCoordinatorError {
     InProgress,
     #[error("会话已释放，无法继续操作。")]
     Disposed,
+    #[error("应用正在安全退出，无法开始新操作。")]
+    ExitPending,
+    #[error("应用正在终止，无法开始新操作。")]
+    Terminating,
     #[error("{0}")]
     Denied(String),
     #[error("运行被用户取消。")]
@@ -39,6 +43,30 @@ pub enum OperationCoordinatorError {
 }
 
 pub const OPERATION_IN_PROGRESS_MESSAGE: &str = "已有任务正在进行中，请等待其完成或先取消。";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationAdmissionState {
+    Running,
+    ExitPending,
+    Terminating,
+}
+
+struct AdmissionGateState {
+    state: OperationAdmissionState,
+    disposed: bool,
+}
+
+struct AdmissionGate {
+    state: StdMutex<AdmissionGateState>,
+}
+
+impl AdmissionGate {
+    fn lock(&self) -> StdMutexGuard<'_, AdmissionGateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 /// Holds exclusive operation admission while teardown requires the coordinator
 /// to remain idle. The permit is released when the lease is dropped.
@@ -195,8 +223,8 @@ impl OperationContext {
 #[derive(Clone)]
 pub struct OperationCoordinator {
     state: Arc<OperationCoordinatorState>,
+    admission: Arc<AdmissionGate>,
     semaphore: Arc<Semaphore>,
-    disposed: Arc<AtomicBool>,
     _operation_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     is_busy: Arc<AtomicBool>,
 }
@@ -229,8 +257,13 @@ impl OperationCoordinator {
 
         Self {
             state: Arc::new(state),
+            admission: Arc::new(AdmissionGate {
+                state: StdMutex::new(AdmissionGateState {
+                    state: OperationAdmissionState::Running,
+                    disposed: false,
+                }),
+            }),
             semaphore: Arc::new(Semaphore::new(1)),
-            disposed: Arc::new(AtomicBool::new(false)),
             _operation_task: Arc::new(tokio::sync::Mutex::new(operation_task)),
             is_busy: Arc::new(AtomicBool::new(false)),
         }
@@ -249,17 +282,53 @@ impl OperationCoordinator {
     }
 
     pub fn try_acquire_idle(&self) -> Result<OperationIdleLease, OperationCoordinatorError> {
-        if self.disposed.load(Ordering::Acquire) {
-            return Err(OperationCoordinatorError::Disposed);
-        }
+        let permit = {
+            let admission = self.admission.lock();
+            ensure_running(&admission)?;
+            self.semaphore
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| OperationCoordinatorError::InProgress)?
+        };
 
+        Ok(OperationIdleLease { _permit: permit })
+    }
+
+    pub fn admission_state(&self) -> OperationAdmissionState {
+        self.admission.lock().state
+    }
+
+    pub fn request_exit_pending(&self) -> OperationAdmissionState {
+        let mut admission = self.admission.lock();
+        if admission.state == OperationAdmissionState::Running {
+            admission.state = OperationAdmissionState::ExitPending;
+        }
+        admission.state
+    }
+
+    pub async fn wait_until_idle(&self) -> OperationIdleLease {
         let permit = self
             .semaphore
             .clone()
-            .try_acquire_owned()
-            .map_err(|_| OperationCoordinatorError::InProgress)?;
+            .acquire_owned()
+            .await
+            .expect("operation coordinator never closes its idle semaphore");
+        OperationIdleLease { _permit: permit }
+    }
 
-        Ok(OperationIdleLease { _permit: permit })
+    pub fn begin_terminating(
+        &self,
+        _idle: &OperationIdleLease,
+    ) -> Result<(), OperationCoordinatorError> {
+        let mut admission = self.admission.lock();
+        match admission.state {
+            OperationAdmissionState::Running => Err(OperationCoordinatorError::InProgress),
+            OperationAdmissionState::ExitPending => {
+                admission.state = OperationAdmissionState::Terminating;
+                Ok(())
+            }
+            OperationAdmissionState::Terminating => Ok(()),
+        }
     }
 
     pub async fn run_async<F, Fut>(
@@ -272,15 +341,14 @@ impl OperationCoordinator {
         F: FnOnce(OperationContext, CancellationToken) -> Fut + Send,
         Fut: Future<Output = Result<(), DomainError>> + Send,
     {
-        if self.disposed.load(Ordering::Acquire) {
-            return Err(OperationCoordinatorError::Disposed);
-        }
-
-        let permit = self
-            .semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| OperationCoordinatorError::InProgress)?;
+        let permit = {
+            let admission = self.admission.lock();
+            ensure_running(&admission)?;
+            self.semaphore
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| OperationCoordinatorError::InProgress)?
+        };
 
         let title = title.into();
         let cancellation = CancellationToken::new();
@@ -324,9 +392,11 @@ impl OperationCoordinator {
         let started_at = epoch_seconds_now();
         let started_at_instant = Instant::now();
 
-        self.is_busy.store(true, Ordering::Release);
-        self.state
-            .set_running(&title, kind, operation_id.clone(), true);
+        if let Err(error) = self.admit_operation_start(&title, kind, &operation_id) {
+            self.state.clear_current().await;
+            drop(permit);
+            return Err(error);
+        }
         self.state.log(
             OperationLogLevel::Info,
             title.clone(),
@@ -407,17 +477,32 @@ impl OperationCoordinator {
     }
 
     pub fn dispose(&self) {
-        self.disposed.store(true, Ordering::Release);
-        self.semaphore.close();
+        self.admission.lock().disposed = true;
+    }
 
-        let state = self.state.clone();
-        let disposed = self.disposed.clone();
-        tokio::spawn(async move {
-            if disposed.load(Ordering::Acquire) {
-                state.terminate_active_if_any().await;
-                state.set_idle();
-            }
-        });
+    fn admit_operation_start(
+        &self,
+        title: &str,
+        kind: OperationKind,
+        operation_id: &str,
+    ) -> Result<(), OperationCoordinatorError> {
+        let admission = self.admission.lock();
+        ensure_running(&admission)?;
+        self.is_busy.store(true, Ordering::Release);
+        self.state
+            .set_running(title, kind, operation_id.to_string(), true);
+        Ok(())
+    }
+}
+
+fn ensure_running(admission: &AdmissionGateState) -> Result<(), OperationCoordinatorError> {
+    if admission.disposed {
+        return Err(OperationCoordinatorError::Disposed);
+    }
+    match admission.state {
+        OperationAdmissionState::Running => Ok(()),
+        OperationAdmissionState::ExitPending => Err(OperationCoordinatorError::ExitPending),
+        OperationAdmissionState::Terminating => Err(OperationCoordinatorError::Terminating),
     }
 }
 
@@ -486,14 +571,6 @@ impl OperationCoordinatorState {
 
     fn set_idle(&self) {
         self.update(OperationStateSnapshot::idle());
-    }
-
-    async fn terminate_active_if_any(&self) {
-        let mut current = self.current_gate.lock().await;
-        if let Some(token) = current.as_ref() {
-            token.cancel();
-            current.take();
-        }
     }
 
     async fn clear_current(&self) {
@@ -664,6 +741,12 @@ pub fn result_to_domain_error(error: OperationCoordinatorError) -> DomainError {
         }
         OperationCoordinatorError::Disposed => {
             DomainError::InvalidOperation("会话已释放，无法继续操作。".to_string())
+        }
+        OperationCoordinatorError::ExitPending => {
+            DomainError::InvalidOperation("应用正在安全退出，无法开始新操作。".to_string())
+        }
+        OperationCoordinatorError::Terminating => {
+            DomainError::InvalidOperation("应用正在终止，无法开始新操作。".to_string())
         }
         OperationCoordinatorError::Denied(message) => DomainError::AuthorizationDenied(message),
         OperationCoordinatorError::Canceled => {

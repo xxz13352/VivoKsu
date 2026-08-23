@@ -7,8 +7,9 @@ use std::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey};
 use nwflash_application::{
-    HeartbeatCallback, HeartbeatInput, SessionLifecycle, SessionLifecycleError,
-    SessionLifecycleSession, SERVER_FORCE_EXIT_MESSAGE,
+    HeartbeatCallback, HeartbeatInput, SessionIntegrityReason, SessionLifecycle,
+    SessionLifecycleError, SessionLifecycleSession, SessionTerminalClass, SessionTerminalDecision,
+    SessionTerminalReason, SERVER_FORCE_EXIT_MESSAGE,
 };
 use nwflash_infrastructure::{
     CloudflareError, HeartbeatAdmission, IntegrityFailure, SecretToken, UpdateRequiredInfo,
@@ -102,6 +103,216 @@ fn short_lifecycle(
         Duration::from_millis(25),
         Duration::from_millis(25),
     )
+}
+
+fn typed_short_lifecycle(
+    callback: HeartbeatCallback,
+    on_terminal: nwflash_application::TerminalDecisionCallback,
+) -> SessionLifecycle {
+    SessionLifecycle::with_intervals_and_terminal(
+        callback,
+        Some(on_terminal),
+        None,
+        None,
+        Duration::from_millis(5),
+        Duration::from_millis(25),
+        Duration::from_millis(25),
+    )
+}
+
+#[tokio::test]
+async fn typed_terminal_callback_classifies_server_and_third_transient_as_delayed() {
+    let cases = [
+        (
+            CloudflareError::ApiError {
+                status: 401,
+                message: "ignored".to_string(),
+            },
+            SessionTerminalReason::SessionUnauthorized,
+            1,
+        ),
+        (
+            CloudflareError::Transport("ignored".to_string()),
+            SessionTerminalReason::HeartbeatUnavailable,
+            3,
+        ),
+    ];
+
+    for (failure, expected_reason, expected_attempts) in cases {
+        let attempts = Arc::new(Mutex::new(0));
+        let heartbeat: HeartbeatCallback = {
+            let attempts = attempts.clone();
+            Arc::new(move |_| {
+                *attempts.lock().unwrap() += 1;
+                let failure = failure.clone();
+                Box::pin(async move { Err(failure) })
+            })
+        };
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let lifecycle = typed_short_lifecycle(
+            heartbeat,
+            Arc::new(move |decision| terminal_tx.send(decision).unwrap()),
+        );
+        lifecycle.start(lifecycle_session(1)).await.unwrap();
+
+        let decision = timeout(Duration::from_millis(150), terminal_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decision,
+            SessionTerminalDecision {
+                generation: "generation-test".to_string(),
+                class: SessionTerminalClass::Delayed(expected_reason),
+            }
+        );
+        assert_eq!(*attempts.lock().unwrap(), expected_attempts);
+        lifecycle.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn typed_terminal_authority_runs_before_legacy_informational_callback() {
+    let heartbeat: HeartbeatCallback =
+        Arc::new(|_| Box::pin(async { Ok(HeartbeatAdmission::ForceExit) }));
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel();
+    let lifecycle = SessionLifecycle::with_intervals_and_terminal(
+        heartbeat,
+        Some(Arc::new({
+            let order = order.clone();
+            move |_| order.lock().unwrap().push("typed-authority")
+        })),
+        Some(Arc::new({
+            let order = order.clone();
+            move |_, _| {
+                order.lock().unwrap().push("legacy-event");
+                done_tx.send(()).unwrap();
+            }
+        })),
+        None,
+        Duration::from_millis(5),
+        Duration::from_millis(25),
+        Duration::from_millis(25),
+    );
+    lifecycle.start(lifecycle_session(1)).await.unwrap();
+
+    timeout(Duration::from_millis(150), done_rx.recv())
+        .await
+        .expect("terminal callbacks should run")
+        .expect("legacy callback should signal completion");
+
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["typed-authority", "legacy-event"]
+    );
+    lifecycle.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn typed_terminal_callback_classifies_local_lease_failures_as_immediate_integrity() {
+    let cases = [
+        (
+            IntegrityFailure::LeaseSignature,
+            SessionIntegrityReason::LeaseSignatureInvalid,
+        ),
+        (
+            IntegrityFailure::LeaseBinding,
+            SessionIntegrityReason::LeaseBindingInvalid,
+        ),
+        (
+            IntegrityFailure::LeaseTime,
+            SessionIntegrityReason::LeaseExpired,
+        ),
+        (
+            IntegrityFailure::LeaseSequence,
+            SessionIntegrityReason::SequenceRollback,
+        ),
+        (
+            IntegrityFailure::SpkiMismatch,
+            SessionIntegrityReason::PinMismatch,
+        ),
+    ];
+
+    for (failure, expected_reason) in cases {
+        let heartbeat: HeartbeatCallback = Arc::new(move |_| {
+            let failure = failure.clone();
+            Box::pin(async move { Err(CloudflareError::Integrity(failure)) })
+        });
+        let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+        let lifecycle = typed_short_lifecycle(
+            heartbeat,
+            Arc::new(move |decision| terminal_tx.send(decision).unwrap()),
+        );
+        lifecycle.start(lifecycle_session(1)).await.unwrap();
+
+        let decision = timeout(Duration::from_millis(150), terminal_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decision.class,
+            SessionTerminalClass::ImmediateIntegrity(expected_reason)
+        );
+        lifecycle.stop().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn exit_close_aborts_and_joins_pending_heartbeat_then_clears_session_at_deadline() {
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let heartbeat: HeartbeatCallback = Arc::new(move |input| {
+        entered_tx.send(input.active).unwrap();
+        Box::pin(std::future::pending())
+    });
+    let lifecycle = SessionLifecycle::with_intervals_and_terminal(
+        heartbeat,
+        None,
+        None,
+        None,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_secs(3),
+    );
+    lifecycle.start(lifecycle_session(1)).await.unwrap();
+    assert_eq!(entered_rx.recv().await, Some(true));
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(750);
+    let close_task = tokio::spawn({
+        let lifecycle = lifecycle.clone();
+        async move { lifecycle.close_for_exit(deadline).await }
+    });
+
+    tokio::task::yield_now().await;
+    assert!(!close_task.is_finished());
+    tokio::time::advance(Duration::from_millis(750)).await;
+    close_task
+        .await
+        .expect("exit close task should join")
+        .expect("exit close should converge after aborting pending work");
+
+    assert!(!lifecycle.is_running().await);
+    assert!(lifecycle.generation().await.is_none());
+    assert!(lifecycle.session_id().await.is_none());
+}
+
+#[tokio::test]
+async fn process_scoped_exit_close_clears_session_without_newer_generation_goodbye() {
+    let (active_tx, mut active_rx) = mpsc::unbounded_channel();
+    let heartbeat: HeartbeatCallback = Arc::new(move |input| {
+        active_tx.send(input.active).unwrap();
+        Box::pin(async { Ok(HeartbeatAdmission::ForceExit) })
+    });
+    let lifecycle = short_lifecycle(heartbeat, None, None);
+    lifecycle.start(lifecycle_session(1)).await.unwrap();
+    assert_eq!(active_rx.recv().await, Some(true));
+
+    lifecycle
+        .close_for_exit_with_policy(tokio::time::Instant::now() + Duration::from_secs(1), false)
+        .await
+        .unwrap();
+
+    assert!(active_rx.try_recv().is_err());
+    assert!(lifecycle.generation().await.is_none());
 }
 
 #[tokio::test]

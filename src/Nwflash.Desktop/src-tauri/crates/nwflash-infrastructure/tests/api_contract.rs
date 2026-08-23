@@ -3,8 +3,9 @@ use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
 
 use nwflash_domain::UsageLogEntry;
 use nwflash_infrastructure::{
-    CloudflareClient, CloudflareError, IntegrityFailure, ProcessIdentity, DEFAULT_APP_VERSION,
-    DEFAULT_BASE_URL,
+    CloudflareClient, CloudflareError, IntegrityFailure, IntegrityReportPhase,
+    IntegrityReportReason, IntegrityReportRequest, ProcessIdentity, SecretToken,
+    DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
 };
 
 fn create_client(base_url: &str) -> CloudflareClient {
@@ -577,4 +578,141 @@ async fn heartbeat_maps_403_to_api_error_before_json_parse() {
         .await
         .expect_err("forbidden html should map to api error");
     assert_eq!(err.status_code(), Some(403));
+}
+
+fn integrity_report_request() -> IntegrityReportRequest {
+    IntegrityReportRequest {
+        event_id: "integrity-1787444800000-1".to_string(),
+        phase: IntegrityReportPhase::Heartbeat,
+        reason: IntegrityReportReason::LeaseSignatureInvalid,
+        client_version: "1.0.1".to_string(),
+        build_id: "build-contract".to_string(),
+        occurred_at: 1_787_444_800,
+    }
+}
+
+#[tokio::test]
+async fn integrity_report_posts_exact_six_field_anonymous_body_once() {
+    let mock_server = MockServer::start().await;
+    let api = create_client(&mock_server.uri());
+    Mock::given(method("POST"))
+        .and(path("/api/integrity/report"))
+        .and(body_json(serde_json::json!({
+            "event_id": "integrity-1787444800000-1",
+            "phase": "heartbeat",
+            "reason": "lease_signature_invalid",
+            "client_version": "1.0.1",
+            "build_id": "build-contract",
+            "occurred_at": 1787444800
+        })))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    api.report_integrity(None, &integrity_report_request())
+        .await
+        .expect("anonymous integrity report should accept 202");
+
+    let requests = mock_server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].headers.contains_key(AUTHORIZATION));
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body.as_object().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn integrity_report_uses_optional_sensitive_bearer_without_serializing_it() {
+    let mock_server = MockServer::start().await;
+    let api = create_client(&mock_server.uri());
+    let token = SecretToken::new("integrity-bearer-secret".to_string());
+    Mock::given(method("POST"))
+        .and(path("/api/integrity/report"))
+        .and(header("Authorization", "Bearer integrity-bearer-secret"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    api.report_integrity(Some(&token), &integrity_report_request())
+        .await
+        .expect("authenticated integrity report should accept 200");
+
+    let serialized = serde_json::to_string(&integrity_report_request()).unwrap();
+    for prohibited in [
+        "integrity-bearer-secret",
+        "token",
+        "password",
+        "path",
+        "url",
+        "serial",
+        "output",
+        "detail",
+    ] {
+        assert!(!serialized.contains(prohibited), "found {prohibited}");
+    }
+}
+
+#[tokio::test]
+async fn integrity_report_rejects_invalid_allowlisted_values_before_network_io() {
+    let mock_server = MockServer::start().await;
+    let api = create_client(&mock_server.uri());
+    let invalid = [
+        IntegrityReportRequest {
+            event_id: String::new(),
+            ..integrity_report_request()
+        },
+        IntegrityReportRequest {
+            event_id: "contains space".to_string(),
+            ..integrity_report_request()
+        },
+        IntegrityReportRequest {
+            client_version: "bad/version".to_string(),
+            ..integrity_report_request()
+        },
+        IntegrityReportRequest {
+            build_id: "x".repeat(129),
+            ..integrity_report_request()
+        },
+        IntegrityReportRequest {
+            occurred_at: 0,
+            ..integrity_report_request()
+        },
+        IntegrityReportRequest {
+            occurred_at: 9_007_199_254_740_992,
+            ..integrity_report_request()
+        },
+    ];
+
+    for request in invalid {
+        assert!(matches!(
+            api.report_integrity(None, &request).await,
+            Err(CloudflareError::InvalidInput(_))
+        ));
+    }
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn integrity_report_failure_is_redacted_and_never_retried() {
+    let mock_server = MockServer::start().await;
+    let api = create_client(&mock_server.uri());
+    Mock::given(method("POST"))
+        .and(path("/api/integrity/report"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_string("server-secret C:\\private\\firmware.img token=leaked"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let error = api
+        .report_integrity(None, &integrity_report_request())
+        .await
+        .expect_err("503 should be terminal report failure");
+    let diagnostic = format!("{error} {error:?}");
+    for prohibited in ["server-secret", "private", "firmware.img", "token=leaked"] {
+        assert!(!diagnostic.contains(prohibited));
+    }
 }

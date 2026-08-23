@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -8,8 +8,8 @@ use std::{
 
 use futures::future::{BoxFuture, FutureExt};
 use nwflash_application::{
-    result_to_domain_error, OperationAuthorization, OperationContext, OperationCoordinator,
-    OperationCoordinatorError, OperationPermissionGate, UsageReporter,
+    result_to_domain_error, OperationAdmissionState, OperationAuthorization, OperationContext,
+    OperationCoordinator, OperationCoordinatorError, OperationPermissionGate, UsageReporter,
 };
 use nwflash_domain::{DomainError, OperationKind, PartitionTaskState, UsageLogEntry};
 use tokio::sync::Notify;
@@ -144,6 +144,290 @@ impl OperationPermissionGate for PermissionGate {
 struct BlockingPermissionGate {
     entered: Arc<Notify>,
     release: Arc<Notify>,
+}
+
+#[derive(Clone, Default)]
+struct CountingPermissionGate {
+    calls: Arc<AtomicUsize>,
+}
+
+impl OperationPermissionGate for CountingPermissionGate {
+    fn authorize(
+        &self,
+        _operation: OperationKind,
+        _title: String,
+    ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        futures::future::ready(Ok(OperationAuthorization::allow())).boxed()
+    }
+}
+
+#[tokio::test]
+async fn exit_pending_rejects_before_permission_or_operation_body() {
+    let gate = CountingPermissionGate::default();
+    let body_calls = Arc::new(AtomicUsize::new(0));
+    let coordinator =
+        OperationCoordinator::new(None, Some(Arc::new(gate.clone())), None, None, None);
+
+    assert_eq!(
+        coordinator.request_exit_pending(),
+        OperationAdmissionState::ExitPending
+    );
+
+    let body_calls_for_run = body_calls.clone();
+    let result = coordinator
+        .run_async(OperationKind::Flashing, "rejected", move |_, _| {
+            body_calls_for_run.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(OperationCoordinatorError::ExitPending)
+    ));
+    assert_eq!(gate.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(body_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn exit_pending_during_permission_wait_rechecks_before_operation_body() {
+    let gate = BlockingPermissionGate::default();
+    let authorization_entered = gate.entered.notified();
+    let body_called = Arc::new(AtomicBool::new(false));
+    let coordinator =
+        OperationCoordinator::new(None, Some(Arc::new(gate.clone())), None, None, None);
+
+    let operation = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let body_called = body_called.clone();
+        async move {
+            coordinator
+                .run_async(OperationKind::Flashing, "permission-race", move |_, _| {
+                    body_called.store(true, Ordering::SeqCst);
+                    async { Ok(()) }
+                })
+                .await
+        }
+    });
+
+    authorization_entered.await;
+    coordinator.request_exit_pending();
+    gate.release.notify_one();
+
+    assert!(matches!(
+        operation.await.expect("operation task should join"),
+        Err(OperationCoordinatorError::ExitPending)
+    ));
+    assert!(!body_called.load(Ordering::SeqCst));
+    let idle = tokio::time::timeout(Duration::from_millis(100), coordinator.wait_until_idle())
+        .await
+        .expect("authorization permit should be released after rejection");
+    drop(idle);
+}
+
+#[tokio::test]
+async fn wait_until_idle_waits_for_active_body_and_retains_handoff_lease() {
+    let coordinator = OperationCoordinator::default();
+    let body_entered = Arc::new(Notify::new());
+    let body_release = Arc::new(Notify::new());
+    let entered = body_entered.notified();
+
+    let operation = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let body_entered = body_entered.clone();
+        let body_release = body_release.clone();
+        async move {
+            coordinator
+                .run_async(OperationKind::Flashing, "active", move |_, _| async move {
+                    body_entered.notify_one();
+                    body_release.notified().await;
+                    Ok(())
+                })
+                .await
+        }
+    });
+    entered.await;
+    coordinator.request_exit_pending();
+
+    let (lease_acquired_tx, mut lease_acquired_rx) = tokio::sync::oneshot::channel();
+    let (lease_release_tx, lease_release_rx) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move {
+            let idle = coordinator.wait_until_idle().await;
+            let _ = lease_acquired_tx.send(());
+            let _ = lease_release_rx.await;
+            drop(idle);
+        }
+    });
+
+    assert!(matches!(
+        lease_acquired_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    body_release.notify_one();
+    operation
+        .await
+        .expect("operation task should join")
+        .expect("active operation should finish naturally");
+    tokio::time::timeout(Duration::from_millis(100), &mut lease_acquired_rx)
+        .await
+        .expect("idle waiter should receive the released permit")
+        .expect("idle waiter should signal lease acquisition");
+
+    assert!(matches!(
+        coordinator
+            .run_async(OperationKind::Flashing, "too-late", |_, _| async { Ok(()) })
+            .await,
+        Err(OperationCoordinatorError::ExitPending)
+    ));
+    let _ = lease_release_tx.send(());
+    waiter.await.expect("idle waiter should join");
+}
+
+#[tokio::test]
+async fn protected_exit_never_cancels_an_already_admitted_operation() {
+    let coordinator = OperationCoordinator::default();
+    let body_entered = Arc::new(Notify::new());
+    let entered = body_entered.notified();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let cancellation_observed = Arc::new(AtomicBool::new(false));
+
+    let operation = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let body_entered = body_entered.clone();
+        let cancellation_observed = cancellation_observed.clone();
+        async move {
+            coordinator
+                .run_async(
+                    OperationKind::Flashing,
+                    "protected",
+                    move |_, token| async move {
+                        body_entered.notify_one();
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                cancellation_observed.store(true, Ordering::SeqCst);
+                            }
+                            _ = release_rx => {}
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+        }
+    });
+
+    entered.await;
+    coordinator.request_exit_pending();
+    assert!(!operation.is_finished());
+    assert!(!cancellation_observed.load(Ordering::SeqCst));
+    let _ = release_tx.send(());
+
+    operation
+        .await
+        .expect("operation task should join")
+        .expect("protected exit should allow natural completion");
+    assert!(!cancellation_observed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn admission_state_is_monotonic_and_never_reopens() {
+    let coordinator = OperationCoordinator::default();
+    let requesters = (0..16).map(|_| {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { coordinator.request_exit_pending() })
+    });
+
+    for requester in requesters {
+        let state = requester.await.expect("requester should join");
+        assert_eq!(state, OperationAdmissionState::ExitPending);
+    }
+
+    let idle = coordinator.wait_until_idle().await;
+    coordinator
+        .begin_terminating(&idle)
+        .expect("idle lease should authorize the terminal transition");
+    assert_eq!(
+        coordinator.request_exit_pending(),
+        OperationAdmissionState::Terminating
+    );
+    assert_eq!(
+        coordinator.admission_state(),
+        OperationAdmissionState::Terminating
+    );
+    assert!(matches!(
+        coordinator.try_acquire_idle(),
+        Err(OperationCoordinatorError::Terminating)
+    ));
+}
+
+#[tokio::test]
+async fn dispose_keeps_idle_waiter_live_and_never_cancels_active_operation() {
+    let coordinator = OperationCoordinator::default();
+    let body_entered = Arc::new(Notify::new());
+    let entered = body_entered.notified();
+    let (body_release_tx, body_release_rx) = tokio::sync::oneshot::channel();
+    let cancellation_observed = Arc::new(AtomicBool::new(false));
+    let operation = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let body_entered = body_entered.clone();
+        let cancellation_observed = cancellation_observed.clone();
+        async move {
+            coordinator
+                .run_async(
+                    OperationKind::Flashing,
+                    "dispose-active",
+                    move |_, token| async move {
+                        body_entered.notify_one();
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                cancellation_observed.store(true, Ordering::SeqCst);
+                            }
+                            _ = body_release_rx => {}
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+        }
+    });
+    entered.await;
+
+    let (idle_acquired_tx, mut idle_acquired_rx) = tokio::sync::oneshot::channel();
+    let waiter = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move {
+            let idle = coordinator.wait_until_idle().await;
+            let _ = idle_acquired_tx.send(());
+            idle
+        }
+    });
+    coordinator.dispose();
+
+    assert!(!cancellation_observed.load(Ordering::SeqCst));
+    assert!(matches!(
+        idle_acquired_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let _ = body_release_tx.send(());
+    operation
+        .await
+        .expect("operation task should join")
+        .expect("dispose should permit natural completion");
+    idle_acquired_rx
+        .await
+        .expect("idle waiter should acquire after active completion");
+    let idle = waiter.await.expect("idle waiter should join");
+
+    assert!(!cancellation_observed.load(Ordering::SeqCst));
+    assert!(matches!(
+        coordinator
+            .run_async(OperationKind::Flashing, "disposed", |_, _| async { Ok(()) })
+            .await,
+        Err(OperationCoordinatorError::Disposed)
+    ));
+    drop(idle);
 }
 
 impl OperationPermissionGate for BlockingPermissionGate {

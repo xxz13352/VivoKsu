@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::{
     sync::{Mutex, RwLock},
     task::JoinHandle,
-    time::{sleep, timeout},
+    time::{sleep, timeout, timeout_at, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -112,6 +112,38 @@ pub type HeartbeatCallback = Arc<
 pub type ForceExitCallback = Arc<dyn Fn(String, String) + Send + Sync>;
 pub type UpdateRequiredCallback = Arc<dyn Fn(String, UpdateRequiredInfo) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTerminalReason {
+    ServerForced,
+    SessionUnauthorized,
+    SessionConflict,
+    UpdateRequired,
+    HeartbeatUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIntegrityReason {
+    LeaseSignatureInvalid,
+    LeaseBindingInvalid,
+    LeaseExpired,
+    SequenceRollback,
+    PinMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTerminalClass {
+    Delayed(SessionTerminalReason),
+    ImmediateIntegrity(SessionIntegrityReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTerminalDecision {
+    pub generation: String,
+    pub class: SessionTerminalClass,
+}
+
+pub type TerminalDecisionCallback = Arc<dyn Fn(SessionTerminalDecision) + Send + Sync>;
+
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const GOODBYE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -142,6 +174,7 @@ struct SessionLifecycleState {
 #[derive(Clone)]
 pub struct SessionLifecycle {
     heartbeat_fn: HeartbeatCallback,
+    on_terminal: Option<TerminalDecisionCallback>,
     on_force_exit: Option<ForceExitCallback>,
     on_update_required: Option<UpdateRequiredCallback>,
     heartbeat_interval: Duration,
@@ -166,6 +199,23 @@ impl SessionLifecycle {
         )
     }
 
+    pub fn new_with_terminal(
+        heartbeat_fn: HeartbeatCallback,
+        on_terminal: Option<TerminalDecisionCallback>,
+        on_force_exit: Option<ForceExitCallback>,
+        on_update_required: Option<UpdateRequiredCallback>,
+    ) -> Self {
+        Self::with_intervals_and_terminal(
+            heartbeat_fn,
+            on_terminal,
+            on_force_exit,
+            on_update_required,
+            HEARTBEAT_INTERVAL,
+            HEARTBEAT_REQUEST_TIMEOUT,
+            GOODBYE_TIMEOUT,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn with_intervals(
         heartbeat_fn: HeartbeatCallback,
@@ -175,8 +225,30 @@ impl SessionLifecycle {
         request_timeout: Duration,
         goodbye_timeout: Duration,
     ) -> Self {
+        Self::with_intervals_and_terminal(
+            heartbeat_fn,
+            None,
+            on_force_exit,
+            on_update_required,
+            heartbeat_interval,
+            request_timeout,
+            goodbye_timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_intervals_and_terminal(
+        heartbeat_fn: HeartbeatCallback,
+        on_terminal: Option<TerminalDecisionCallback>,
+        on_force_exit: Option<ForceExitCallback>,
+        on_update_required: Option<UpdateRequiredCallback>,
+        heartbeat_interval: Duration,
+        request_timeout: Duration,
+        goodbye_timeout: Duration,
+    ) -> Self {
         Self {
             heartbeat_fn,
+            on_terminal,
             on_force_exit,
             on_update_required,
             heartbeat_interval,
@@ -254,6 +326,13 @@ impl SessionLifecycle {
 
     /// Explicit closeout used by logout/user stop and later by the Task 6 supervisor.
     pub async fn stop(&self) -> Result<(), SessionLifecycleError> {
+        self.stop_with_goodbye_timeout(self.goodbye_timeout).await
+    }
+
+    pub async fn stop_with_goodbye_timeout(
+        &self,
+        goodbye_timeout: Duration,
+    ) -> Result<(), SessionLifecycleError> {
         if self.state.session.read().await.is_none() {
             return Err(SessionLifecycleError::NotStarted);
         }
@@ -267,22 +346,70 @@ impl SessionLifecycle {
             }
         }
 
-        self.send_goodbye().await;
+        self.send_goodbye_with_timeout(goodbye_timeout).await;
+        self.clear_session().await;
+        Ok(())
+    }
+
+    pub async fn close_for_exit(&self, deadline: Instant) -> Result<(), SessionLifecycleError> {
+        self.close_for_exit_with_policy(deadline, true).await
+    }
+
+    pub async fn close_for_exit_with_policy(
+        &self,
+        deadline: Instant,
+        send_goodbye: bool,
+    ) -> Result<(), SessionLifecycleError> {
+        if self.state.session.read().await.is_none() {
+            return Err(SessionLifecycleError::NotStarted);
+        }
+
+        if let Some(stop_token) = self.state.stop_token.lock().await.take() {
+            stop_token.cancel();
+        }
+        if let Some(mut handle) = self.state.running_task.lock().await.take() {
+            let must_abort =
+                if self.state.in_callback.load(Ordering::Acquire) || deadline <= Instant::now() {
+                    true
+                } else {
+                    timeout_at(deadline, &mut handle).await.is_err()
+                };
+            if must_abort {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+
+        if send_goodbye && deadline > Instant::now() {
+            self.send_goodbye_until(deadline).await;
+        }
+        self.clear_session().await;
+        Ok(())
+    }
+
+    async fn send_goodbye_with_timeout(&self, goodbye_timeout: Duration) {
+        let Some(input) = self.heartbeat_input(false).await else {
+            return;
+        };
+        let call = (self.heartbeat_fn)(input);
+        let _ = timeout(goodbye_timeout, call).await;
+    }
+
+    async fn send_goodbye_until(&self, deadline: Instant) {
+        let Some(input) = self.heartbeat_input(false).await else {
+            return;
+        };
+        let call = (self.heartbeat_fn)(input);
+        let _ = timeout_at(deadline, call).await;
+    }
+
+    async fn clear_session(&self) {
         if let Some(mut session) = self.state.session.write().await.take() {
             session.token.zeroize();
         }
         self.state.running.store(false, Ordering::Release);
         self.state.healthy.store(false, Ordering::Release);
         self.state.transient_failures.store(0, Ordering::Release);
-        Ok(())
-    }
-
-    async fn send_goodbye(&self) {
-        let Some(input) = self.heartbeat_input(false).await else {
-            return;
-        };
-        let call = (self.heartbeat_fn)(input);
-        let _ = timeout(self.goodbye_timeout, call).await;
     }
 
     async fn heartbeat_input(&self, active: bool) -> Option<HeartbeatInput> {
@@ -333,10 +460,23 @@ impl SessionLifecycle {
 
         match response {
             Ok(Ok(HeartbeatAdmission::Accepted(next))) => {
-                if next.session_id() != previous_session_id || next.sequence() <= previous_sequence
-                {
-                    return self
-                        .terminal_force_exit(generation, "会话租约序号校验失败".to_string());
+                if next.session_id() != previous_session_id {
+                    return self.terminal_force_exit(
+                        generation,
+                        SessionTerminalClass::ImmediateIntegrity(
+                            SessionIntegrityReason::LeaseBindingInvalid,
+                        ),
+                        "会话租约绑定校验失败".to_string(),
+                    );
+                }
+                if next.sequence() <= previous_sequence {
+                    return self.terminal_force_exit(
+                        generation,
+                        SessionTerminalClass::ImmediateIntegrity(
+                            SessionIntegrityReason::SequenceRollback,
+                        ),
+                        "会话租约序号校验失败".to_string(),
+                    );
                 }
 
                 let mut stored = self.state.session.write().await;
@@ -353,17 +493,25 @@ impl SessionLifecycle {
                 self.state.healthy.store(true, Ordering::Release);
                 TickResult::continue_()
             }
-            Ok(Ok(HeartbeatAdmission::ForceExit)) => {
-                self.terminal_force_exit(generation, SERVER_FORCE_EXIT_MESSAGE.to_string())
-            }
-            Ok(Ok(HeartbeatAdmission::Goodbye)) => {
-                self.terminal_force_exit(generation, "活动心跳响应无有效租约".to_string())
-            }
+            Ok(Ok(HeartbeatAdmission::ForceExit)) => self.terminal_force_exit(
+                generation,
+                SessionTerminalClass::Delayed(SessionTerminalReason::ServerForced),
+                SERVER_FORCE_EXIT_MESSAGE.to_string(),
+            ),
+            Ok(Ok(HeartbeatAdmission::Goodbye)) => self.terminal_force_exit(
+                generation,
+                SessionTerminalClass::Delayed(SessionTerminalReason::ServerForced),
+                "活动心跳响应无有效租约".to_string(),
+            ),
             Ok(Err(CloudflareError::UpdateRequired(update))) => {
                 self.terminal_update(generation, update)
             }
             Ok(Err(error)) if is_transient(&error) => self.record_transient_failure(generation),
-            Ok(Err(error)) => self.terminal_force_exit(generation, terminal_reason(&error)),
+            Ok(Err(error)) => self.terminal_force_exit(
+                generation,
+                terminal_classification(&error),
+                terminal_reason(&error),
+            ),
             Err(_) => self.record_transient_failure(generation),
         }
     }
@@ -376,16 +524,32 @@ impl SessionLifecycle {
             .fetch_add(1, Ordering::AcqRel)
             .saturating_add(1);
         if failures == MAX_CONSECUTIVE_TRANSIENT_FAILURES {
-            self.terminal_force_exit(generation, "连续三次心跳失败".to_string())
+            self.terminal_force_exit(
+                generation,
+                SessionTerminalClass::Delayed(SessionTerminalReason::HeartbeatUnavailable),
+                "连续三次心跳失败".to_string(),
+            )
         } else {
             TickResult::continue_()
         }
     }
 
-    fn terminal_force_exit(&self, generation: String, reason: String) -> TickResult {
+    fn terminal_force_exit(
+        &self,
+        generation: String,
+        class: SessionTerminalClass,
+        reason: String,
+    ) -> TickResult {
         self.state.healthy.store(false, Ordering::Release);
         self.state.running.store(false, Ordering::Release);
         self.state.in_callback.store(true, Ordering::Release);
+        if let Some(callback) = self.on_terminal.as_ref() {
+            let decision = SessionTerminalDecision {
+                generation: generation.clone(),
+                class,
+            };
+            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(decision)));
+        }
         if let Some(callback) = self.on_force_exit.as_ref() {
             let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(generation, reason)));
         }
@@ -397,6 +561,13 @@ impl SessionLifecycle {
         self.state.healthy.store(false, Ordering::Release);
         self.state.running.store(false, Ordering::Release);
         self.state.in_callback.store(true, Ordering::Release);
+        if let Some(callback) = self.on_terminal.as_ref() {
+            let decision = SessionTerminalDecision {
+                generation: generation.clone(),
+                class: SessionTerminalClass::Delayed(SessionTerminalReason::UpdateRequired),
+            };
+            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(decision)));
+        }
         if let Some(callback) = self.on_update_required.as_ref() {
             let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(generation, update)));
         }
@@ -425,6 +596,49 @@ fn terminal_reason(error: &CloudflareError) -> String {
         } => "账号已被停用或登录失效".to_string(),
         CloudflareError::ApiError { status: 409, .. } => "会话租约冲突".to_string(),
         _ => "心跳响应被拒绝".to_string(),
+    }
+}
+
+fn terminal_classification(error: &CloudflareError) -> SessionTerminalClass {
+    use nwflash_infrastructure::IntegrityFailure;
+
+    match error {
+        CloudflareError::Integrity(
+            IntegrityFailure::LeaseSignature | IntegrityFailure::InvalidVerificationKey,
+        ) => {
+            SessionTerminalClass::ImmediateIntegrity(SessionIntegrityReason::LeaseSignatureInvalid)
+        }
+        CloudflareError::Integrity(IntegrityFailure::LeaseTime) => {
+            SessionTerminalClass::ImmediateIntegrity(SessionIntegrityReason::LeaseExpired)
+        }
+        CloudflareError::Integrity(IntegrityFailure::LeaseSequence) => {
+            SessionTerminalClass::ImmediateIntegrity(SessionIntegrityReason::SequenceRollback)
+        }
+        CloudflareError::Integrity(
+            IntegrityFailure::SpkiMismatch
+            | IntegrityFailure::InvalidApiEndpoint
+            | IntegrityFailure::InvalidPinset
+            | IntegrityFailure::PinsetSignature
+            | IntegrityFailure::PinsetHost
+            | IntegrityFailure::PinsetTime
+            | IntegrityFailure::PinsetRollback
+            | IntegrityFailure::PinsetCache
+            | IntegrityFailure::PinsetEnvelope
+            | IntegrityFailure::TlsConfiguration,
+        ) => SessionTerminalClass::ImmediateIntegrity(SessionIntegrityReason::PinMismatch),
+        CloudflareError::Integrity(_) => {
+            SessionTerminalClass::ImmediateIntegrity(SessionIntegrityReason::LeaseBindingInvalid)
+        }
+        CloudflareError::ApiError {
+            status: 401 | 403, ..
+        } => SessionTerminalClass::Delayed(SessionTerminalReason::SessionUnauthorized),
+        CloudflareError::ApiError { status: 409, .. } => {
+            SessionTerminalClass::Delayed(SessionTerminalReason::SessionConflict)
+        }
+        CloudflareError::UpdateRequired(_) => {
+            SessionTerminalClass::Delayed(SessionTerminalReason::UpdateRequired)
+        }
+        _ => SessionTerminalClass::Delayed(SessionTerminalReason::ServerForced),
     }
 }
 

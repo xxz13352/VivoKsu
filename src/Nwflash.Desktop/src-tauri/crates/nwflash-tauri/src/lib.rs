@@ -1,11 +1,12 @@
 use std::{
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::Duration,
 };
 
 use nwflash_application::{
     HeartbeatInput, OperationAuthorization, OperationCoordinator, OperationIdleLease,
-    OperationLogger, OperationPermissionGate, SessionLifecycle,
+    OperationLogger, OperationPermissionGate, SessionIntegrityReason, SessionLifecycle,
+    SessionTerminalClass, SessionTerminalDecision, SessionTerminalReason,
 };
 use nwflash_domain::{DomainError, OperationKind};
 use nwflash_infrastructure::{
@@ -19,12 +20,22 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::time::sleep;
 
 mod commands;
+mod exit_supervisor;
+mod integrity_reporter;
 #[allow(dead_code)]
 mod session_capabilities;
 
 #[doc(hidden)]
 pub use commands::mirror::{start_plan, MirrorRuntime};
 mod usage_reporter;
+
+#[cfg(not(test))]
+use exit_supervisor::ProductionProcessTerminator;
+use exit_supervisor::{
+    build_exit_supervisor_worker, create_exit_supervisor_control, ExitCleanup, ExitPhase,
+    ExitReason, ExitRequest, ExitSupervisorHandle, IntegrityReason, ProcessTerminator,
+};
+use integrity_reporter::IntegrityReporter;
 
 pub const APP_LABEL: &str = "奶蛙Flash";
 const SESSION_FORCE_EXIT_EVENT: &str = "session:force-exit";
@@ -42,6 +53,19 @@ enum SessionLifecycleEvent {
     UpdateRequired(String, UpdateRequiredInfo),
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct AppStateTestTerminator {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl ProcessTerminator for AppStateTestTerminator {
+    fn terminate(&self, _exit_code: i32) {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub struct AppState {
     pub client: CloudflareClient,
     pub auth_service: AuthService,
@@ -51,6 +75,7 @@ pub struct AppState {
     pub usage_reporter: Arc<usage_reporter::UsageLogReporter>,
     pub session_lifecycle: SessionLifecycle,
     pub operation_coordinator: OperationCoordinator,
+    pub(crate) exit_supervisor: ExitSupervisorHandle,
     pub device_runtime: commands::device::DeviceRuntime,
     pub firmware_artifacts: commands::firmware::FirmwareArtifactRuntime,
     pub firmware_extraction: commands::firmware::FirmwareExtractionRuntime,
@@ -67,20 +92,83 @@ pub struct AppState {
     pub root_ota_runtime: commands::root_ota::RootOtaRuntime,
     pub safe_flash_runtime: commands::safe_flash::SafeFlashRuntime,
     pub(crate) session_events_rx: Mutex<Option<UnboundedReceiver<SessionLifecycleEvent>>>,
+    pub(crate) exit_supervisor_rx: Mutex<Option<UnboundedReceiver<()>>>,
     pub(crate) operation_log_store: Arc<OperationLogStore>,
+}
+
+struct AppStateExitCleanup {
+    session_capabilities: Arc<session_capabilities::SessionCapabilityScope>,
+    session_token: Arc<RwLock<Option<SecretToken>>>,
+    root_image_runtime: commands::root::RootImageRuntime,
+    root_patched_artifacts: commands::root::RootPatchedArtifactRuntime,
+    root_ota_runtime: commands::root_ota::RootOtaRuntime,
+    safe_flash_runtime: commands::safe_flash::SafeFlashRuntime,
+    firmware_artifacts: commands::firmware::FirmwareArtifactRuntime,
+    prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
+    prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
+}
+
+impl AppStateExitCleanup {
+    fn from_state(state: &AppState) -> Self {
+        Self {
+            session_capabilities: state.session_capabilities.clone(),
+            session_token: state.session_token.clone(),
+            root_image_runtime: state.root_image_runtime.clone(),
+            root_patched_artifacts: state.root_patched_artifacts.clone(),
+            root_ota_runtime: state.root_ota_runtime.clone(),
+            safe_flash_runtime: state.safe_flash_runtime.clone(),
+            firmware_artifacts: state.firmware_artifacts.clone(),
+            prepared_firmware_artifact: state.prepared_firmware_artifact.clone(),
+            prepared_dual_slot: state.prepared_dual_slot.clone(),
+        }
+    }
+
+    fn revoke_capabilities(&self) {
+        let owned_roots = self.session_capabilities.invalidate(|| {
+            let mut owned_roots = self.root_image_runtime.clear_owned();
+            owned_roots.extend(self.root_patched_artifacts.clear_owned());
+            owned_roots.extend(self.root_ota_runtime.clear_owned());
+            owned_roots.extend(self.safe_flash_runtime.clear_owned());
+            owned_roots.extend(self.firmware_artifacts.clear_owned());
+            self.prepared_firmware_artifact.clear();
+            self.prepared_dual_slot.clear();
+            owned_roots
+        });
+
+        for owned_root in owned_roots {
+            let _ = std::fs::remove_dir_all(owned_root);
+        }
+    }
+}
+
+impl ExitCleanup for AppStateExitCleanup {
+    fn revoke_and_clear(&self, _idle: &OperationIdleLease) {
+        self.revoke_capabilities();
+        let mut token = self
+            .session_token
+            .write()
+            .expect("session token lock should not be poisoned");
+        let _ = commands::auth::clear_session_token(&mut token);
+    }
 }
 
 #[derive(Clone)]
 struct CloudflareOperationPermissionGate {
     client: CloudflareClient,
     session_token: Arc<RwLock<Option<SecretToken>>>,
+    exit_supervisor: Arc<OnceLock<ExitSupervisorHandle>>,
 }
 
 impl CloudflareOperationPermissionGate {
-    fn new(client: CloudflareClient, session_token: Arc<RwLock<Option<SecretToken>>>) -> Self {
+    fn new(
+        client: CloudflareClient,
+        session_token: Arc<RwLock<Option<SecretToken>>>,
+        exit_supervisor: Arc<OnceLock<ExitSupervisorHandle>>,
+    ) -> Self {
         Self {
             client,
             session_token,
+            exit_supervisor,
         }
     }
 }
@@ -104,6 +192,57 @@ fn authorization_for_error(error: &CloudflareError) -> OperationAuthorization {
     }
 }
 
+fn authorization_for_error_and_exit(
+    error: &CloudflareError,
+    supervisor: Option<&ExitSupervisorHandle>,
+) -> OperationAuthorization {
+    if matches!(error, CloudflareError::Integrity(_)) {
+        if let Some(supervisor) = supervisor {
+            let _ = supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::PinValidation,
+                IntegrityReason::PinMismatch,
+            ));
+        }
+    }
+    authorization_for_error(error)
+}
+
+fn exit_request_from_session_terminal(decision: SessionTerminalDecision) -> ExitRequest {
+    match decision.class {
+        SessionTerminalClass::Delayed(reason) => ExitRequest::delayed(
+            decision.generation,
+            match reason {
+                SessionTerminalReason::ServerForced => ExitReason::ServerForced,
+                SessionTerminalReason::SessionUnauthorized => ExitReason::SessionUnauthorized,
+                SessionTerminalReason::SessionConflict => ExitReason::SessionConflict,
+                SessionTerminalReason::UpdateRequired => ExitReason::UpdateRequired,
+                SessionTerminalReason::HeartbeatUnavailable => ExitReason::HeartbeatUnavailable,
+            },
+        ),
+        SessionTerminalClass::ImmediateIntegrity(reason) => {
+            let (phase, reason) = match reason {
+                SessionIntegrityReason::LeaseSignatureInvalid => {
+                    (ExitPhase::Heartbeat, IntegrityReason::LeaseSignatureInvalid)
+                }
+                SessionIntegrityReason::LeaseBindingInvalid => {
+                    (ExitPhase::Heartbeat, IntegrityReason::LeaseBindingInvalid)
+                }
+                SessionIntegrityReason::LeaseExpired => {
+                    (ExitPhase::Heartbeat, IntegrityReason::LeaseExpired)
+                }
+                SessionIntegrityReason::SequenceRollback => {
+                    (ExitPhase::Heartbeat, IntegrityReason::SequenceRollback)
+                }
+                SessionIntegrityReason::PinMismatch => {
+                    (ExitPhase::PinValidation, IntegrityReason::PinMismatch)
+                }
+            };
+            ExitRequest::immediate(Some(decision.generation), phase, reason)
+        }
+    }
+}
+
 impl OperationPermissionGate for CloudflareOperationPermissionGate {
     fn authorize(
         &self,
@@ -112,6 +251,7 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
     ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
         let client = self.client.clone();
         let session_token = self.session_token.clone();
+        let exit_supervisor = self.exit_supervisor.clone();
         Box::pin(async move {
             let token = session_token
                 .read()
@@ -132,7 +272,10 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
                 }),
                 // Only an explicit "this account may not do this" answer blocks the
                 // user; everything else defaults to allow.
-                Ok(Err(error)) => Ok(authorization_for_error(&error)),
+                Ok(Err(error)) => Ok(authorization_for_error_and_exit(
+                    &error,
+                    exit_supervisor.get(),
+                )),
                 // Black-holed request: never hold the global operation gate for it.
                 Err(_) => Ok(OperationAuthorization::allow()),
             }
@@ -161,14 +304,52 @@ impl AppState {
     }
 
     fn try_with_client(client: CloudflareClient) -> Result<Self, CloudflareError> {
+        #[cfg(not(test))]
+        let terminator: Arc<dyn ProcessTerminator> = Arc::new(ProductionProcessTerminator);
+        #[cfg(test)]
+        let terminator: Arc<dyn ProcessTerminator> = Arc::new(AppStateTestTerminator::default());
+        Self::try_with_client_and_terminator(client, terminator)
+    }
+
+    fn try_with_client_and_terminator(
+        client: CloudflareClient,
+        terminator: Arc<dyn ProcessTerminator>,
+    ) -> Result<Self, CloudflareError> {
         let (session_events_tx, session_events_rx) = unbounded_channel();
         let process_identity = ProcessIdentity::generate().map_err(CloudflareError::Integrity)?;
         let session_token = Arc::new(RwLock::new(None));
         let session_capabilities = Arc::new(session_capabilities::SessionCapabilityScope::new());
+        let supervisor_slot = Arc::new(OnceLock::new());
+        let operation_log_store = Arc::new(OperationLogStore::with_default_path(500));
+        operation_log_store.start_new_session();
+        let operation_log_buffer = Arc::new(OperationLogBuffer {
+            entries: operation_log_store.clone(),
+        });
+        let usage_reporter =
+            usage_reporter::UsageLogReporter::new(client.clone(), session_token.clone());
         let permission_gate = Arc::new(CloudflareOperationPermissionGate::new(
             client.clone(),
             session_token.clone(),
+            supervisor_slot.clone(),
         ));
+        let operation_coordinator = OperationCoordinator::new(
+            None,
+            Some(permission_gate),
+            Some(usage_reporter.clone()),
+            Some(operation_log_buffer),
+            None,
+        );
+        let reporter = IntegrityReporter::new(
+            client.clone(),
+            session_token.clone(),
+            client.app_version().to_string(),
+            process_identity.build_id().to_string(),
+        );
+        let (exit_supervisor, exit_supervisor_rx) =
+            create_exit_supervisor_control(operation_coordinator.clone(), reporter, terminator);
+        supervisor_slot.set(exit_supervisor.clone()).map_err(|_| {
+            CloudflareError::InvalidInput("exit supervisor already installed".into())
+        })?;
 
         let heartbeat_fn = {
             let heartbeat_auth = AuthService::with_client(client.clone());
@@ -228,14 +409,12 @@ impl AppState {
                 let _ = tx_update_required
                     .send(SessionLifecycleEvent::UpdateRequired(generation, update));
             });
-
-        let operation_log_store = Arc::new(OperationLogStore::with_default_path(500));
-        operation_log_store.start_new_session();
-        let operation_log_buffer = Arc::new(OperationLogBuffer {
-            entries: operation_log_store.clone(),
+        let terminal_supervisor = exit_supervisor.clone();
+        let on_terminal = Arc::new(move |decision: SessionTerminalDecision| {
+            let request = exit_request_from_session_terminal(decision);
+            let _ = terminal_supervisor.request(request);
         });
-        let usage_reporter =
-            usage_reporter::UsageLogReporter::new(client.clone(), session_token.clone());
+
         Ok(Self {
             client: client.clone(),
             auth_service: AuthService::with_client(client.clone()),
@@ -243,15 +422,8 @@ impl AppState {
             session_token,
             process_identity,
             usage_reporter: usage_reporter.clone(),
-            operation_coordinator: {
-                OperationCoordinator::new(
-                    None,
-                    Some(permission_gate),
-                    Some(usage_reporter.clone()),
-                    Some(operation_log_buffer.clone()),
-                    None,
-                )
-            },
+            operation_coordinator,
+            exit_supervisor,
             device_runtime: commands::device::DeviceRuntime::new(),
             firmware_artifacts: commands::firmware::FirmwareArtifactRuntime::new(),
             firmware_extraction: commands::firmware::FirmwareExtractionRuntime::new(),
@@ -281,9 +453,11 @@ impl AppState {
                 session_capabilities,
             ),
             session_events_rx: Mutex::new(Some(session_events_rx)),
+            exit_supervisor_rx: Mutex::new(Some(exit_supervisor_rx)),
             operation_log_store,
-            session_lifecycle: SessionLifecycle::new(
+            session_lifecycle: SessionLifecycle::new_with_terminal(
                 heartbeat_fn,
+                Some(on_terminal),
                 Some(on_force_exit),
                 Some(on_update_required),
             ),
@@ -339,6 +513,41 @@ impl AppState {
                 was_device_busy = is_busy;
             }
         });
+    }
+
+    pub fn start_exit_supervisor(&self) {
+        let receiver = self
+            .exit_supervisor_rx
+            .lock()
+            .expect("exit supervisor receiver lock should not be poisoned")
+            .take();
+        if let Some(receiver) = receiver {
+            let worker = build_exit_supervisor_worker(
+                &self.exit_supervisor,
+                receiver,
+                Arc::new(self.session_lifecycle.clone()),
+                Arc::new(usage_reporter::UsageExitCloseout::new(
+                    self.usage_reporter.clone(),
+                )),
+                Arc::new(AppStateExitCleanup::from_state(self)),
+            );
+            spawn(worker.run());
+        }
+    }
+
+    fn request_startup_integrity_exit(&self) {
+        use nwflash_protection::{verify_image_integrity, ImageIntegrityStatus, VmpIntegrityProbe};
+
+        if matches!(
+            verify_image_integrity(&VmpIntegrityProbe).status,
+            ImageIntegrityStatus::Failure(_)
+        ) {
+            let _ = self.exit_supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::Startup,
+                IntegrityReason::ImageCrcInvalid,
+            ));
+        }
     }
 
     pub fn bind_firmware_progress_events(&self, app_handle: AppHandle<Wry>) {
@@ -402,20 +611,7 @@ impl AppState {
     }
 
     pub(crate) fn revoke_root_capabilities(&self, _idle_lease: &OperationIdleLease) {
-        let owned_roots = self.session_capabilities.invalidate(|| {
-            let mut owned_roots = self.root_image_runtime.clear_owned();
-            owned_roots.extend(self.root_patched_artifacts.clear_owned());
-            owned_roots.extend(self.root_ota_runtime.clear_owned());
-            owned_roots.extend(self.safe_flash_runtime.clear_owned());
-            owned_roots.extend(self.firmware_artifacts.clear_owned());
-            self.prepared_firmware_artifact.clear();
-            self.prepared_dual_slot.clear();
-            owned_roots
-        });
-
-        for owned_root in owned_roots {
-            let _ = std::fs::remove_dir_all(owned_root);
-        }
+        AppStateExitCleanup::from_state(self).revoke_capabilities();
     }
 }
 
@@ -571,8 +767,13 @@ mod device_monitor_tests {
     };
 
     use super::{
-        authorization_for_error, should_compensate_device_refresh, AppState, OperationLogBuffer,
+        authorization_for_error, authorization_for_error_and_exit,
+        should_compensate_device_refresh, AppState, AppStateExitCleanup, OperationLogBuffer,
         SessionForceExitPayload, SessionUpdateRequiredPayload,
+    };
+    use crate::exit_supervisor::{
+        ExitCleanup, ExitPhase, ExitRequest, ExitRequestDisposition, IntegrityReason,
+        ProcessTerminator,
     };
     use futures::future::BoxFuture;
     use nwflash_application::{
@@ -583,6 +784,19 @@ mod device_monitor_tests {
     use nwflash_infrastructure::{CloudflareError, IntegrityFailure};
 
     struct DenyAllOperations;
+
+    #[derive(Default)]
+    struct RecordingTerminator {
+        calls: std::sync::atomic::AtomicUsize,
+        called: tokio::sync::Notify,
+    }
+
+    impl ProcessTerminator for RecordingTerminator {
+        fn terminate(&self, _exit_code: i32) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.called.notify_waiters();
+        }
+    }
 
     impl OperationPermissionGate for DenyAllOperations {
         fn authorize(
@@ -611,6 +825,124 @@ mod device_monitor_tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("完整性")));
+    }
+
+    #[test]
+    fn operation_permission_integrity_failure_closes_admission_before_returning_denial() {
+        let state = AppState::new();
+
+        let authorization = authorization_for_error_and_exit(
+            &CloudflareError::Integrity(IntegrityFailure::SpkiMismatch),
+            Some(&state.exit_supervisor),
+        );
+
+        assert!(!authorization.allowed);
+        assert_eq!(
+            state.operation_coordinator.admission_state(),
+            nwflash_application::OperationAdmissionState::ExitPending
+        );
+    }
+
+    #[test]
+    fn app_state_test_terminator_returns_and_channel_failure_coalesces() {
+        let state = AppState::new();
+        drop(
+            state
+                .exit_supervisor_rx
+                .lock()
+                .expect("receiver lock should not be poisoned")
+                .take(),
+        );
+
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::PinValidation,
+                IntegrityReason::PinMismatch,
+            )),
+            ExitRequestDisposition::ChannelFailed
+        );
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::PinValidation,
+                IntegrityReason::PinMismatch,
+            )),
+            ExitRequestDisposition::AlreadyTerminating
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_cleanup_invalidates_capability_before_waiting_to_zeroize_token() {
+        let state = AppState::new();
+        state.session_capabilities.activate();
+        *state.session_token.write().unwrap() = Some(nwflash_infrastructure::SecretToken::new(
+            "cleanup-token".to_string(),
+        ));
+        let idle = state
+            .operation_coordinator
+            .try_acquire_idle()
+            .expect("idle state should provide the cleanup lease");
+        let cleanup = AppStateExitCleanup::from_state(&state);
+        let token_read = state.session_token.read().unwrap();
+        let capabilities = state.session_capabilities.clone();
+        let (invalidated_tx, invalidated_rx) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || loop {
+            if capabilities.capture().is_err() {
+                invalidated_tx.send(()).unwrap();
+                break;
+            }
+            std::thread::yield_now();
+        });
+        let cleanup_thread = std::thread::spawn(move || cleanup.revoke_and_clear(&idle));
+
+        let invalidated = invalidated_rx.recv_timeout(std::time::Duration::from_secs(1));
+        if invalidated.is_err() {
+            drop(token_read);
+            cleanup_thread.join().unwrap();
+            observer.join().unwrap();
+            panic!("capability invalidation waited behind the token write lock");
+        }
+        assert!(token_read.is_some());
+        drop(token_read);
+        cleanup_thread.join().unwrap();
+        observer.join().unwrap();
+
+        assert!(state.session_capabilities.capture().is_err());
+        assert!(state.session_token.read().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn setup_started_receiver_handles_terminal_request_without_react_authority() {
+        let terminator = Arc::new(RecordingTerminator::default());
+        let state = AppState::try_with_client_and_terminator(
+            nwflash_infrastructure::CloudflareClient::new_injected(
+                "http://127.0.0.1:1",
+                nwflash_infrastructure::DEFAULT_APP_VERSION,
+            ),
+            terminator.clone(),
+        )
+        .unwrap();
+        state.start_exit_supervisor();
+        let called = terminator.called.notified();
+
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::Startup,
+                IntegrityReason::ImageCrcInvalid,
+            )),
+            ExitRequestDisposition::Accepted
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), called)
+            .await
+            .expect("Rust-owned worker should call the injected terminator");
+
+        assert_eq!(terminator.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.operation_coordinator.admission_state(),
+            nwflash_application::OperationAdmissionState::Terminating
+        );
     }
 
     #[test]
@@ -834,6 +1166,8 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
                 let _ = window.set_title("奶蛙Flash");
             }
             let state = app.state::<AppState>();
+            state.start_exit_supervisor();
+            state.request_startup_integrity_exit();
             state.bind_operation_events(app.handle().clone());
             state.bind_firmware_progress_events(app.handle().clone());
             state.bind_session_events(app.handle().clone());

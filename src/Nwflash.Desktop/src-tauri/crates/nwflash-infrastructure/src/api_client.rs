@@ -94,6 +94,87 @@ impl Display for UpdateRequiredInfo {
 
 pub type CloudflareResult<T> = Result<T, CloudflareError>;
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IntegrityReportRequest {
+    pub event_id: String,
+    pub phase: IntegrityReportPhase,
+    pub reason: IntegrityReportReason,
+    pub client_version: String,
+    pub build_id: String,
+    pub occurred_at: i64,
+}
+
+impl IntegrityReportRequest {
+    fn validate(&self) -> CloudflareResult<()> {
+        if !is_identifier(&self.event_id, 64) {
+            return Err(CloudflareError::InvalidInput(
+                "integrity event id is invalid".to_string(),
+            ));
+        }
+        if !is_client_version(&self.client_version) {
+            return Err(CloudflareError::InvalidInput(
+                "integrity client version is invalid".to_string(),
+            ));
+        }
+        if !is_identifier(&self.build_id, 128) {
+            return Err(CloudflareError::InvalidInput(
+                "integrity build id is invalid".to_string(),
+            ));
+        }
+        if !(1..=9_007_199_254_740_991).contains(&self.occurred_at) {
+            return Err(CloudflareError::InvalidInput(
+                "integrity occurrence time is invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityReportPhase {
+    Startup,
+    Login,
+    SessionRestore,
+    Heartbeat,
+    OperationAdmission,
+    PinValidation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityReportReason {
+    ImageCrcInvalid,
+    LeaseSignatureInvalid,
+    LeaseBindingInvalid,
+    LeaseExpired,
+    SequenceRollback,
+    PinMismatch,
+    DebuggerDetected,
+    VirtualMachineDetected,
+    AuthenticodeInvalid,
+    ReleaseManifestInvalid,
+}
+
+fn is_identifier(value: &str, maximum_length: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum_length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn is_client_version(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    value.len() <= 32
+        && first.is_ascii_alphanumeric()
+        && bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+}
+
 struct ZeroizingResponseBody(Zeroizing<String>);
 
 impl ZeroizingResponseBody {
@@ -563,6 +644,24 @@ impl CloudflareClient {
             .await?
         };
         self.deserialize_response::<HeartbeatResult>(response).await
+    }
+
+    pub async fn report_integrity(
+        &self,
+        token: Option<&SecretToken>,
+        request: &IntegrityReportRequest,
+    ) -> CloudflareResult<()> {
+        request.validate()?;
+        let response = self
+            .send_request(
+                Method::POST,
+                "/api/integrity/report",
+                token.map(SecretToken::as_str),
+                Some(request),
+            )
+            .await?;
+        let _ = self.handle_api_error(response).await?;
+        Ok(())
     }
 
     pub(crate) fn verify_session_lease(

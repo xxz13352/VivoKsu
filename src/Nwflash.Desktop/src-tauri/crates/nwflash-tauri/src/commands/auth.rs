@@ -87,6 +87,10 @@ async fn finalize_login_session(
     }
     state.usage_reporter.flush().await;
     state.revoke_root_capabilities(&idle_lease);
+    state
+        .exit_supervisor
+        .install_generation(generation.clone())
+        .map_err(|_| "应用正在安全退出，无法发布新会话。".to_string())?;
 
     let capability =
         state
@@ -116,6 +120,7 @@ pub async fn auth_logout(state: State<'_, AppState>) -> Result<LogoutResult, Str
 }
 
 async fn auth_logout_inner(state: &AppState) -> Result<LogoutResult, String> {
+    let generation = state.session_lifecycle.generation().await;
     let idle_lease = state
         .operation_coordinator
         .try_acquire_idle()
@@ -127,11 +132,16 @@ async fn auth_logout_inner(state: &AppState) -> Result<LogoutResult, String> {
     }
     state.usage_reporter.flush().await;
     state.revoke_root_capabilities(&idle_lease);
-    let mut token = state
-        .session_token
-        .write()
-        .expect("session token lock should not be poisoned");
-    let _ = clear_session_token(&mut token);
+    {
+        let mut token = state
+            .session_token
+            .write()
+            .expect("session token lock should not be poisoned");
+        let _ = clear_session_token(&mut token);
+    }
+    if let Some(generation) = generation.as_deref() {
+        state.exit_supervisor.clear_generation(generation);
+    }
     Ok(LogoutResult { ok: true })
 }
 
@@ -197,10 +207,14 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        auth_login_inner, clear_session_token, finalize_login_session, replace_session_token,
-        AuthSessionDto,
+        auth_login_inner, auth_logout_inner, clear_session_token, finalize_login_session,
+        replace_session_token, AuthSessionDto,
     };
-    use crate::{commands::root::RootImageKind, AppState};
+    use crate::{
+        commands::root::RootImageKind,
+        exit_supervisor::{ExitReason, ExitRequest, ExitRequestDisposition},
+        AppState,
+    };
 
     fn verified_auth_session(token: &str, session_id: &str) -> AuthSession {
         let signing_key = SigningKey::generate(&mut OsRng);
@@ -385,8 +399,51 @@ mod tests {
                 .map(SecretToken::as_str),
             Some("verified-token")
         );
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::delayed(
+                dto.generation.clone(),
+                ExitReason::ServerForced,
+            )),
+            ExitRequestDisposition::Accepted
+        );
 
         state.session_lifecycle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_logout_clears_only_the_published_supervisor_generation() {
+        let server = MockServer::start().await;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        mount_runtime_signed_login(&server, &signing_key, "logout-token").await;
+        let client = CloudflareClient::new_injected_with_lease_key(
+            server.uri(),
+            DEFAULT_APP_VERSION,
+            signing_key.verifying_key(),
+        );
+        let state = AppState::try_with_client(client).unwrap();
+        let session = auth_login_inner(
+            &state,
+            "user".to_string(),
+            Zeroizing::new("password".to_string()),
+        )
+        .await
+        .expect("signed login should publish its generation");
+
+        auth_logout_inner(&state)
+            .await
+            .expect("explicit logout should clear the session");
+
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::delayed(
+                session.generation,
+                ExitReason::ServerForced,
+            )),
+            ExitRequestDisposition::IgnoredStaleGeneration
+        );
+        assert_eq!(
+            state.operation_coordinator.admission_state(),
+            nwflash_application::OperationAdmissionState::Running
+        );
     }
 
     #[tokio::test]
