@@ -6,7 +6,8 @@ export function createPortal({
   clearTimeoutImpl = window.clearTimeout.bind(window)
 }) {
   const select = (selector) => document.querySelector(selector);
-  const state = { view: 'overview', type: 'all', status: 'all', activity: '', pendingKicks: new Set(), kickTarget: '', focusTarget: null, pollTimer: null };
+  const maxSessionPollAttempts = 6;
+  const state = { view: 'overview', type: 'all', status: 'all', activity: '', pendingKicks: new Set(), kickTarget: '', focusTarget: null, pollTimer: null, pollAttempts: 0 };
   let started = false;
 
   function setText(selector, value) {
@@ -125,7 +126,7 @@ export function createPortal({
     clearNodes(steps);
     try {
       const data = await api(`/api/me/activities/${encodeURIComponent(id)}`);
-      setText('[data-step-state]', data.steps_state === 'unavailable' ? data.steps_message : (data.summary || '已加载活动详情'));
+      setText('[data-step-state]', data.steps_state === 'unavailable' ? '无更详细数据' : (data.summary || '已加载活动详情'));
       if (data.steps_state !== 'unavailable') {
         (data.steps || []).forEach((step) => {
           const row = document.createElement('p');
@@ -150,7 +151,9 @@ export function createPortal({
       summary.textContent = [session.ip, session.clientVersion, session.duration].filter(Boolean).join(' · ');
       const status = document.createElement('p');
       status.dataset.sessionStatus = '';
-      status.textContent = state.pendingKicks.has(session.id) ? '请求已发送' : (session.pendingExit ? '等待退出' : '活跃');
+      status.textContent = state.pendingKicks.has(session.id)
+        ? (state.pollAttempts >= maxSessionPollAttempts ? '请求未确认，请重试' : '请求已发送')
+        : (session.pendingExit ? '等待退出' : '活跃');
       const kick = document.createElement('button');
       kick.type = 'button';
       kick.dataset.kick = session.id;
@@ -169,7 +172,18 @@ export function createPortal({
       state.pendingKicks.forEach((id) => { if (!returned.has(id)) state.pendingKicks.delete(id); });
       renderSessions(sessions);
       setSurface('sessions', sessions.length ? 'success' : 'empty');
-      select('[data-sessions-retry]').hidden = true;
+      if (state.pendingKicks.size) {
+        state.pollAttempts += 1;
+        if (state.pollAttempts < maxSessionPollAttempts) {
+          scheduleSessionPoll();
+        } else {
+          renderSessions(sessions);
+          select('[data-sessions-retry]').hidden = false;
+        }
+      } else {
+        state.pollAttempts = 0;
+        select('[data-sessions-retry]').hidden = true;
+      }
     } catch (error) {
       if (error.message !== 'unauthorized') {
         setSurface('sessions', 'error', error.message);
@@ -192,7 +206,7 @@ export function createPortal({
 
   function scheduleSessionPoll() {
     clearTimeoutImpl(state.pollTimer);
-    state.pollTimer = setTimeoutImpl(() => { pollSessionsOnce(); }, 2000);
+    state.pollTimer = setTimeoutImpl(async () => { await pollSessionsOnce(); }, 2000);
   }
 
   async function confirmKick() {
@@ -200,21 +214,32 @@ export function createPortal({
     try {
       await api('/api/me/sessions/kick', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: state.kickTarget }) });
       state.pendingKicks.add(state.kickTarget);
+      state.pollAttempts = 0;
       closeDialog(select('[data-kick-dialog]'));
       const current = select(`[data-session="${state.kickTarget}"] [data-session-status]`);
       if (current) current.textContent = '请求已发送';
       scheduleSessionPoll();
     } catch (error) {
-      if (error.message !== 'unauthorized') setText('[data-live-status]', error.message);
+      if (error.message !== 'unauthorized') {
+        setText('[data-live-status]', error.message);
+        setSurface('sessions', 'error', error.message);
+        select('[data-sessions-retry]').hidden = false;
+      }
     }
   }
 
   function showLogin() {
     clearTimeoutImpl(state.pollTimer);
+    [select('[data-kick-dialog]'), select('[data-password-dialog]')].forEach((dialog) => {
+      if (dialog.open && typeof dialog.close === 'function') dialog.close();
+      else dialog.open = false;
+    });
+    state.focusTarget = null;
     window.localStorage.clear();
     window.sessionStorage.clear();
     select('[data-app]').hidden = true;
     select('[data-view="login"]').hidden = false;
+    select('[data-login-username]').focus();
   }
 
   async function submitPassword(event) {
@@ -228,6 +253,32 @@ export function createPortal({
       if (result.ok && result.reauthenticate) showLogin();
     } catch (error) {
       if (error.message !== 'unauthorized') setText('[data-password-error]', error.message);
+    }
+  }
+
+  async function showAuthenticated(identity) {
+    select('[data-view="login"]').hidden = true;
+    select('[data-app]').hidden = false;
+    setText('[data-user-name]', identity.name || identity.username);
+    paramsFromUrl();
+    await selectCurrentView();
+  }
+
+  async function submitLogin(event) {
+    event.preventDefault();
+    try {
+      const result = await api('/api/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          username: select('[data-login-username]').value,
+          password: select('[data-login-password]').value,
+          remember: select('[data-login-remember]').checked
+        })
+      });
+      if (result.ok) await showAuthenticated(result);
+    } catch (error) {
+      if (error.message !== 'unauthorized') setText('[data-login-error]', error.message);
     }
   }
 
@@ -267,9 +318,13 @@ export function createPortal({
     select('[data-cancel-password]').addEventListener('click', () => closeDialog(select('[data-password-dialog]')));
     select('[data-password-dialog]').addEventListener('cancel', () => closeDialog(select('[data-password-dialog]')));
     select('[data-password-form]').addEventListener('submit', submitPassword);
+    select('[data-login-form]').addEventListener('submit', submitLogin);
     select('[data-overview-retry]').addEventListener('click', loadOverview);
     select('[data-activity-retry]').addEventListener('click', loadActivities);
-    select('[data-sessions-retry]').addEventListener('click', pollSessionsOnce);
+    select('[data-sessions-retry]').addEventListener('click', () => {
+      state.pollAttempts = 0;
+      pollSessionsOnce();
+    });
     window.addEventListener('popstate', handlePopstate);
   }
 
@@ -283,11 +338,7 @@ export function createPortal({
     try {
       const me = await api('/api/me');
       if (me.loggedIn === false) return showLogin();
-      select('[data-view="login"]').hidden = true;
-      select('[data-app]').hidden = false;
-      setText('[data-user-name]', me.name || me.username);
-      paramsFromUrl();
-      await selectCurrentView();
+      await showAuthenticated(me);
     } catch (error) {
       if (error.message !== 'unauthorized') showLogin();
     }
@@ -299,4 +350,14 @@ export function createPortal({
   }
 
   return { start, destroy, retryCurrentView: selectCurrentView, pollSessionsOnce };
+}
+
+function startBrowserPortal() {
+  const portal = createPortal({ document: window.document, window });
+  portal.start();
+}
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && typeof process === 'undefined') {
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startBrowserPortal, { once: true });
+  else startBrowserPortal();
 }
