@@ -33,6 +33,9 @@ use url::Url;
 use x509_parser::parse_x509_certificate;
 
 use crate::api_client::{CloudflareError, CloudflareResult};
+use nwflash_protection::{
+    verify_signed_lease, LeaseVerificationError, SignedEnvelope, VerifiedLease,
+};
 
 pub const API_HOST: &str = "api.nwflash.cc.cd";
 pub const BUILTIN_LEAF_SPKI_PIN: &str = "kavrs5Bk3Tjn+0G+uPjWGBqJsXzW5kHFNPzgxuvrcKY=";
@@ -73,6 +76,26 @@ pub enum IntegrityFailure {
     MissingVerificationKey,
     #[error("API session verification key is malformed")]
     InvalidVerificationKey,
+    #[error("API session lease envelope is malformed")]
+    LeaseEnvelope,
+    #[error("API session lease signature validation failed")]
+    LeaseSignature,
+    #[error("API session lease claims are malformed")]
+    LeaseClaims,
+    #[error("API session lease binding validation failed")]
+    LeaseBinding,
+    #[error("API session lease validity window failed")]
+    LeaseTime,
+    #[error("API session lease kind or version was rejected")]
+    LeaseKind,
+    #[error("API session lease sequence rollback was rejected")]
+    LeaseSequence,
+    #[error("protected build identity is not configured")]
+    MissingBuildIdentity,
+    #[error("process identity is malformed")]
+    InvalidProcessIdentity,
+    #[error("cryptographic process identity generation failed")]
+    ProcessRandomness,
     #[error("API TLS client construction failed")]
     TlsConfiguration,
 }
@@ -295,6 +318,13 @@ impl PinnedApiClient {
 
     pub fn base_url(&self) -> &str {
         self.base_url.as_str().trim_end_matches('/')
+    }
+
+    pub(crate) fn verify_session_lease(
+        &self,
+        envelope: &SignedEnvelope,
+    ) -> Result<VerifiedLease, LeaseVerificationError> {
+        verify_signed_lease(envelope, &self.pinsets.verifying_key)
     }
 
     #[cfg(debug_assertions)]

@@ -3,6 +3,11 @@ use std::fmt::{self, Display, Formatter};
 #[cfg(debug_assertions)]
 use std::time::Duration;
 
+#[cfg(debug_assertions)]
+use ed25519_dalek::VerifyingKey;
+#[cfg(debug_assertions)]
+use nwflash_protection::verify_signed_lease;
+use nwflash_protection::{LeaseVerificationError, SignedEnvelope, VerifiedLease};
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
     Client, Method, Response, StatusCode,
@@ -11,10 +16,12 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
+use zeroize::Zeroizing;
 
 use nwflash_domain::UsageLogEntry;
 
 use crate::pinned_tls::{classify_reqwest_error, ApiTlsPolicy, PinnedApiClient, PinsetClaims};
+use crate::{ProcessIdentity, SecretToken};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.nwflash.cc.cd";
 pub const DEFAULT_APP_VERSION: &str = "1.0.1";
@@ -61,21 +68,92 @@ impl Display for UpdateRequiredInfo {
 
 pub type CloudflareResult<T> = Result<T, CloudflareError>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct LoginRequest {
     pub username: String,
-    pub password: String,
+    password: SecretPassword,
+    pub client_version: String,
+    pub build_id: String,
+    pub process_nonce: String,
+    pub session_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl LoginRequest {
+    pub fn new(
+        username: impl Into<String>,
+        password: impl Into<String>,
+        client_version: impl Into<String>,
+        build_id: impl Into<String>,
+        process_nonce: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            username: username.into(),
+            password: SecretPassword(Zeroizing::new(password.into())),
+            client_version: client_version.into(),
+            build_id: build_id.into(),
+            process_nonce: process_nonce.into(),
+            session_id: session_id.into(),
+        }
+    }
+}
+
+impl fmt::Debug for LoginRequest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("client_version", &self.client_version)
+            .field("build_id", &self.build_id)
+            .field("process_nonce", &self.process_nonce)
+            .field("session_id", &self.session_id)
+            .finish()
+    }
+}
+
+struct SecretPassword(Zeroizing<String>);
+
+impl Serialize for SecretPassword {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.0.as_str())
+    }
+}
+
+#[derive(Deserialize)]
 pub struct LoginResult {
-    pub token: String,
+    pub token: SecretToken,
     pub username: String,
     pub name: String,
     #[serde(default)]
     pub lease_payload: String,
     #[serde(default)]
     pub lease_signature: String,
+}
+
+impl LoginResult {
+    pub(crate) fn signed_envelope(&self) -> SignedEnvelope {
+        SignedEnvelope {
+            lease_payload: self.lease_payload.clone(),
+            lease_signature: self.lease_signature.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for LoginResult {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoginResult")
+            .field("token", &"[REDACTED]")
+            .field("username", &self.username)
+            .field("name", &self.name)
+            .field("lease_payload", &"[REDACTED]")
+            .field("lease_signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,15 +168,23 @@ pub struct RomResolveResponse {
     pub sha256: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize)]
 pub struct HeartbeatRequest {
     pub session_id: String,
     pub client_version: String,
+    pub build_id: String,
+    pub process_nonce: String,
+    pub sequence: u64,
     pub active: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
+struct GoodbyeRequest {
+    session_id: String,
+    active: bool,
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HeartbeatResult {
     pub force_exit: bool,
@@ -107,6 +193,27 @@ pub struct HeartbeatResult {
     pub lease_payload: String,
     #[serde(default)]
     pub lease_signature: String,
+}
+
+impl HeartbeatResult {
+    pub(crate) fn signed_envelope(&self) -> SignedEnvelope {
+        SignedEnvelope {
+            lease_payload: self.lease_payload.clone(),
+            lease_signature: self.lease_signature.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for HeartbeatResult {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HeartbeatResult")
+            .field("force_exit", &self.force_exit)
+            .field("reason", &self.reason)
+            .field("lease_payload", &"[REDACTED]")
+            .field("lease_signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +291,8 @@ pub struct CloudflareClient {
     app_version: String,
     http: Client,
     pinned: Option<PinnedApiClient>,
+    #[cfg(debug_assertions)]
+    injected_lease_key: Option<VerifyingKey>,
 }
 
 impl CloudflareClient {
@@ -202,7 +311,20 @@ impl CloudflareClient {
                 .build()
                 .expect("HTTP client should build"),
             pinned: None,
+            injected_lease_key: None,
         }
+    }
+
+    /// Explicit debug-only key injection for runtime-generated signing tests.
+    #[cfg(debug_assertions)]
+    pub fn new_injected_with_lease_key(
+        base_url: impl Into<String>,
+        app_version: impl Into<String>,
+        verifying_key: VerifyingKey,
+    ) -> Self {
+        let mut client = Self::new_injected(base_url, app_version);
+        client.injected_lease_key = Some(verifying_key);
+        client
     }
 
     #[cfg(debug_assertions)]
@@ -223,6 +345,8 @@ impl CloudflareClient {
             app_version: app_version.into(),
             http: pinned.http_client(),
             pinned: Some(pinned),
+            #[cfg(debug_assertions)]
+            injected_lease_key: None,
         })
     }
 
@@ -239,7 +363,13 @@ impl CloudflareClient {
         &self.app_version
     }
 
-    pub async fn login(&self, username: &str, password: &str) -> CloudflareResult<LoginResult> {
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+        identity: &ProcessIdentity,
+        session_id: &str,
+    ) -> CloudflareResult<LoginResult> {
         if username.trim().is_empty() {
             return Err(CloudflareError::InvalidInput(
                 "username 不能为空".to_string(),
@@ -250,17 +380,22 @@ impl CloudflareClient {
                 "password 不能为空".to_string(),
             ));
         }
+        if session_id.trim().is_empty() {
+            return Err(CloudflareError::InvalidInput(
+                "session id 不能为空".to_string(),
+            ));
+        }
 
+        let request = LoginRequest::new(
+            username,
+            password,
+            self.app_version(),
+            identity.build_id(),
+            identity.process_nonce(),
+            session_id,
+        );
         let response = self
-            .send_request(
-                Method::POST,
-                "/api/login",
-                None,
-                Some(&LoginRequest {
-                    username: username.to_string(),
-                    password: password.to_string(),
-                }),
-            )
+            .send_request(Method::POST, "/api/login", None, Some(&request))
             .await?;
         self.deserialize_response::<LoginResult>(response).await
     }
@@ -312,7 +447,9 @@ impl CloudflareClient {
     pub async fn heartbeat(
         &self,
         token: &str,
+        identity: &ProcessIdentity,
         session_id: &str,
+        sequence: u64,
         active: bool,
     ) -> CloudflareResult<HeartbeatResult> {
         if session_id.trim().is_empty() {
@@ -321,19 +458,61 @@ impl CloudflareClient {
             ));
         }
 
-        let response = self
-            .send_request(
+        let response = if active {
+            self.send_request(
                 Method::POST,
                 "/api/heartbeat",
                 Some(token),
                 Some(&HeartbeatRequest {
                     session_id: session_id.to_string(),
                     client_version: self.app_version().to_string(),
-                    active,
+                    build_id: identity.build_id().to_string(),
+                    process_nonce: identity.process_nonce().to_string(),
+                    sequence,
+                    active: true,
                 }),
             )
-            .await?;
+            .await?
+        } else {
+            self.send_request(
+                Method::POST,
+                "/api/heartbeat",
+                Some(token),
+                Some(&GoodbyeRequest {
+                    session_id: session_id.to_string(),
+                    active: false,
+                }),
+            )
+            .await?
+        };
         self.deserialize_response::<HeartbeatResult>(response).await
+    }
+
+    pub(crate) fn verify_session_lease(
+        &self,
+        envelope: &SignedEnvelope,
+    ) -> CloudflareResult<VerifiedLease> {
+        let verified = if let Some(pinned) = self.pinned.as_ref() {
+            pinned.verify_session_lease(envelope)
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                let key = self.injected_lease_key.as_ref().ok_or({
+                    CloudflareError::Integrity(
+                        crate::pinned_tls::IntegrityFailure::MissingVerificationKey,
+                    )
+                })?;
+                verify_signed_lease(envelope, key)
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                return Err(CloudflareError::Integrity(
+                    crate::pinned_tls::IntegrityFailure::MissingVerificationKey,
+                ));
+            }
+        };
+
+        verified.map_err(map_lease_verification_error)
     }
 
     pub async fn get_online(&self, token: &str) -> CloudflareResult<Vec<OnlineSession>> {
@@ -548,10 +727,10 @@ impl CloudflareClient {
 
         if let Some(token) = token {
             if !token.trim().is_empty() {
+                let bearer = Zeroizing::new(format!("Bearer {token}"));
                 headers.insert(
                     AUTHORIZATION,
-                    HeaderValue::from_str(&format!("Bearer {token}"))
-                        .expect("固定构造的 Authorization 头应始终有效"),
+                    HeaderValue::from_str(&bearer).expect("固定构造的 Authorization 头应始终有效"),
                 );
             }
         }
@@ -569,6 +748,17 @@ impl CloudflareClient {
             relative_path.trim_start_matches('/')
         )
     }
+}
+
+fn map_lease_verification_error(error: LeaseVerificationError) -> CloudflareError {
+    use crate::pinned_tls::IntegrityFailure;
+
+    let failure = match error {
+        LeaseVerificationError::MalformedEnvelope => IntegrityFailure::LeaseEnvelope,
+        LeaseVerificationError::InvalidSignature => IntegrityFailure::LeaseSignature,
+        LeaseVerificationError::MalformedClaims => IntegrityFailure::LeaseClaims,
+    };
+    CloudflareError::Integrity(failure)
 }
 
 fn fallback_message(status: u16) -> String {

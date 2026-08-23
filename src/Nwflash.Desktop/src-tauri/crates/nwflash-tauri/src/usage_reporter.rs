@@ -11,7 +11,7 @@ use std::{
 
 use nwflash_application::UsageReporter;
 use nwflash_domain::UsageLogEntry;
-use nwflash_infrastructure::CloudflareClient;
+use nwflash_infrastructure::{CloudflareClient, SecretToken};
 use tauri::async_runtime;
 use tokio::{sync::Mutex as AsyncMutex, time::interval};
 
@@ -22,7 +22,7 @@ const MAX_BATCH_SIZE: usize = 100;
 #[derive(Debug)]
 pub struct UsageLogReporter {
     client: CloudflareClient,
-    session_token: Arc<RwLock<Option<String>>>,
+    session_token: Arc<RwLock<Option<SecretToken>>>,
     pending: Arc<Mutex<VecDeque<UsageLogEntry>>>,
     flush_gate: Arc<AsyncMutex<()>>,
     running: AtomicBool,
@@ -43,7 +43,10 @@ impl Clone for UsageLogReporter {
 }
 
 impl UsageLogReporter {
-    pub fn new(client: CloudflareClient, session_token: Arc<RwLock<Option<String>>>) -> Arc<Self> {
+    pub fn new(
+        client: CloudflareClient,
+        session_token: Arc<RwLock<Option<SecretToken>>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client,
             session_token,
@@ -100,7 +103,7 @@ impl UsageLogReporter {
             .session_token
             .read()
             .ok()
-            .and_then(|token| token.clone());
+            .and_then(|token| token.as_ref().map(SecretToken::request_scope));
         let Some(token) = token else {
             let mut pending = self
                 .pending
@@ -119,7 +122,12 @@ impl UsageLogReporter {
             let end = (offset + MAX_BATCH_SIZE).min(batch.len());
             let chunk = &batch[offset..end];
 
-            if self.client.upload_usage_logs(&token, chunk).await.is_err() {
+            if self
+                .client
+                .upload_usage_logs(token.as_str(), chunk)
+                .await
+                .is_err()
+            {
                 failed.extend_from_slice(&batch[offset..end]);
                 break;
             }

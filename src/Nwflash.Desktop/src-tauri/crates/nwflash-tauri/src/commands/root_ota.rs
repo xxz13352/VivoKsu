@@ -10,7 +10,7 @@ use nwflash_application::{result_to_domain_error, RootOtaExtractOptions, RootOta
 use nwflash_domain::{DomainError, FlashImageInfo, OperationKind};
 use nwflash_infrastructure::{
     remote_firmware::{probe_remote_kind, RemoteFirmwareError, RemoteFirmwareKind},
-    PayloadDumperProvisioner,
+    PayloadDumperProvisioner, SecretToken,
 };
 use serde::Serialize;
 use tauri::State;
@@ -244,8 +244,9 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
         .session_token
         .read()
         .expect("session token lock should not be poisoned")
-        .clone()
+        .as_ref()
         .filter(|token| !token.is_empty())
+        .map(SecretToken::request_scope)
     {
         Some(token) => token,
         None => {
@@ -281,7 +282,7 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
             })
         }
     };
-    let rom = match client.resolve_rom(&token, &pd, &version).await {
+    let rom = match client.resolve_rom(token.as_str(), &pd, &version).await {
         Ok(rom) => rom,
         Err(_) => {
             return Ok(RootOtaCheckDto {

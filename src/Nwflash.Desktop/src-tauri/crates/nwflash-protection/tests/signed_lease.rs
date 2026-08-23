@@ -31,7 +31,7 @@ fn claims(kind: LeaseKind) -> LeaseClaims {
         build_id: "build-123".into(),
         process_nonce: "nonce-abc".into(),
         session_id: "session-xyz".into(),
-        sequence: 11,
+        sequence: if kind == LeaseKind::Login { 1 } else { 11 },
         issued_at: NOW - 5,
         expires_at: NOW + 60,
     }
@@ -61,7 +61,7 @@ fn verified_login() -> nwflash_protection::VerifiedLease {
 
 #[test]
 fn verifies_a_signature_over_the_original_base64url_payload_ascii_bytes() {
-    let (envelope, verification_key) = signed_envelope(&claims(LeaseKind::Login));
+    let (envelope, verification_key) = signed_envelope(&claims(LeaseKind::Heartbeat));
     let verified = verify_signed_lease(&envelope, &verification_key).unwrap();
 
     assert_eq!(verified.claims().username, "alice");

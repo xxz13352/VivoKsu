@@ -4,14 +4,14 @@ use std::{
 };
 
 use nwflash_application::{
-    OperationAuthorization, OperationCoordinator, OperationCoordinatorError, OperationIdleLease,
+    HeartbeatInput, OperationAuthorization, OperationCoordinator, OperationIdleLease,
     OperationLogger, OperationPermissionGate, SessionLifecycle,
 };
 use nwflash_domain::{DomainError, OperationKind};
-use nwflash_infrastructure::api_client::{CloudflareError, HeartbeatResult};
 use nwflash_infrastructure::{
-    api_client::UpdateRequiredInfo, AuthService, CloudflareClient, OperationLogStore,
-    VersionCheckResult, VersionClient,
+    api_client::UpdateRequiredInfo, AuthService, CloudflareClient, CloudflareError,
+    HeartbeatAdmission, OperationLogStore, ProcessIdentity, SecretToken, VersionCheckResult,
+    VersionClient,
 };
 use serde::Serialize;
 use tauri::{async_runtime::spawn, AppHandle, Emitter, Manager, Wry};
@@ -29,7 +29,6 @@ mod usage_reporter;
 pub const APP_LABEL: &str = "奶蛙Flash";
 const SESSION_FORCE_EXIT_EVENT: &str = "session:force-exit";
 const SESSION_UPDATE_REQUIRED_EVENT: &str = "session:update-required";
-const SESSION_SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 
 /// Mirrors `ServerOperationGate.AuthorizeTimeout` in the WPF build.  Server
 /// authorization is advisory: a ban answers "denied", but an unreachable or slow
@@ -47,7 +46,8 @@ pub struct AppState {
     pub client: CloudflareClient,
     pub auth_service: AuthService,
     pub version_client: VersionClient,
-    pub session_token: Arc<RwLock<Option<String>>>,
+    pub session_token: Arc<RwLock<Option<SecretToken>>>,
+    pub process_identity: ProcessIdentity,
     pub usage_reporter: Arc<usage_reporter::UsageLogReporter>,
     pub session_lifecycle: SessionLifecycle,
     pub operation_coordinator: OperationCoordinator,
@@ -73,11 +73,11 @@ pub struct AppState {
 #[derive(Clone)]
 struct CloudflareOperationPermissionGate {
     client: CloudflareClient,
-    session_token: Arc<RwLock<Option<String>>>,
+    session_token: Arc<RwLock<Option<SecretToken>>>,
 }
 
 impl CloudflareOperationPermissionGate {
-    fn new(client: CloudflareClient, session_token: Arc<RwLock<Option<String>>>) -> Self {
+    fn new(client: CloudflareClient, session_token: Arc<RwLock<Option<SecretToken>>>) -> Self {
         Self {
             client,
             session_token,
@@ -116,14 +116,15 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
             let token = session_token
                 .read()
                 .expect("session token lock should not be poisoned")
-                .clone()
+                .as_ref()
                 .filter(|token| !token.is_empty())
+                .map(SecretToken::request_scope)
                 .ok_or_else(|| {
                     DomainError::AuthorizationDenied("未登录，无法执行受控操作。".to_string())
                 })?;
 
             let operation_label = format!("{operation:?}");
-            let request = client.authorize_operation(&token, &operation_label, &title);
+            let request = client.authorize_operation(token.as_str(), &operation_label, &title);
             match tokio::time::timeout(AUTHORIZE_TIMEOUT, request).await {
                 Ok(Ok(authorization)) => Ok(OperationAuthorization {
                     allowed: authorization.allowed,
@@ -141,7 +142,8 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
 
 impl AppState {
     pub fn try_new() -> Result<Self, CloudflareError> {
-        CloudflareClient::new_default().map(Self::with_client)
+        let client = CloudflareClient::new_default()?;
+        Self::try_with_client(client)
     }
 
     #[cfg(not(test))]
@@ -151,31 +153,66 @@ impl AppState {
 
     #[cfg(test)]
     pub fn new() -> Self {
-        Self::with_client(CloudflareClient::new_injected(
+        Self::try_with_client(CloudflareClient::new_injected(
             nwflash_infrastructure::DEFAULT_BASE_URL,
             nwflash_infrastructure::DEFAULT_APP_VERSION,
         ))
+        .expect("debug AppState identity should initialize")
     }
 
-    fn with_client(client: CloudflareClient) -> Self {
+    fn try_with_client(client: CloudflareClient) -> Result<Self, CloudflareError> {
         let (session_events_tx, session_events_rx) = unbounded_channel();
+        let process_identity = ProcessIdentity::generate().map_err(CloudflareError::Integrity)?;
         let session_token = Arc::new(RwLock::new(None));
+        let session_capabilities = Arc::new(session_capabilities::SessionCapabilityScope::new());
         let permission_gate = Arc::new(CloudflareOperationPermissionGate::new(
             client.clone(),
             session_token.clone(),
         ));
 
         let heartbeat_fn = {
-            let heartbeat_client = client.clone();
-            std::sync::Arc::new(move |token: String, session_id: String, active: bool| {
-                let heartbeat_client = heartbeat_client.clone();
+            let heartbeat_auth = AuthService::with_client(client.clone());
+            let heartbeat_identity = process_identity.clone();
+            let heartbeat_capabilities = session_capabilities.clone();
+            std::sync::Arc::new(move |input: HeartbeatInput| {
+                let heartbeat_auth = heartbeat_auth.clone();
+                let heartbeat_identity = heartbeat_identity.clone();
+                let heartbeat_capabilities = heartbeat_capabilities.clone();
                 let future: futures::future::BoxFuture<
                     'static,
-                    Result<HeartbeatResult, CloudflareError>,
+                    Result<HeartbeatAdmission, CloudflareError>,
                 > = Box::pin(async move {
-                    heartbeat_client
-                        .heartbeat(&token, &session_id, active)
-                        .await
+                    let capability = if input.active {
+                        Some(heartbeat_capabilities.capture().map_err(|_| {
+                            CloudflareError::Integrity(
+                                nwflash_infrastructure::IntegrityFailure::LeaseBinding,
+                            )
+                        })?)
+                    } else {
+                        None
+                    };
+                    let previous_sequence = input.lease.sequence();
+                    let admission = heartbeat_auth
+                        .heartbeat(
+                            &input.token,
+                            &input.username,
+                            &heartbeat_identity,
+                            &input.lease,
+                            input.active,
+                        )
+                        .await?;
+                    if let (Some(capability), HeartbeatAdmission::Accepted(next)) =
+                        (capability, &admission)
+                    {
+                        heartbeat_capabilities
+                            .refresh_verified(capability, previous_sequence, next.clone())
+                            .map_err(|_| {
+                                CloudflareError::Integrity(
+                                    nwflash_infrastructure::IntegrityFailure::LeaseSequence,
+                                )
+                            })?;
+                    }
+                    Ok(admission)
                 });
                 future
             })
@@ -197,13 +234,12 @@ impl AppState {
         });
         let usage_reporter =
             usage_reporter::UsageLogReporter::new(client.clone(), session_token.clone());
-        let session_capabilities = Arc::new(session_capabilities::SessionCapabilityScope::new());
-
-        Self {
+        Ok(Self {
             client: client.clone(),
             auth_service: AuthService::with_client(client.clone()),
             version_client: VersionClient::with_client(client.clone()),
             session_token,
+            process_identity,
             usage_reporter: usage_reporter.clone(),
             operation_coordinator: {
                 OperationCoordinator::new(
@@ -249,7 +285,7 @@ impl AppState {
                 Some(on_force_exit),
                 Some(on_update_required),
             ),
-        }
+        })
     }
 
     pub fn bind_operation_events(&self, app_handle: AppHandle<Wry>) {
@@ -323,19 +359,10 @@ impl AppState {
                 while let Some(event) = receiver.recv().await {
                     match event {
                         SessionLifecycleEvent::ForceExit(reason) => {
-                            let state = app_handle.state::<AppState>();
-                            if !finalize_operation_before_exit(&state).await {
-                                continue;
-                            }
                             let _ = app_handle
                                 .emit(SESSION_FORCE_EXIT_EVENT, SessionForceExitPayload { reason });
-                            app_handle.exit(0);
                         }
                         SessionLifecycleEvent::UpdateRequired(update) => {
-                            let state = app_handle.state::<AppState>();
-                            if !finalize_operation_before_exit(&state).await {
-                                continue;
-                            }
                             let _ = app_handle.emit(
                                 SESSION_UPDATE_REQUIRED_EVENT,
                                 SessionUpdateRequiredPayload::from(update),
@@ -391,29 +418,6 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-async fn finalize_operation_before_exit(state: &AppState) -> bool {
-    state.operation_coordinator.cancel_current().await;
-
-    let mut waited = Duration::from_millis(0);
-    loop {
-        match state.operation_coordinator.try_acquire_idle() {
-            Ok(idle_lease) => {
-                state.revoke_root_capabilities(&idle_lease);
-                return true;
-            }
-            Err(OperationCoordinatorError::InProgress) => {
-                sleep(Duration::from_millis(50)).await;
-                waited += Duration::from_millis(50);
-                if waited >= SESSION_SHUTDOWN_WAIT {
-                    state.operation_coordinator.cancel_current().await;
-                    waited = Duration::from_millis(0);
-                }
-            }
-            Err(_) => return false,
-        }
     }
 }
 
@@ -559,25 +563,17 @@ mod device_monitor_tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use super::{
+        authorization_for_error, should_compensate_device_refresh, AppState, OperationLogBuffer,
+    };
     use futures::future::BoxFuture;
     use nwflash_application::{
         OperationAuthorization, OperationCoordinator, OperationLogger, OperationPermissionGate,
     };
     use nwflash_domain::{DomainError, OperationKind, OperationLogLevel};
     use nwflash_infrastructure::{CloudflareError, IntegrityFailure};
-    use tokio::sync::Notify;
-
-    use super::{
-        authorization_for_error, finalize_operation_before_exit, should_compensate_device_refresh,
-        AppState, OperationLogBuffer,
-    };
 
     struct DenyAllOperations;
-
-    struct BlockingAuthorization {
-        entered: Arc<Notify>,
-        release: Arc<Notify>,
-    }
 
     impl OperationPermissionGate for DenyAllOperations {
         fn authorize(
@@ -586,22 +582,6 @@ mod device_monitor_tests {
             _title: String,
         ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
             Box::pin(async { Ok(OperationAuthorization::deny("测试授权拒绝")) })
-        }
-    }
-
-    impl OperationPermissionGate for BlockingAuthorization {
-        fn authorize(
-            &self,
-            _operation: OperationKind,
-            _title: String,
-        ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
-            let entered = self.entered.clone();
-            let release = self.release.clone();
-            Box::pin(async move {
-                entered.notify_one();
-                release.notified().await;
-                Ok(OperationAuthorization::allow())
-            })
         }
     }
 
@@ -798,49 +778,6 @@ mod device_monitor_tests {
 
         assert!(result.is_err());
         assert!(!operation_started.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn force_exit_finalization_waits_for_pending_authorization_before_revocation() {
-        let entered = Arc::new(Notify::new());
-        let release = Arc::new(Notify::new());
-        let mut state = AppState::new();
-        state.operation_coordinator = OperationCoordinator::new(
-            None,
-            Some(Arc::new(BlockingAuthorization {
-                entered: entered.clone(),
-                release: release.clone(),
-            })),
-            None,
-            None,
-            None,
-        );
-        state.session_capabilities.activate();
-        let state = Arc::new(state);
-        let operation = tokio::spawn({
-            let coordinator = state.operation_coordinator.clone();
-            async move {
-                coordinator
-                    .run_async(
-                        OperationKind::Flashing,
-                        "pending authorization",
-                        |_, _| async { Ok(()) },
-                    )
-                    .await
-            }
-        });
-        entered.notified().await;
-
-        let finalizer = tokio::spawn({
-            let state = state.clone();
-            async move { finalize_operation_before_exit(&state).await }
-        });
-        tokio::task::yield_now().await;
-        release.notify_one();
-        let _ = operation.await.expect("operation task should join");
-        finalizer.await.expect("exit finalizer should join");
-
-        assert!(state.session_capabilities.capture().is_err());
     }
 }
 

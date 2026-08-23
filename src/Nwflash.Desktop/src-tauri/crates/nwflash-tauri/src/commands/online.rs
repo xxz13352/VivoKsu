@@ -2,7 +2,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::AppState;
-use nwflash_infrastructure::OnlineSession;
+use nwflash_infrastructure::{OnlineSession, SecretToken};
 
 #[derive(Serialize)]
 pub struct OnlineSessionDto {
@@ -20,12 +20,13 @@ pub async fn online_sessions(state: State<'_, AppState>) -> Result<Vec<OnlineSes
         .session_token
         .read()
         .expect("session token lock should not be poisoned")
-        .clone()
+        .as_ref()
+        .map(SecretToken::request_scope)
         .ok_or_else(|| "未登录，无法获取在线会话列表。".to_string())?;
 
     state
         .client
-        .get_online(&token)
+        .get_online(token.as_str())
         .await
         .map(OnlineSessionDto::from_model_list)
         .map_err(|error| error.to_string())

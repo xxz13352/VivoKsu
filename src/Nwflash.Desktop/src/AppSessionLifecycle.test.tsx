@@ -71,8 +71,8 @@ const setupMocks = () => {
       return {
         has_token: true,
         healthy: false,
-        running: false,
-        session_id: null,
+        running: true,
+        session_id: 'signed-session',
       };
     }
 
@@ -82,17 +82,12 @@ const setupMocks = () => {
 
     if (command === 'auth_login') {
       return {
-        token: 'jwt',
         username: 'admin',
         name: '管理员',
       };
     }
 
-    if (
-      command === 'session_start' ||
-      command === 'session_stop' ||
-      command === 'auth_logout'
-    ) {
+    if (command === 'session_stop' || command === 'auth_logout') {
       return {};
     }
 
@@ -179,7 +174,12 @@ describe('会话事件联动', () => {
     const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'session_state') {
-        return { has_token: true, healthy: true, running: false, session_id: null };
+        return {
+          has_token: true,
+          healthy: true,
+          running: true,
+          session_id: 'signed-session',
+        };
       }
       if (command === 'auth_validate_token') {
         hostListeners.get(IPC_EVENTS.sessionUpdateRequired)?.({

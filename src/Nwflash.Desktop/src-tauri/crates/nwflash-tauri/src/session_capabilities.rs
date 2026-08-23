@@ -1,3 +1,4 @@
+use nwflash_protection::SessionLease;
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,10 +9,18 @@ pub(crate) struct SessionCapabilityLease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SessionCapabilityUnavailable;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionSecurityState {
+    pub(crate) epoch: u64,
+    pub(crate) username: String,
+    pub(crate) lease: SessionLease,
+}
+
 #[derive(Debug, Default)]
 struct SessionCapabilityState {
     active: bool,
     epoch: u64,
+    security: Option<SessionSecurityState>,
 }
 
 #[derive(Debug, Default)]
@@ -24,6 +33,27 @@ impl SessionCapabilityScope {
         Self::default()
     }
 
+    pub(crate) fn activate_verified(
+        &self,
+        username: String,
+        lease: SessionLease,
+    ) -> SessionCapabilityLease {
+        let mut state = self.lock_state();
+        state.epoch = state
+            .epoch
+            .checked_add(1)
+            .expect("session capability epoch exhausted");
+        state.active = true;
+        let capability = SessionCapabilityLease { epoch: state.epoch };
+        state.security = Some(SessionSecurityState {
+            epoch: capability.epoch,
+            username,
+            lease,
+        });
+        capability
+    }
+
+    #[cfg(test)]
     pub(crate) fn activate(&self) -> SessionCapabilityLease {
         let mut state = self.lock_state();
         state.epoch = state
@@ -31,7 +61,41 @@ impl SessionCapabilityScope {
             .checked_add(1)
             .expect("session capability epoch exhausted");
         state.active = true;
+        state.security = None;
         SessionCapabilityLease { epoch: state.epoch }
+    }
+
+    pub(crate) fn security(&self) -> Result<SessionSecurityState, SessionCapabilityUnavailable> {
+        let state = self.lock_state();
+        if !state.active {
+            return Err(SessionCapabilityUnavailable);
+        }
+        state.security.clone().ok_or(SessionCapabilityUnavailable)
+    }
+
+    pub(crate) fn refresh_verified(
+        &self,
+        capability: SessionCapabilityLease,
+        previous_sequence: u64,
+        next: SessionLease,
+    ) -> Result<(), SessionCapabilityUnavailable> {
+        let mut state = self.lock_state();
+        if !state.active || state.epoch != capability.epoch {
+            return Err(SessionCapabilityUnavailable);
+        }
+        let security = state
+            .security
+            .as_mut()
+            .ok_or(SessionCapabilityUnavailable)?;
+        if security.epoch != capability.epoch
+            || security.lease.sequence() != previous_sequence
+            || security.lease.session_id() != next.session_id()
+            || next.sequence() <= previous_sequence
+        {
+            return Err(SessionCapabilityUnavailable);
+        }
+        security.lease = next;
+        Ok(())
     }
 
     pub(crate) fn capture(&self) -> Result<SessionCapabilityLease, SessionCapabilityUnavailable> {
@@ -69,6 +133,7 @@ impl SessionCapabilityScope {
             .checked_add(1)
             .expect("session capability epoch exhausted");
         state.active = false;
+        state.security = None;
         let cleared = clear();
         drop(state);
         cleared
@@ -89,7 +154,101 @@ mod tests {
     };
     use std::time::Duration;
 
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use nwflash_protection::{
+        accept_login_lease, classify_heartbeat_lease, verify_signed_lease, HeartbeatDecision,
+        LeaseBinding, LeaseClaims, LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
+    };
+    use rand_core::OsRng;
+
     use super::{SessionCapabilityLease, SessionCapabilityScope};
+
+    fn verified_lease(sequence: u64) -> SessionLease {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let binding = LeaseBinding::new(
+            "user",
+            TokenDigest::sha256(b"token"),
+            "1.0.1",
+            "debug-build",
+            "process-nonce",
+            "signed-session",
+        );
+        let make_verified = |kind, sequence| {
+            let claims = LeaseClaims {
+                version: 1,
+                kind,
+                username: "user".to_string(),
+                token_sha256: TokenDigest::sha256(b"token"),
+                client_version: "1.0.1".to_string(),
+                build_id: "debug-build".to_string(),
+                process_nonce: "process-nonce".to_string(),
+                session_id: "signed-session".to_string(),
+                sequence,
+                issued_at: 1_800_000_000,
+                expires_at: 1_800_000_300,
+            };
+            let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+            let signature = URL_SAFE_NO_PAD.encode(signing_key.sign(payload.as_bytes()).to_bytes());
+            verify_signed_lease(
+                &SignedEnvelope {
+                    lease_payload: payload,
+                    lease_signature: signature,
+                },
+                &signing_key.verifying_key(),
+            )
+            .unwrap()
+        };
+
+        let login = make_verified(LeaseKind::Login, 1);
+        let mut lease = accept_login_lease(&login, &binding, 1_800_000_001).unwrap();
+        for next in 2..=sequence {
+            let heartbeat = make_verified(LeaseKind::Heartbeat, next);
+            lease = match classify_heartbeat_lease(
+                &heartbeat,
+                &binding,
+                lease.sequence(),
+                1_800_000_001,
+            ) {
+                HeartbeatDecision::Continue(lease) => lease,
+                HeartbeatDecision::ExitPending(reason) => panic!("fixture rejected: {reason:?}"),
+            };
+        }
+        lease
+    }
+
+    #[test]
+    fn verified_activation_publishes_security_state_with_the_artifact_epoch() {
+        let scope = SessionCapabilityScope::new();
+
+        let epoch = scope.activate_verified("user".to_string(), verified_lease(1));
+        let security = scope
+            .security()
+            .expect("verified session should be visible");
+
+        assert_eq!(security.epoch, epoch.epoch);
+        assert_eq!(security.username, "user");
+        assert_eq!(security.lease.session_id(), "signed-session");
+        assert_eq!(security.lease.sequence(), 1);
+    }
+
+    #[test]
+    fn heartbeat_refresh_is_atomic_and_rejection_preserves_the_previous_sequence() {
+        let scope = SessionCapabilityScope::new();
+        let epoch = scope.activate_verified("user".to_string(), verified_lease(1));
+
+        scope
+            .refresh_verified(epoch, 1, verified_lease(2))
+            .expect("current signed heartbeat should refresh");
+        let rejected = scope.refresh_verified(epoch, 1, verified_lease(3));
+        let security = scope
+            .security()
+            .expect("rejection must preserve capability");
+
+        assert!(rejected.is_err());
+        assert_eq!(security.lease.sequence(), 2);
+        assert!(scope.is_current(epoch));
+    }
 
     #[test]
     fn activation_exposes_only_the_current_epoch() {

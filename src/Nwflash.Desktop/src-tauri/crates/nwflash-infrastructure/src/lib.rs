@@ -18,16 +18,17 @@ pub mod resource_downloader;
 pub mod root_patch;
 pub mod root_resources;
 pub mod scrcpy_provisioner;
+mod session_security;
 pub mod vendor_boot;
 pub mod version_client;
 pub mod vivo_firmware;
 
 pub use api_client::{
     CloudflareClient, CloudflareError, CloudflareResult, HeartbeatResult, LoginRequest,
-    LoginResult, OnlineSession, OperationAuthorization, RomResolveResponse, UsageLogUploadResponse,
-    DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
+    LoginResult, OnlineSession, OperationAuthorization, RomResolveResponse, UpdateRequiredInfo,
+    UsageLogUploadResponse, DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
 };
-pub use auth::{AuthService, AuthSession};
+pub use auth::{AuthService, AuthSession, HeartbeatAdmission};
 pub use embedded_assets::{wipe_data_size_bytes, write_wipe_data_image, EmbeddedAssetError};
 pub use firmware_extract::{
     FirmwareExtractionError, FirmwareFormat, FirmwareFormatDetector,
@@ -72,6 +73,7 @@ pub use root_resources::{
     VivoRootToolResource,
 };
 pub use scrcpy_provisioner::{ScrcpyProvisionError, ScrcpyProvisioner};
+pub use session_security::{ProcessIdentity, SecretToken};
 pub use vendor_boot::resolve_vendor_boot_module_directories;
 pub use version_client::{VersionCheckResult, VersionClient};
 pub use vivo_firmware::{

@@ -75,7 +75,6 @@ const setupInvokeMocks = () => {
 
     if (command === 'auth_login') {
       return {
-        token: 'jwt',
         username: 'admin',
         name: '管理员',
       };
@@ -166,6 +165,45 @@ describe('登录态界面', () => {
     expect(loginButton.disabled).toBe(true);
   });
 
+  test('停止的签名会话不能仅凭 has_token 恢复主界面', async () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'version_check') {
+        return {
+          latest: '2.0.0',
+          min_version: '1.0.0',
+          download_url: null,
+          update_required: false,
+          force_update: false,
+        };
+      }
+      if (command === 'session_state') {
+        return {
+          has_token: true,
+          healthy: false,
+          running: false,
+          session_id: 'signed-session',
+        };
+      }
+      if (command === 'auth_validate_token') {
+        return '不应恢复的用户';
+      }
+      return {};
+    });
+
+    flushSync(() => root.render(<App />));
+    await waitUntil(
+      () => invokeMock.mock.calls.some(([command]) => command === 'session_state'),
+    );
+    await flushPromises();
+    await flushPromises();
+
+    expect(host.querySelector('.nw-shell')).toBeNull();
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === 'auth_validate_token'),
+    ).toBe(false);
+  });
+
   test('启动版本检查命中更新要求时阻止登录并提示更新', async () => {
     const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
     invokeMock.mockImplementation(async (command: string) => {
@@ -239,7 +277,7 @@ describe('登录态界面', () => {
         return { has_token: false, healthy: false, running: false, session_id: null };
       }
       if (command === 'auth_login') {
-        return { token: 'jwt', username: 'admin', name: '管理员' };
+        return { username: 'admin', name: '管理员' };
       }
       if (command === 'resource_inventory') {
         return [
@@ -266,9 +304,7 @@ describe('登录态界面', () => {
       () => host.querySelector('[role="dialog"][aria-label="内置组件检查"]') !== null,
     );
     let commands = invokeMock.mock.calls.map(([command]) => command);
-    expect(commands).toContain('session_start');
-    const sessionStartCall = invokeMock.mock.calls.find(([command]) => command === 'session_start');
-    expect(sessionStartCall?.[1]).toEqual({ sessionId: expect.any(String) });
+    expect(commands).not.toContain('session_start');
     expect(commands).toContain('resource_inventory');
     expect(commands).not.toContain('software_status');
 
@@ -280,6 +316,53 @@ describe('登录态界面', () => {
     commands = invokeMock.mock.calls.map(([command]) => command);
     expect(commands).toContain('software_status');
     expect(host.textContent).toContain('缺少手机 USB 驱动');
+  });
+
+  test('登录 invoke 启动后立即清空密码且失败时保持清空', async () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    let rejectLogin: ((reason: unknown) => void) | undefined;
+    const deferredLogin = new Promise<never>((_resolve, reject) => {
+      rejectLogin = reject;
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'version_check') {
+        return {
+          latest: '1.0.1',
+          min_version: '1.0.1',
+          download_url: null,
+          update_required: false,
+          force_update: false,
+        };
+      }
+      if (command === 'session_state') {
+        return { has_token: false, healthy: false, running: false, session_id: null };
+      }
+      if (command === 'auth_login') {
+        return deferredLogin;
+      }
+      return {};
+    });
+
+    flushSync(() => root.render(<App />));
+    await waitUntil(() => host.querySelector('[aria-label="账号"]') !== null);
+
+    setInputValue(host.querySelector('[aria-label="账号"]') as HTMLInputElement, 'test');
+    setInputValue(host.querySelector('[aria-label="密码"]') as HTMLInputElement, 'one-use-secret');
+    await waitUntil(
+      () => !(host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).disabled,
+    );
+    (host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).click();
+
+    await waitUntil(
+      () => invokeMock.mock.calls.some(([command]) => command === 'auth_login'),
+    );
+    const loginCall = invokeMock.mock.calls.find(([command]) => command === 'auth_login');
+    expect(loginCall?.[1]).toEqual({ username: 'test', password: 'one-use-secret' });
+    expect((host.querySelector('[aria-label="密码"]') as HTMLInputElement).value).toBe('');
+
+    rejectLogin?.('登录失败');
+    await waitUntil(() => host.querySelector('.nw-login-notice')?.textContent === '登录失败');
+    expect((host.querySelector('[aria-label="密码"]') as HTMLInputElement).value).toBe('');
   });
 
   test('Rust 返回字符串错误时显示实际登录错误而不是伪装成密码错误', async () => {

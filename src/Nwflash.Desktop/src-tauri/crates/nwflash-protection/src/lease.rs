@@ -387,6 +387,9 @@ fn validate_lease(
     if claims.expires_at <= now {
         return Err(LeaseRejection::Expired);
     }
+    if expected_kind == LeaseKind::Login && claims.sequence != 1 {
+        return Err(LeaseRejection::SequenceRollback);
+    }
     if previous_sequence.is_some_and(|sequence| claims.sequence <= sequence) {
         return Err(LeaseRejection::SequenceRollback);
     }

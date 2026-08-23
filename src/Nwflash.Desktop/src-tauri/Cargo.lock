@@ -2703,12 +2703,17 @@ dependencies = [
 name = "nwflash-application"
 version = "1.0.1"
 dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
  "flate2",
  "futures",
  "nwflash-domain",
  "nwflash-infrastructure",
+ "nwflash-protection",
  "nwflash-windows",
+ "rand_core 0.6.4",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -2753,6 +2758,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "nwflash-domain",
+ "nwflash-protection",
  "rand_core 0.6.4",
  "rcgen",
  "reqwest 0.12.28",
@@ -2772,6 +2778,7 @@ dependencies = [
  "windows-sys 0.59.0",
  "wiremock",
  "x509-parser",
+ "zeroize",
  "zip 4.6.1",
  "zstd",
 ]
@@ -2794,11 +2801,15 @@ dependencies = [
 name = "nwflash-tauri"
 version = "1.0.1"
 dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
  "futures",
  "nwflash-application",
  "nwflash-domain",
  "nwflash-infrastructure",
+ "nwflash-protection",
  "nwflash-windows",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2808,6 +2819,8 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tokio",
  "tokio-util",
+ "wiremock",
+ "zeroize",
  "zip 4.6.1",
 ]
 

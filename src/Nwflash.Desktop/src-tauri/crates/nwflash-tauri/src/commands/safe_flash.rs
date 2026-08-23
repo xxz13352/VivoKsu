@@ -18,6 +18,7 @@ use nwflash_application::{
     SafeFlashService, SafeFlashSource,
 };
 use nwflash_domain::{DomainError, OperationKind, SafeFlashSlotMode};
+use nwflash_infrastructure::SecretToken;
 
 use crate::commands::device_identity::read_online_ota_identity;
 use crate::{
@@ -449,13 +450,14 @@ fn cleanup_safe_flash_staging(
     }
 }
 
-pub(crate) fn session_token(state: &AppState) -> Result<String, String> {
+pub(crate) fn session_token(state: &AppState) -> Result<SecretToken, String> {
     state
         .session_token
         .read()
         .expect("session token lock should not be poisoned")
-        .clone()
+        .as_ref()
         .filter(|token| !token.is_empty())
+        .map(SecretToken::request_scope)
         .ok_or_else(|| "未登录，无法执行线刷。".to_string())
 }
 
@@ -503,7 +505,7 @@ pub async fn safe_flash_prepare_online(
                 let build_options = secure_options(serial, options);
                 context.report_stage("正在获取在线 OTA 信息");
                 let rom = client
-                    .resolve_rom(&token, &pd, &version)
+                    .resolve_rom(token.as_str(), &pd, &version)
                     .await
                     .map_err(|error| {
                         DomainError::RemoteApi(format!(
@@ -1198,7 +1200,8 @@ mod tests {
         *state
             .session_token
             .write()
-            .expect("session token lock should not be poisoned") = Some("test-token".to_string());
+            .expect("session token lock should not be poisoned") =
+            Some(SecretToken::new("test-token".to_string()));
         let session_id = "safe-denied-admission".to_string();
         state
             .safe_flash_runtime
@@ -1302,7 +1305,8 @@ mod tests {
         *state
             .session_token
             .write()
-            .expect("session token lock should not be poisoned") = Some("test-token".to_string());
+            .expect("session token lock should not be poisoned") =
+            Some(SecretToken::new("test-token".to_string()));
         state.device_runtime.apply_snapshot(
             DeviceSnapshot {
                 connection_state: DeviceConnectionState::FastbootConnected,
@@ -1346,7 +1350,8 @@ mod tests {
         *state
             .session_token
             .write()
-            .expect("session token lock should not be poisoned") = Some("test-token".to_string());
+            .expect("session token lock should not be poisoned") =
+            Some(SecretToken::new("test-token".to_string()));
         state.device_runtime.apply_snapshot(
             DeviceSnapshot {
                 connection_state: DeviceConnectionState::FastbootConnected,

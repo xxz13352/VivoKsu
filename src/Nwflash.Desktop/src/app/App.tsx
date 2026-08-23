@@ -184,9 +184,6 @@ export const App: FC = () => {
     (currentPage === 'Software' || currentPage === 'Overview' || currentPage === 'FileManager' || currentPage === 'Mirror' || currentPage === 'QuickFlash' || currentPage === 'LineFlash' || currentPage === 'FirmwareExtract' || currentPage === 'Root' || currentPage === 'Online' || currentPage === 'SafeFlash' || currentPage === 'OperationLog') &&
     !sessionNotice;
 
-  const generateSessionId = () =>
-    `session-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
-
   const upsertOperation = useCallback((snapshot: OperationSnapshotPayload) => {
     setOperationSnapshot(snapshot);
     const kind = resolveBusyKind(snapshot);
@@ -238,7 +235,7 @@ export const App: FC = () => {
       if (startupCancelledRef.current) {
         return;
       }
-      if (!sessionState.has_token) {
+      if (!sessionState.has_token || !sessionState.running) {
         setIsLoggedIn(false);
         setAccountName('未登录');
         return;
@@ -262,12 +259,6 @@ export const App: FC = () => {
 
       setIsLoggedIn(true);
       setAccountName(validated);
-
-      if (!sessionState.running) {
-        await invoke<void>('session_start', {
-          sessionId: sessionState.session_id || generateSessionId(),
-        });
-      }
 
       if (startupCancelledRef.current || sessionUpdateRequiredRef.current) {
         setIsLoggedIn(false);
@@ -455,17 +446,15 @@ export const App: FC = () => {
     startupCancelledRef.current = true;
     setIsBusyAction(true);
     setSessionNotice('');
+    const loginPayload = {
+      username: loginUsername,
+      password: loginPassword,
+    };
+    setLoginPassword('');
     try {
-      const response = await invoke<AuthSessionPayload>('auth_login', {
-        username: loginUsername,
-        password: loginPassword,
-      });
+      const response = await invoke<AuthSessionPayload>('auth_login', loginPayload);
       setAccountName(response.name || response.username || 'admin');
       setIsLoggedIn(true);
-      await invoke<void>('session_start', {
-        sessionId: generateSessionId(),
-      });
-      setLoginPassword('');
       await runPostLoginReadiness();
     } catch (error) {
       const updateDetails = updateRequiredDetailsFromError(error);

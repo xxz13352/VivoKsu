@@ -2,11 +2,16 @@ use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
 
 use nwflash_domain::UsageLogEntry;
 use nwflash_infrastructure::{
-    CloudflareClient, CloudflareError, IntegrityFailure, DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
+    CloudflareClient, CloudflareError, IntegrityFailure, ProcessIdentity, DEFAULT_APP_VERSION,
+    DEFAULT_BASE_URL,
 };
 
 fn create_client(base_url: &str) -> CloudflareClient {
     CloudflareClient::new_injected(base_url, DEFAULT_APP_VERSION)
+}
+
+fn process_identity() -> ProcessIdentity {
+    ProcessIdentity::new_injected("build-contract", "nonce-contract").unwrap()
 }
 
 #[test]
@@ -62,7 +67,7 @@ async fn login_response_carries_both_signed_lease_strings_without_admission() {
         .await;
 
     let result = api
-        .login("demo", "password")
+        .login("demo", "password", &process_identity(), "session")
         .await
         .expect("login response should deserialize");
     assert_eq!(result.lease_payload, "payload-ascii");
@@ -84,7 +89,7 @@ async fn heartbeat_response_carries_both_signed_lease_strings_without_admission(
         .await;
 
     let result = api
-        .heartbeat("tok", "session", true)
+        .heartbeat("tok", &process_identity(), "session", 1, true)
         .await
         .expect("heartbeat response should deserialize");
     assert_eq!(result.lease_payload, "heartbeat-payload");
@@ -217,7 +222,7 @@ async fn resolve_async_maps_insufficient_credits_status() {
 }
 
 #[tokio::test]
-async fn heartbeat_posts_session_id_client_version_and_active_flag() {
+async fn active_heartbeat_posts_the_complete_signed_session_binding() {
     let mock_server = MockServer::start().await;
     let base_url = mock_server.uri();
     let api = create_client(&base_url);
@@ -228,8 +233,11 @@ async fn heartbeat_posts_session_id_client_version_and_active_flag() {
         .and(header("Authorization", format!("Bearer {token}")))
         .and(header("X-Nwflash-Version", DEFAULT_APP_VERSION))
         .and(body_json(serde_json::json!({
-            "sessionId": "sess-abc",
-            "clientVersion": DEFAULT_APP_VERSION,
+            "session_id": "sess-abc",
+            "client_version": DEFAULT_APP_VERSION,
+            "build_id": "build-contract",
+            "process_nonce": "nonce-contract",
+            "sequence": 1,
             "active": true
         })))
         .respond_with(
@@ -239,7 +247,7 @@ async fn heartbeat_posts_session_id_client_version_and_active_flag() {
         .await;
 
     let heartbeat = api
-        .heartbeat(token, "sess-abc", true)
+        .heartbeat(token, &process_identity(), "sess-abc", 1, true)
         .await
         .expect("heartbeat should parse response");
     assert!(!heartbeat.force_exit);
@@ -261,11 +269,33 @@ async fn heartbeat_parses_force_exit_reason() {
         .await;
 
     let heartbeat = api
-        .heartbeat("tok", "sess-abc", true)
+        .heartbeat("tok", &process_identity(), "sess-abc", 1, true)
         .await
         .expect("heartbeat should parse forced exit");
     assert!(heartbeat.force_exit);
     assert_eq!(heartbeat.reason.as_deref(), Some("违规下线"));
+}
+
+#[tokio::test]
+async fn goodbye_posts_only_the_authenticated_session_id_and_inactive_flag() {
+    let server = MockServer::start().await;
+    let api = create_client(&server.uri());
+    Mock::given(method("POST"))
+        .and(path("/api/heartbeat"))
+        .and(header("Authorization", "Bearer tok"))
+        .and(body_json(serde_json::json!({
+            "session_id": "sess-abc",
+            "active": false
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"force_exit": false})),
+        )
+        .mount(&server)
+        .await;
+
+    api.heartbeat("tok", &process_identity(), "sess-abc", 9, false)
+        .await
+        .expect("authenticated goodbye should parse");
 }
 
 #[tokio::test]
@@ -287,7 +317,7 @@ async fn heartbeat_maps_426_to_update_required() {
         .await;
 
     let err = api
-        .heartbeat("tok", "sess-abc", true)
+        .heartbeat("tok", &process_identity(), "sess-abc", 1, true)
         .await
         .expect_err("426 should map to update required");
     match err {
@@ -522,7 +552,7 @@ async fn heartbeat_maps_403_to_api_error_before_json_parse() {
         .await;
 
     let err = api
-        .heartbeat("tok", "sess-abc", true)
+        .heartbeat("tok", &process_identity(), "sess-abc", 1, true)
         .await
         .expect_err("forbidden html should map to api error");
     assert_eq!(err.status_code(), Some(403));
