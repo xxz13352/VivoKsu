@@ -144,15 +144,23 @@ impl IntegrityReporter {
             return IntegrityReportOutcome::SkippedSameChannelSpkiMismatch;
         }
 
-        let token = authenticated
-            .then(|| {
-                self.session_token
+        let token = if authenticated {
+            let session_token = self.session_token.clone();
+            let capture = tokio::task::spawn_blocking(move || {
+                session_token
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .as_ref()
                     .map(SecretToken::request_scope)
-            })
-            .flatten();
+            });
+            match timeout_at(deadline, capture).await {
+                Ok(Ok(token)) => token,
+                Ok(Err(_)) => return IntegrityReportOutcome::Integrity,
+                Err(_) => return IntegrityReportOutcome::TimedOut,
+            }
+        } else {
+            None
+        };
         let request = IntegrityReportRequest {
             event_id,
             phase,
@@ -365,6 +373,54 @@ mod tests {
             .await;
 
         assert_eq!(outcome, IntegrityReportOutcome::TimedOut);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn contended_token_lock_cannot_extend_report_deadline() {
+        let transport = RecordingTransport::new(TransportBehavior::Accepted);
+        let calls = transport.calls.clone();
+        let token = Arc::new(RwLock::new(Some(SecretToken::new(
+            "contended-token".to_string(),
+        ))));
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let lock_owner = {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                let _guard = token.write().unwrap();
+                locked_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            })
+        };
+        locked_rx.recv().unwrap();
+        let reporter = IntegrityReporter::new_with_transport_and_marker(
+            Arc::new(transport),
+            token,
+            "1.0.1".to_string(),
+            "build-test".to_string(),
+            None,
+        );
+        let report = tokio::spawn(async move {
+            reporter
+                .report_once(
+                    IntegrityReportPhase::Heartbeat,
+                    IntegrityReportReason::LeaseSignatureInvalid,
+                    Instant::now() + Duration::from_millis(50),
+                )
+                .await
+        });
+
+        let result = tokio::time::timeout(Duration::from_millis(500), report).await;
+        release_tx.send(()).unwrap();
+        lock_owner.join().unwrap();
+
+        assert_eq!(
+            result
+                .expect("token lock contention must remain deadline-bounded")
+                .unwrap(),
+            IntegrityReportOutcome::TimedOut
+        );
         assert!(calls.lock().unwrap().is_empty());
     }
 

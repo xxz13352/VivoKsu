@@ -14,6 +14,7 @@ use tokio::{
 };
 
 pub const TAMPER_CLOSEOUT_DEADLINE: Duration = Duration::from_millis(750);
+const MANDATORY_CLEANUP_RESERVE: Duration = Duration::from_millis(25);
 const DELAYED_CLOSEOUT_DEADLINE: Duration = Duration::from_secs(3);
 pub const PROTECTED_EXIT_CODE: i32 = 70;
 
@@ -243,6 +244,9 @@ impl ExitSupervisorHandle {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.terminator_called {
+            return ExitRequestDisposition::AlreadyTerminating;
+        }
         let generation_matches = request
             .generation
             .as_deref()
@@ -361,29 +365,50 @@ impl ExitSupervisorWorker {
         };
         let _ = self.control.coordinator.begin_terminating(&idle);
 
-        let final_deadline = loop {
+        let mut tamper_handled = false;
+        let mut closeout_exhausted = false;
+        let mut final_deadline = loop {
             let budget = match accepted.request.mode {
                 ExitMode::Delayed => DELAYED_CLOSEOUT_DEADLINE,
                 ExitMode::ImmediateTamper => TAMPER_CLOSEOUT_DEADLINE,
             };
-            let deadline = Instant::now() + budget;
+            let termination_deadline = Instant::now() + budget;
+            let closeout_deadline = if accepted.request.mode == ExitMode::ImmediateTamper {
+                termination_deadline - MANDATORY_CLEANUP_RESERVE
+            } else {
+                termination_deadline
+            };
             let closeout = AssertUnwindSafe(self.closeout.closeout(
                 accepted.request.clone(),
-                deadline,
+                closeout_deadline,
                 accepted.authenticated_report,
             ))
             .catch_unwind();
 
             if accepted.request.mode == ExitMode::ImmediateTamper {
-                let _ = timeout_at(deadline, closeout).await;
-                break deadline;
+                closeout_exhausted = timeout_at(closeout_deadline, closeout).await.is_err();
+                tamper_handled = true;
+                break termination_deadline;
             }
 
             tokio::select! {
-                _ = timeout_at(deadline, closeout) => break deadline,
+                _ = timeout_at(closeout_deadline, closeout) => {
+                    let upgraded = self.control.state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .accepted
+                        .clone();
+                    if let Some(upgraded) = upgraded {
+                        if upgraded.request.mode == ExitMode::ImmediateTamper {
+                            accepted = upgraded;
+                            continue;
+                        }
+                    }
+                    break termination_deadline;
+                },
                 signal = self.receiver.recv() => {
                     if signal.is_none() {
-                        break deadline;
+                        break termination_deadline;
                     }
                     let upgraded = self.control.state
                         .lock()
@@ -398,25 +423,86 @@ impl ExitSupervisorWorker {
         };
 
         let cleanup = self.cleanup.clone();
-        let paths = panic::catch_unwind(AssertUnwindSafe(|| {
-            cleanup.revoke_capability_and_clear_token(&idle)
-        }))
-        .unwrap_or_default();
-        drop(idle);
+        let mut cleanup_task = tokio::task::spawn_blocking(move || {
+            let paths = panic::catch_unwind(AssertUnwindSafe(|| {
+                cleanup.revoke_capability_and_clear_token(&idle)
+            }))
+            .unwrap_or_default();
+            drop(idle);
+            cleanup.cleanup_files(paths);
+        });
 
-        let cleanup_task = tokio::task::spawn_blocking(move || cleanup.cleanup_files(paths));
-        let _ = timeout_at(final_deadline, cleanup_task).await;
-
-        {
-            let mut state = self
-                .control
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.terminator_called {
-                return;
+        let cleanup_completed = loop {
+            tokio::select! {
+                _ = &mut cleanup_task => break true,
+                signal = self.receiver.recv() => {
+                    if signal.is_none() || tamper_handled {
+                        continue;
+                    }
+                    let upgraded = self.control.state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .accepted
+                        .clone();
+                    if let Some(upgraded) = upgraded {
+                        if upgraded.request.mode == ExitMode::ImmediateTamper {
+                            let termination_deadline = Instant::now() + TAMPER_CLOSEOUT_DEADLINE;
+                            let closeout_deadline =
+                                termination_deadline - MANDATORY_CLEANUP_RESERVE;
+                            let closeout = AssertUnwindSafe(self.closeout.closeout(
+                                upgraded.request,
+                                closeout_deadline,
+                                upgraded.authenticated_report,
+                            ))
+                            .catch_unwind();
+                            closeout_exhausted =
+                                timeout_at(closeout_deadline, closeout).await.is_err();
+                            tamper_handled = true;
+                            final_deadline = termination_deadline;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(final_deadline) => break false,
             }
-            state.terminator_called = true;
+        };
+
+        loop {
+            let unhandled_tamper = {
+                let mut state = self
+                    .control
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.terminator_called {
+                    return;
+                }
+                let unhandled_tamper = (!tamper_handled)
+                    .then(|| state.accepted.clone())
+                    .flatten()
+                    .filter(|accepted| accepted.request.mode == ExitMode::ImmediateTamper);
+                if unhandled_tamper.is_none() {
+                    state.terminator_called = true;
+                }
+                unhandled_tamper
+            };
+            if let Some(upgraded) = unhandled_tamper {
+                let termination_deadline = Instant::now() + TAMPER_CLOSEOUT_DEADLINE;
+                let closeout_deadline = termination_deadline - MANDATORY_CLEANUP_RESERVE;
+                let closeout = AssertUnwindSafe(self.closeout.closeout(
+                    upgraded.request,
+                    closeout_deadline,
+                    upgraded.authenticated_report,
+                ))
+                .catch_unwind();
+                closeout_exhausted = timeout_at(closeout_deadline, closeout).await.is_err();
+                final_deadline = termination_deadline;
+                tamper_handled = true;
+                continue;
+            }
+            break;
+        }
+        if cleanup_completed && closeout_exhausted && Instant::now() < final_deadline {
+            tokio::time::sleep_until(final_deadline).await;
         }
         self.terminator.terminate(PROTECTED_EXIT_CODE);
     }
@@ -485,6 +571,28 @@ mod tests {
         events: Arc<Mutex<Vec<&'static str>>>,
         started: Arc<Notify>,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    struct BlockingMandatoryCleanup {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        started: Arc<Notify>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ExitCleanup for BlockingMandatoryCleanup {
+        fn revoke_capability_and_clear_token(
+            &self,
+            _idle: &nwflash_application::OperationIdleLease,
+        ) -> Vec<std::path::PathBuf> {
+            self.started.notify_waiters();
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2));
+            self.events.lock().unwrap().push("cleanup");
+            Vec::new()
+        }
     }
 
     impl ExitCleanup for BlockingFileCleanup {
@@ -904,5 +1012,96 @@ mod tests {
             ["tamper-closeout", "cleanup", "terminate"]
         );
         release_tx.send(()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tamper_after_delayed_closeout_completion_during_cleanup_is_reported() {
+        let coordinator = OperationCoordinator::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cleanup_started = Arc::new(Notify::new());
+        let terminated = Arc::new(Notify::new());
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (handle, worker) = ExitSupervisor::build(
+            coordinator,
+            Arc::new(RecordingCloseout {
+                events: events.clone(),
+                pending: false,
+            }),
+            Arc::new(BlockingMandatoryCleanup {
+                events: events.clone(),
+                started: cleanup_started.clone(),
+                release: Mutex::new(release_rx),
+            }),
+            Arc::new(RecordingTerminator {
+                events: events.clone(),
+                called: terminated.clone(),
+            }),
+        );
+        tokio::spawn(worker.run());
+        handle
+            .install_generation("generation-a".to_string())
+            .unwrap();
+        let cleanup_wait = cleanup_started.notified();
+        let termination_wait = terminated.notified();
+
+        assert_eq!(
+            handle.request(delayed("generation-a")),
+            ExitRequestDisposition::Accepted
+        );
+        tokio::time::timeout(Duration::from_secs(1), cleanup_wait)
+            .await
+            .expect("mandatory cleanup should start after delayed closeout completes");
+        assert_eq!(
+            handle.request(tamper()),
+            ExitRequestDisposition::EscalatedToTamper
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), termination_wait)
+            .await
+            .expect("late tamper should be reported before termination");
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.first(), Some(&"delayed-closeout"));
+        assert_eq!(events.last(), Some(&"terminate"));
+        assert!(events.contains(&"tamper-closeout"));
+        assert!(events.contains(&"cleanup"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_mandatory_revocation_cannot_extend_tamper_deadline() {
+        let coordinator = OperationCoordinator::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let cleanup_started = Arc::new(Notify::new());
+        let terminated = Arc::new(Notify::new());
+        let (_release_tx, release_rx) = std::sync::mpsc::channel();
+        let (handle, worker) = ExitSupervisor::build(
+            coordinator,
+            Arc::new(RecordingCloseout {
+                events: events.clone(),
+                pending: false,
+            }),
+            Arc::new(BlockingMandatoryCleanup {
+                events: events.clone(),
+                started: cleanup_started.clone(),
+                release: Mutex::new(release_rx),
+            }),
+            Arc::new(RecordingTerminator {
+                events,
+                called: terminated.clone(),
+            }),
+        );
+        tokio::spawn(worker.run());
+        let cleanup_wait = cleanup_started.notified();
+        let termination_wait = terminated.notified();
+        let started = Instant::now();
+
+        assert_eq!(handle.request(tamper()), ExitRequestDisposition::Accepted);
+        tokio::time::timeout(Duration::from_secs(1), cleanup_wait)
+            .await
+            .expect("mandatory revocation should start");
+        tokio::time::timeout(Duration::from_secs(1), termination_wait)
+            .await
+            .expect("contended mandatory revocation must not suppress termination");
+        assert!(started.elapsed() < Duration::from_millis(900));
     }
 }
