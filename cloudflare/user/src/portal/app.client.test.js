@@ -354,4 +354,27 @@ describe('Personal Ops portal', () => {
     expect(Number.parseFloat(window.getComputedStyle(confirm).minHeight)).toBeGreaterThanOrEqual(44);
     expect(window.getComputedStyle(app).gridTemplateColumns).toBe('1fr');
   });
+
+  it('keeps direct test imports inert and bootstraps the portal in a browser after DOM readiness', async () => {
+    const originalFetch = window.fetch;
+    const processDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'process');
+    window.fetch = fetchQueue.fetch;
+    try {
+      await import('./app.client.js?test-import');
+      await flush();
+      expect(fetchQueue.calls).toHaveLength(0);
+
+      fetchQueue.respond('/api/me', { loggedIn: true, username: 'alice', name: 'Alice', online: 0 });
+      fetchQueue.respond('/api/me/overview', { total: 0, operations: 0, rom: 0, successes: 0, failures: 0, activeSessions: 0 });
+      Object.defineProperty(globalThis, 'process', { configurable: true, writable: true, value: undefined });
+      await import('./app.client.js?browser-bootstrap');
+      await flush();
+      expect(document.querySelector('[data-app]').hidden).toBe(false);
+      expect(fetchQueue.calls.map(({ url }) => url.pathname)).toEqual(['/api/me', '/api/me/overview']);
+    } finally {
+      window.fetch = originalFetch;
+      if (processDescriptor) Object.defineProperty(globalThis, 'process', processDescriptor);
+      else delete globalThis.process;
+    }
+  });
 });
