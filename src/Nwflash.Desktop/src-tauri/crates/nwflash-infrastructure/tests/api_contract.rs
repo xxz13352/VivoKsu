@@ -3,8 +3,9 @@ use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
 
 use nwflash_domain::UsageLogEntry;
 use nwflash_infrastructure::{
-    CloudflareClient, CloudflareError, IntegrityFailure, ProcessIdentity, DEFAULT_APP_VERSION,
-    DEFAULT_BASE_URL,
+    CloudflareClient, CloudflareError, IntegrityFailure, IntegrityReportPhase,
+    IntegrityReportReason, IntegrityReportRequest, ProcessIdentity, SecretToken,
+    DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
 };
 
 fn create_client(base_url: &str) -> CloudflareClient {
@@ -32,6 +33,117 @@ fn authorization_header_is_fallible_sensitive_and_debug_redacted() {
 
 fn process_identity() -> ProcessIdentity {
     ProcessIdentity::new_injected("build-contract", "nonce-contract").unwrap()
+}
+
+fn integrity_report_request() -> IntegrityReportRequest {
+    IntegrityReportRequest {
+        event_id: "integrity-1787444800000-1".to_string(),
+        phase: IntegrityReportPhase::Heartbeat,
+        reason: IntegrityReportReason::LeaseSignatureInvalid,
+        client_version: DEFAULT_APP_VERSION.to_string(),
+        build_id: "build-contract".to_string(),
+        occurred_at: 1_787_444_800,
+    }
+}
+
+#[tokio::test]
+async fn integrity_report_posts_exact_six_field_anonymous_body_once() {
+    let server = MockServer::start().await;
+    let api = create_client(&server.uri());
+    Mock::given(method("POST"))
+        .and(path("/api/integrity/report"))
+        .and(header("X-Nwflash-Version", DEFAULT_APP_VERSION))
+        .and(body_json(serde_json::json!({
+            "event_id": "integrity-1787444800000-1",
+            "phase": "heartbeat",
+            "reason": "lease_signature_invalid",
+            "client_version": DEFAULT_APP_VERSION,
+            "build_id": "build-contract",
+            "occurred_at": 1787444800
+        })))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    api.report_integrity(None, &integrity_report_request())
+        .await
+        .expect("202 should accept an anonymous report");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("request capture should succeed");
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].headers.contains_key(AUTHORIZATION));
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body.as_object().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn integrity_report_uses_one_sensitive_bearer_without_serializing_it() {
+    let server = MockServer::start().await;
+    let api = create_client(&server.uri());
+    let token = SecretToken::new("report-bearer-secret".to_string());
+    Mock::given(method("POST"))
+        .and(path("/api/integrity/report"))
+        .and(header("Authorization", "Bearer report-bearer-secret"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    api.report_integrity(Some(&token), &integrity_report_request())
+        .await
+        .expect("every 2xx response should be accepted");
+
+    let body = serde_json::to_string(&integrity_report_request()).unwrap();
+    assert!(!body.contains("report-bearer-secret"));
+    for prohibited in [
+        "token", "password", "path", "url", "serial", "output", "detail",
+    ] {
+        assert!(!body.contains(prohibited));
+    }
+}
+
+#[tokio::test]
+async fn invalid_integrity_report_is_rejected_before_any_http_request() {
+    let server = MockServer::start().await;
+    let api = create_client(&server.uri());
+    let mut invalid = integrity_report_request();
+    invalid.event_id = "contains spaces".to_string();
+
+    let error = api
+        .report_integrity(None, &invalid)
+        .await
+        .expect_err("invalid event identifiers must fail locally");
+
+    assert!(matches!(error, CloudflareError::InvalidInput(_)));
+    assert!(server
+        .received_requests()
+        .await
+        .expect("request capture should succeed")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn integrity_report_http_failure_is_redacted_and_not_retried() {
+    let server = MockServer::start().await;
+    let api = create_client(&server.uri());
+    Mock::given(method("POST"))
+        .and(path("/api/integrity/report"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("server-response-secret"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = api
+        .report_integrity(None, &integrity_report_request())
+        .await
+        .expect_err("401 should be a terminal report outcome");
+
+    assert_eq!(error.status_code(), Some(401));
+    assert!(!format!("{error:?} {error}").contains("server-response-secret"));
 }
 
 #[test]

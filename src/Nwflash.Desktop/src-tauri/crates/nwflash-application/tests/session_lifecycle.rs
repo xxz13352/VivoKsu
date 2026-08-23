@@ -7,8 +7,8 @@ use std::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey};
 use nwflash_application::{
-    HeartbeatCallback, HeartbeatInput, SessionLifecycle, SessionLifecycleError,
-    SessionLifecycleSession,
+    HeartbeatCallback, HeartbeatInput, SessionIntegrityCallback, SessionLifecycle,
+    SessionLifecycleError, SessionLifecycleSession,
 };
 use nwflash_infrastructure::{
     CloudflareError, HeartbeatAdmission, IntegrityFailure, SecretToken, UpdateRequiredInfo,
@@ -29,6 +29,67 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after epoch")
         .as_secs() as i64
+}
+
+#[tokio::test]
+async fn local_heartbeat_integrity_failure_uses_the_typed_tamper_callback() {
+    let callback: HeartbeatCallback = Arc::new(|_input| {
+        Box::pin(async { Err(CloudflareError::Integrity(IntegrityFailure::LeaseSignature)) })
+    });
+    let (tamper_tx, mut tamper_rx) = mpsc::unbounded_channel();
+    let on_integrity: SessionIntegrityCallback = Arc::new(move |generation, failure| {
+        tamper_tx.send((generation, failure)).unwrap();
+    });
+    let lifecycle = SessionLifecycle::with_intervals_and_integrity(
+        callback,
+        None,
+        None,
+        Some(on_integrity),
+        Duration::from_millis(5),
+        Duration::from_millis(25),
+        Duration::from_millis(25),
+    );
+    lifecycle.start(lifecycle_session(1)).await.unwrap();
+
+    assert_eq!(
+        timeout(Duration::from_millis(150), tamper_rx.recv())
+            .await
+            .unwrap(),
+        Some((
+            "generation-test".to_string(),
+            IntegrityFailure::LeaseSignature
+        ))
+    );
+    assert_eq!(
+        lifecycle.generation().await.as_deref(),
+        Some("generation-test")
+    );
+}
+
+#[tokio::test]
+async fn exit_stop_bounds_pending_goodbye_and_clears_retained_session() {
+    let callback: HeartbeatCallback = Arc::new(|input| {
+        Box::pin(async move {
+            if input.active {
+                Ok(HeartbeatAdmission::Accepted(signed_lease(2)))
+            } else {
+                futures::future::pending().await
+            }
+        })
+    });
+    let lifecycle = short_lifecycle(callback, None, None);
+    lifecycle.start(lifecycle_session(1)).await.unwrap();
+
+    timeout(
+        Duration::from_millis(100),
+        lifecycle.stop_with_goodbye_timeout(Duration::from_millis(20)),
+    )
+    .await
+    .expect("exit closeout must honor the supplied goodbye timeout")
+    .expect("retained session should be cleared after timeout");
+
+    assert!(lifecycle.generation().await.is_none());
+    assert!(!lifecycle.is_running().await);
 }
 
 fn signed_lease(sequence: u64) -> SessionLease {

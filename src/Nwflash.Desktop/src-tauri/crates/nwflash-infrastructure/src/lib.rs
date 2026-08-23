@@ -24,9 +24,10 @@ pub mod version_client;
 pub mod vivo_firmware;
 
 pub use api_client::{
-    CloudflareClient, CloudflareError, CloudflareResult, HeartbeatResult, LoginRequest,
-    LoginResult, OnlineSession, OperationAuthorization, RomResolveResponse, UpdateRequiredInfo,
-    UsageLogUploadResponse, DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
+    CloudflareClient, CloudflareError, CloudflareResult, HeartbeatResult, IntegrityReportPhase,
+    IntegrityReportReason, IntegrityReportRequest, LoginRequest, LoginResult, OnlineSession,
+    OperationAuthorization, RomResolveResponse, UpdateRequiredInfo, UsageLogUploadResponse,
+    DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
 };
 pub use auth::{AuthService, AuthSession, HeartbeatAdmission};
 pub use embedded_assets::{wipe_data_size_bytes, write_wipe_data_image, EmbeddedAssetError};

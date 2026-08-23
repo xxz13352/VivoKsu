@@ -11,14 +11,14 @@ use std::{
 
 use futures::future::BoxFuture;
 use nwflash_infrastructure::{
-    CloudflareError, HeartbeatAdmission, SecretToken, UpdateRequiredInfo,
+    CloudflareError, HeartbeatAdmission, IntegrityFailure, SecretToken, UpdateRequiredInfo,
 };
 use nwflash_protection::SessionLease;
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, RwLock},
     task::JoinHandle,
-    time::{sleep, timeout},
+    time::{sleep, timeout, timeout_at, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -111,6 +111,7 @@ pub type HeartbeatCallback = Arc<
 >;
 pub type ForceExitCallback = Arc<dyn Fn(String, String) + Send + Sync>;
 pub type UpdateRequiredCallback = Arc<dyn Fn(String, UpdateRequiredInfo) + Send + Sync>;
+pub type SessionIntegrityCallback = Arc<dyn Fn(String, IntegrityFailure) + Send + Sync>;
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -143,6 +144,7 @@ pub struct SessionLifecycle {
     heartbeat_fn: HeartbeatCallback,
     on_force_exit: Option<ForceExitCallback>,
     on_update_required: Option<UpdateRequiredCallback>,
+    on_integrity_failure: Option<SessionIntegrityCallback>,
     heartbeat_interval: Duration,
     request_timeout: Duration,
     goodbye_timeout: Duration,
@@ -174,10 +176,32 @@ impl SessionLifecycle {
         request_timeout: Duration,
         goodbye_timeout: Duration,
     ) -> Self {
+        Self::with_intervals_and_integrity(
+            heartbeat_fn,
+            on_force_exit,
+            on_update_required,
+            None,
+            heartbeat_interval,
+            request_timeout,
+            goodbye_timeout,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_intervals_and_integrity(
+        heartbeat_fn: HeartbeatCallback,
+        on_force_exit: Option<ForceExitCallback>,
+        on_update_required: Option<UpdateRequiredCallback>,
+        on_integrity_failure: Option<SessionIntegrityCallback>,
+        heartbeat_interval: Duration,
+        request_timeout: Duration,
+        goodbye_timeout: Duration,
+    ) -> Self {
         Self {
             heartbeat_fn,
             on_force_exit,
             on_update_required,
+            on_integrity_failure,
             heartbeat_interval,
             request_timeout,
             goodbye_timeout,
@@ -253,20 +277,32 @@ impl SessionLifecycle {
 
     /// Explicit closeout used by logout/user stop and later by the Task 6 supervisor.
     pub async fn stop(&self) -> Result<(), SessionLifecycleError> {
+        self.stop_with_goodbye_timeout(self.goodbye_timeout).await
+    }
+
+    pub async fn stop_with_goodbye_timeout(
+        &self,
+        goodbye_timeout: Duration,
+    ) -> Result<(), SessionLifecycleError> {
         if self.state.session.read().await.is_none() {
             return Err(SessionLifecycleError::NotStarted);
         }
 
+        let deadline = Instant::now() + goodbye_timeout;
+
         if let Some(stop_token) = self.state.stop_token.lock().await.take() {
             stop_token.cancel();
         }
-        if let Some(handle) = self.state.running_task.lock().await.take() {
-            if !self.state.in_callback.load(Ordering::Acquire) {
+        if let Some(mut handle) = self.state.running_task.lock().await.take() {
+            if self.state.in_callback.load(Ordering::Acquire)
+                || timeout_at(deadline, &mut handle).await.is_err()
+            {
+                handle.abort();
                 let _ = handle.await;
             }
         }
 
-        self.send_goodbye().await;
+        self.send_goodbye_until(deadline).await;
         if let Some(mut session) = self.state.session.write().await.take() {
             session.token.zeroize();
         }
@@ -276,12 +312,15 @@ impl SessionLifecycle {
         Ok(())
     }
 
-    async fn send_goodbye(&self) {
+    async fn send_goodbye_until(&self, deadline: Instant) {
+        if deadline <= Instant::now() {
+            return;
+        }
         let Some(input) = self.heartbeat_input(false).await else {
             return;
         };
         let call = (self.heartbeat_fn)(input);
-        let _ = timeout(self.goodbye_timeout, call).await;
+        let _ = timeout_at(deadline, call).await;
     }
 
     async fn heartbeat_input(&self, active: bool) -> Option<HeartbeatInput> {
@@ -334,8 +373,7 @@ impl SessionLifecycle {
             Ok(Ok(HeartbeatAdmission::Accepted(next))) => {
                 if next.session_id() != previous_session_id || next.sequence() <= previous_sequence
                 {
-                    return self
-                        .terminal_force_exit(generation, "会话租约序号校验失败".to_string());
+                    return self.terminal_integrity(generation, IntegrityFailure::LeaseSequence);
                 }
 
                 let mut stored = self.state.session.write().await;
@@ -360,6 +398,9 @@ impl SessionLifecycle {
             }
             Ok(Err(CloudflareError::UpdateRequired(update))) => {
                 self.terminal_update(generation, update)
+            }
+            Ok(Err(CloudflareError::Integrity(failure))) => {
+                self.terminal_integrity(generation, failure)
             }
             Ok(Err(error)) if is_transient(&error) => self.record_transient_failure(generation),
             Ok(Err(error)) => self.terminal_force_exit(generation, terminal_reason(&error)),
@@ -387,6 +428,21 @@ impl SessionLifecycle {
         self.state.in_callback.store(true, Ordering::Release);
         if let Some(callback) = self.on_force_exit.as_ref() {
             let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(generation, reason)));
+        }
+        self.state.in_callback.store(false, Ordering::Release);
+        TickResult::stop()
+    }
+
+    fn terminal_integrity(&self, generation: String, failure: IntegrityFailure) -> TickResult {
+        self.state.healthy.store(false, Ordering::Release);
+        self.state.running.store(false, Ordering::Release);
+        self.state.in_callback.store(true, Ordering::Release);
+        if let Some(callback) = self.on_integrity_failure.as_ref() {
+            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(generation, failure)));
+        } else if let Some(callback) = self.on_force_exit.as_ref() {
+            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                callback(generation, "会话完整性校验失败".to_string())
+            }));
         }
         self.state.in_callback.store(false, Ordering::Release);
         TickResult::stop()

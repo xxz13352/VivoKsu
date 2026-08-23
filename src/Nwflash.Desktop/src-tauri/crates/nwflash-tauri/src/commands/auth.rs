@@ -88,6 +88,11 @@ async fn finalize_login_session(
     state.usage_reporter.flush().await;
     state.revoke_root_capabilities(&idle_lease);
 
+    state
+        .exit_supervisor
+        .install_generation(generation.clone())
+        .map_err(|_| "应用正在安全退出，无法建立新会话。".to_string())?;
+
     let capability =
         state
             .session_capabilities
@@ -116,6 +121,7 @@ pub async fn auth_logout(state: State<'_, AppState>) -> Result<LogoutResult, Str
 }
 
 async fn auth_logout_inner(state: &AppState) -> Result<LogoutResult, String> {
+    let generation = state.session_lifecycle.generation().await;
     let idle_lease = state
         .operation_coordinator
         .try_acquire_idle()
@@ -127,11 +133,16 @@ async fn auth_logout_inner(state: &AppState) -> Result<LogoutResult, String> {
     }
     state.usage_reporter.flush().await;
     state.revoke_root_capabilities(&idle_lease);
-    let mut token = state
-        .session_token
-        .write()
-        .expect("session token lock should not be poisoned");
-    let _ = clear_session_token(&mut token);
+    {
+        let mut token = state
+            .session_token
+            .write()
+            .expect("session token lock should not be poisoned");
+        let _ = clear_session_token(&mut token);
+    }
+    if let Some(generation) = generation {
+        state.exit_supervisor.clear_generation(&generation);
+    }
     Ok(LogoutResult { ok: true })
 }
 
@@ -197,10 +208,14 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        auth_login_inner, clear_session_token, finalize_login_session, replace_session_token,
-        AuthSessionDto,
+        auth_login_inner, auth_logout_inner, clear_session_token, finalize_login_session,
+        replace_session_token, AuthSessionDto,
     };
-    use crate::{commands::root::RootImageKind, AppState};
+    use crate::{
+        commands::root::RootImageKind,
+        exit_supervisor::{ExitMode, ExitPhase, ExitReason, ExitRequest, ExitRequestDisposition},
+        AppState,
+    };
 
     fn verified_auth_session(token: &str, session_id: &str) -> AuthSession {
         let signing_key = SigningKey::generate(&mut OsRng);
@@ -386,7 +401,27 @@ mod tests {
             Some("verified-token")
         );
 
-        state.session_lifecycle.stop().await.unwrap();
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest {
+                mode: ExitMode::Delayed,
+                phase: ExitPhase::Heartbeat,
+                reason: ExitReason::ServerForced,
+                generation: Some("stale-generation".to_string()),
+            }),
+            ExitRequestDisposition::IgnoredStaleGeneration
+        );
+        auth_logout_inner(&state)
+            .await
+            .expect("logout should clear the installed generation");
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest {
+                mode: ExitMode::Delayed,
+                phase: ExitPhase::Heartbeat,
+                reason: ExitReason::ServerForced,
+                generation: Some(dto.generation),
+            }),
+            ExitRequestDisposition::IgnoredStaleGeneration
+        );
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@ pub async fn session_stop(state: State<'_, AppState>) -> Result<SessionState, St
 }
 
 async fn session_stop_inner(state: &AppState) -> Result<SessionState, String> {
+    let generation = state.session_lifecycle.generation().await;
     let idle_lease = state
         .operation_coordinator
         .try_acquire_idle()
@@ -45,6 +46,9 @@ async fn session_stop_inner(state: &AppState) -> Result<SessionState, String> {
             .write()
             .expect("session token lock should not be poisoned");
         let _ = clear_session_token(&mut token);
+    }
+    if let Some(generation) = generation {
+        state.exit_supervisor.clear_generation(&generation);
     }
     Ok(read_session_state(state).await)
 }

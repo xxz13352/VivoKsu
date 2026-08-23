@@ -8,8 +8,8 @@ use std::{
 
 use futures::future::{BoxFuture, FutureExt};
 use nwflash_application::{
-    result_to_domain_error, OperationAuthorization, OperationContext, OperationCoordinator,
-    OperationCoordinatorError, OperationPermissionGate, UsageReporter,
+    result_to_domain_error, OperationAdmissionState, OperationAuthorization, OperationContext,
+    OperationCoordinator, OperationCoordinatorError, OperationPermissionGate, UsageReporter,
 };
 use nwflash_domain::{DomainError, OperationKind, PartitionTaskState, UsageLogEntry};
 use tokio::sync::Notify;
@@ -144,6 +144,185 @@ impl OperationPermissionGate for PermissionGate {
 struct BlockingPermissionGate {
     entered: Arc<Notify>,
     release: Arc<Notify>,
+}
+
+#[derive(Clone, Default)]
+struct RecordingPermissionGate {
+    called: Arc<AtomicBool>,
+}
+
+impl OperationPermissionGate for RecordingPermissionGate {
+    fn authorize(
+        &self,
+        _operation: OperationKind,
+        _title: String,
+    ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+        self.called.store(true, Ordering::Release);
+        futures::future::ready(Ok(OperationAuthorization::allow())).boxed()
+    }
+}
+
+#[tokio::test]
+async fn exit_pending_rejects_new_operation_before_permission_gate() {
+    let gate = RecordingPermissionGate::default();
+    let operation_called = Arc::new(AtomicBool::new(false));
+    let coordinator =
+        OperationCoordinator::new(None, Some(Arc::new(gate.clone())), None, None, None);
+
+    assert_eq!(
+        coordinator.request_exit_pending(),
+        OperationAdmissionState::ExitPending
+    );
+
+    let operation_called_inner = operation_called.clone();
+    let result = coordinator
+        .run_async(
+            OperationKind::Flashing,
+            "rejected-after-exit",
+            move |_, _| {
+                operation_called_inner.store(true, Ordering::Release);
+                async { Ok(()) }
+            },
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(OperationCoordinatorError::ExitPending)
+    ));
+    assert!(!gate.called.load(Ordering::Acquire));
+    assert!(!operation_called.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn exit_pending_after_permission_wait_rejects_before_user_closure() {
+    let gate = BlockingPermissionGate::default();
+    let authorization_entered = gate.entered.notified();
+    let operation_called = Arc::new(AtomicBool::new(false));
+    let coordinator =
+        OperationCoordinator::new(None, Some(Arc::new(gate.clone())), None, None, None);
+
+    let operation = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let operation_called = operation_called.clone();
+        async move {
+            coordinator
+                .run_async(OperationKind::Flashing, "permission-race", move |_, _| {
+                    operation_called.store(true, Ordering::Release);
+                    async { Ok(()) }
+                })
+                .await
+        }
+    });
+
+    authorization_entered.await;
+    coordinator.request_exit_pending();
+    gate.release.notify_one();
+
+    assert!(matches!(
+        operation.await.expect("operation task should join"),
+        Err(OperationCoordinatorError::ExitPending)
+    ));
+    assert!(!operation_called.load(Ordering::Acquire));
+    let _lease = tokio::time::timeout(Duration::from_millis(50), coordinator.wait_until_idle())
+        .await
+        .expect("permission lease should be released")
+        .expect("coordinator should become idle");
+}
+
+#[tokio::test]
+async fn wait_until_idle_returns_immediately_when_exit_pending_and_idle() {
+    let coordinator = OperationCoordinator::default();
+    coordinator.request_exit_pending();
+
+    let lease = tokio::time::timeout(Duration::from_millis(50), coordinator.wait_until_idle())
+        .await
+        .expect("idle wait should be immediate")
+        .expect("idle coordinator should grant the terminal lease");
+
+    assert_eq!(
+        coordinator
+            .begin_terminating(&lease)
+            .expect("ExitPending should advance to Terminating"),
+        OperationAdmissionState::Terminating
+    );
+    assert_eq!(
+        coordinator.admission_state(),
+        OperationAdmissionState::Terminating
+    );
+}
+
+#[tokio::test]
+async fn wait_until_idle_waits_for_active_operation_without_canceling_it() {
+    let coordinator = OperationCoordinator::default();
+    let (token_sender, mut token_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel::<()>();
+
+    let operation = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move {
+            coordinator
+                .run_async(
+                    OperationKind::Flashing,
+                    "active-during-exit",
+                    move |_, token| async move {
+                        token_sender
+                            .send(token)
+                            .expect("test should receive cancellation token");
+                        release_receiver
+                            .await
+                            .expect("test should release operation");
+                        Ok(())
+                    },
+                )
+                .await
+        }
+    });
+
+    let cancellation = token_receiver
+        .recv()
+        .await
+        .expect("operation should enter user code");
+    coordinator.request_exit_pending();
+
+    let waiter = tokio::spawn({
+        let coordinator = coordinator.clone();
+        async move { coordinator.wait_until_idle().await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+    assert!(!cancellation.is_cancelled());
+
+    release_sender
+        .send(())
+        .expect("operation should still be active");
+    operation
+        .await
+        .expect("operation task should join")
+        .expect("protected exit must allow normal operation completion");
+    let _lease = waiter
+        .await
+        .expect("idle waiter should join")
+        .expect("idle waiter should acquire the released lease");
+    assert!(!cancellation.is_cancelled());
+}
+
+#[test]
+fn exit_admission_transitions_are_idempotent_and_never_reopen() {
+    let coordinator = OperationCoordinator::default();
+
+    assert_eq!(
+        coordinator.admission_state(),
+        OperationAdmissionState::Running
+    );
+    assert_eq!(
+        coordinator.request_exit_pending(),
+        OperationAdmissionState::ExitPending
+    );
+    assert_eq!(
+        coordinator.request_exit_pending(),
+        OperationAdmissionState::ExitPending
+    );
 }
 
 impl OperationPermissionGate for BlockingPermissionGate {
