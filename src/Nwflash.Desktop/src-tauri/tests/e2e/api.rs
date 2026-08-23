@@ -30,7 +30,7 @@ async fn cloudflare_authorization_failure_never_becomes_an_allowed_operation() {
         .mount(&server)
         .await;
 
-    let client = CloudflareClient::new(server.uri(), DEFAULT_APP_VERSION);
+    let client = CloudflareClient::new_injected(server.uri(), DEFAULT_APP_VERSION);
     let error = client
         .authorize_operation("session-token", "Flashing", "刷写 boot")
         .await

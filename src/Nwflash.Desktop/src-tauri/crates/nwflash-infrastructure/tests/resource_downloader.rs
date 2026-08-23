@@ -17,7 +17,7 @@ fn temporary_directory() -> PathBuf {
 }
 
 #[tokio::test]
-async fn falls_back_when_the_first_candidate_times_out() {
+async fn ordinary_third_party_http_client_remains_independent_and_falls_back() {
     let first_candidate = MockServer::start().await;
     let fallback_candidate = MockServer::start().await;
 

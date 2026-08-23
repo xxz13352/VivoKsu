@@ -15,7 +15,7 @@ pub struct AuthSession {
 impl AuthService {
     pub fn new(base_url: impl Into<String>, app_version: impl Into<String>) -> Self {
         Self {
-            client: CloudflareClient::new(base_url, app_version),
+            client: CloudflareClient::new_injected(base_url, app_version),
         }
     }
 
@@ -44,10 +44,9 @@ impl AuthService {
     }
 
     pub fn default_client() -> Self {
-        Self::new(
-            crate::api_client::DEFAULT_BASE_URL,
-            crate::api_client::DEFAULT_APP_VERSION,
-        )
+        let client = CloudflareClient::new_default()
+            .unwrap_or_else(|_| panic!("pinned API client initialization failed closed"));
+        Self::with_client(client)
     }
 
     pub fn client(&self) -> &CloudflareClient {

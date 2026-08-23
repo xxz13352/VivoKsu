@@ -1,10 +1,94 @@
 use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
 
 use nwflash_domain::UsageLogEntry;
-use nwflash_infrastructure::{CloudflareClient, CloudflareError, DEFAULT_APP_VERSION};
+use nwflash_infrastructure::{
+    CloudflareClient, CloudflareError, IntegrityFailure, DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
+};
 
 fn create_client(base_url: &str) -> CloudflareClient {
-    CloudflareClient::new(base_url, DEFAULT_APP_VERSION)
+    CloudflareClient::new_injected(base_url, DEFAULT_APP_VERSION)
+}
+
+#[test]
+fn production_default_is_pinned_and_fails_closed_without_a_compile_time_verification_key() {
+    let result: Result<CloudflareClient, CloudflareError> = CloudflareClient::new_default();
+    match result {
+        Ok(client) => {
+            assert!(option_env!("NWFLASH_SESSION_VERIFY_KEY_B64").is_some());
+            assert_eq!(client.base_url(), DEFAULT_BASE_URL);
+        }
+        Err(CloudflareError::Integrity(IntegrityFailure::MissingVerificationKey)) => {
+            assert!(option_env!("NWFLASH_SESSION_VERIFY_KEY_B64").is_none());
+        }
+        Err(CloudflareError::Integrity(IntegrityFailure::InvalidVerificationKey)) => {
+            assert!(option_env!("NWFLASH_SESSION_VERIFY_KEY_B64").is_some());
+        }
+        other => panic!("unexpected protected production construction result: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn explicit_injected_client_remains_available_for_local_http_adapters() {
+    let mock_server = MockServer::start().await;
+    let api = create_client(&mock_server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "update_required": false,
+            "force_update": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    api.check_version_policy()
+        .await
+        .expect("explicit injected client should support local HTTP test adapters");
+}
+
+#[tokio::test]
+async fn login_response_carries_both_signed_lease_strings_without_admission() {
+    let mock_server = MockServer::start().await;
+    let api = create_client(&mock_server.uri());
+    Mock::given(method("POST"))
+        .and(path("/api/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "token": "tok",
+            "username": "demo",
+            "name": "Demo",
+            "lease_payload": "payload-ascii",
+            "lease_signature": "signature"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let result = api
+        .login("demo", "password")
+        .await
+        .expect("login response should deserialize");
+    assert_eq!(result.lease_payload, "payload-ascii");
+    assert_eq!(result.lease_signature, "signature");
+}
+
+#[tokio::test]
+async fn heartbeat_response_carries_both_signed_lease_strings_without_admission() {
+    let mock_server = MockServer::start().await;
+    let api = create_client(&mock_server.uri());
+    Mock::given(method("POST"))
+        .and(path("/api/heartbeat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "force_exit": false,
+            "lease_payload": "heartbeat-payload",
+            "lease_signature": "heartbeat-signature"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let result = api
+        .heartbeat("tok", "session", true)
+        .await
+        .expect("heartbeat response should deserialize");
+    assert_eq!(result.lease_payload, "heartbeat-payload");
+    assert_eq!(result.lease_signature, "heartbeat-signature");
 }
 
 #[tokio::test]

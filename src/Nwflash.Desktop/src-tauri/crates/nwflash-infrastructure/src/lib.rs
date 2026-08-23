@@ -10,6 +10,7 @@ pub mod ota_download;
 pub mod paths;
 pub mod payload_dumper;
 pub mod payload_provisioner;
+pub mod pinned_tls;
 pub mod preferences;
 pub mod remote_assets;
 pub mod remote_firmware;
@@ -47,6 +48,10 @@ pub use payload_dumper::{
     parse_payload_metadata, validate_partition_name, PayloadDumperCommand, PayloadDumperError,
 };
 pub use payload_provisioner::{PayloadDumperProvisioner, PayloadProvisionError};
+pub use pinned_tls::{
+    ApiTlsPolicy, IntegrityFailure, PinnedApiClient, PinsetClaims, SignedPinsetEnvelope, API_HOST,
+    BUILTIN_LEAF_SPKI_PIN, BUILTIN_WE1_SPKI_PIN, EMBEDDED_PINSET_VERSION_FLOOR,
+};
 pub use preferences::{ToolPathPreferences, ToolPathSettings};
 pub use remote_assets::{
     github_download_url, is_known_manager_key, manager_apk_filename, manager_apk_sha256,

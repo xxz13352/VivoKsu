@@ -58,7 +58,7 @@ pub struct VersionClient {
 impl VersionClient {
     pub fn new(base_url: impl Into<String>, app_version: impl Into<String>) -> Self {
         Self {
-            client: CloudflareClient::new(base_url, app_version),
+            client: CloudflareClient::new_injected(base_url, app_version),
             session_result: Arc::new(Mutex::new(None)),
         }
     }
@@ -78,6 +78,13 @@ impl VersionClient {
 
         let result = match self.client.check_version_policy().await {
             Ok(response) => VersionCheckResult::from_response(response),
+            Err(CloudflareError::Integrity(_)) => VersionCheckResult {
+                latest: None,
+                min_version: None,
+                download_url: None,
+                update_required: true,
+                force_update: true,
+            },
             Err(CloudflareError::UpdateRequired(update)) => VersionCheckResult {
                 latest: update.latest,
                 min_version: update.min_version,
@@ -97,9 +104,8 @@ impl VersionClient {
 
 impl Default for VersionClient {
     fn default() -> Self {
-        Self::new(
-            crate::api_client::DEFAULT_BASE_URL,
-            crate::api_client::DEFAULT_APP_VERSION,
-        )
+        let client = CloudflareClient::new_default()
+            .unwrap_or_else(|_| panic!("pinned API client initialization failed closed"));
+        Self::with_client(client)
     }
 }

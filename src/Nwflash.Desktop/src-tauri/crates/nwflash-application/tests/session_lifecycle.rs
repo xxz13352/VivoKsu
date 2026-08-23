@@ -25,6 +25,8 @@ async fn session_lifecycle_starts_and_stops_send_goodbye() {
                 Ok(HeartbeatResult {
                     force_exit: false,
                     reason: None,
+                    lease_payload: String::new(),
+                    lease_signature: String::new(),
                 })
             })
         })
@@ -97,11 +99,15 @@ async fn session_lifecycle_triggers_force_exit_callback() {
                     Ok(HeartbeatResult {
                         force_exit: true,
                         reason: Some("server force exit".to_string()),
+                        lease_payload: String::new(),
+                        lease_signature: String::new(),
                     })
                 } else {
                     Ok(HeartbeatResult {
                         force_exit: false,
                         reason: None,
+                        lease_payload: String::new(),
+                        lease_signature: String::new(),
                     })
                 }
             })
@@ -216,6 +222,8 @@ async fn session_lifecycle_sends_goodbye_before_notifying_update_required() {
                     Ok(HeartbeatResult {
                         force_exit: false,
                         reason: None,
+                        lease_payload: String::new(),
+                        lease_signature: String::new(),
                     })
                 }
             })
@@ -262,6 +270,8 @@ async fn session_lifecycle_rejects_invalid_session_values() {
             Ok(HeartbeatResult {
                 force_exit: false,
                 reason: None,
+                lease_payload: String::new(),
+                lease_signature: String::new(),
             })
         })
     });
@@ -277,6 +287,8 @@ async fn session_lifecycle_stop_without_start_returns_not_started() {
             Ok(HeartbeatResult {
                 force_exit: false,
                 reason: None,
+                lease_payload: String::new(),
+                lease_signature: String::new(),
             })
         })
     });

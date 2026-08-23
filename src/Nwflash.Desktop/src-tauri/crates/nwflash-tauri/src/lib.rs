@@ -88,11 +88,15 @@ impl CloudflareOperationPermissionGate {
 /// Maps an authorization request failure onto a permission decision.
 ///
 /// Server authorization is advisory (`ServerOperationGate` in the WPF build):
-/// only an explicit 401 (session revoked) or 426 (client too old) blocks the
-/// user.  Network faults and 5xx default to allow, because an unreachable
-/// server must not stop someone from flashing a phone that is already in hand;
-/// a banned account is still force-exited by the heartbeat within seconds.
+/// an explicit 401 (session revoked), 426 (client too old), or local API
+/// integrity failure blocks the user. Network faults and 5xx remain advisory,
+/// because an unreachable server must not stop someone from flashing a phone
+/// that is already in hand; a banned account is still force-exited by the
+/// heartbeat within seconds.
 fn authorization_for_error(error: &CloudflareError) -> OperationAuthorization {
+    if matches!(error, CloudflareError::Integrity(_)) {
+        return OperationAuthorization::deny("网络完整性校验失败，已拒绝本次操作。");
+    }
     match error.status_code() {
         Some(401) => OperationAuthorization::deny("登录已失效，请联系管理员。"),
         Some(426) => OperationAuthorization::deny(format!("需要更新 {APP_LABEL} 后才能继续使用。")),
@@ -136,8 +140,24 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
 }
 
 impl AppState {
+    pub fn try_new() -> Result<Self, CloudflareError> {
+        CloudflareClient::new_default().map(Self::with_client)
+    }
+
+    #[cfg(not(test))]
     pub fn new() -> Self {
-        let client = CloudflareClient::new_default();
+        Self::try_new().unwrap_or_else(|_| panic!("pinned API client initialization failed closed"))
+    }
+
+    #[cfg(test)]
+    pub fn new() -> Self {
+        Self::with_client(CloudflareClient::new_injected(
+            nwflash_infrastructure::DEFAULT_BASE_URL,
+            nwflash_infrastructure::DEFAULT_APP_VERSION,
+        ))
+    }
+
+    fn with_client(client: CloudflareClient) -> Self {
         let (session_events_tx, session_events_rx) = unbounded_channel();
         let session_token = Arc::new(RwLock::new(None));
         let permission_gate = Arc::new(CloudflareOperationPermissionGate::new(
@@ -544,11 +564,12 @@ mod device_monitor_tests {
         OperationAuthorization, OperationCoordinator, OperationLogger, OperationPermissionGate,
     };
     use nwflash_domain::{DomainError, OperationKind, OperationLogLevel};
+    use nwflash_infrastructure::{CloudflareError, IntegrityFailure};
     use tokio::sync::Notify;
 
     use super::{
-        finalize_operation_before_exit, should_compensate_device_refresh, AppState,
-        OperationLogBuffer,
+        authorization_for_error, finalize_operation_before_exit, should_compensate_device_refresh,
+        AppState, OperationLogBuffer,
     };
 
     struct DenyAllOperations;
@@ -589,6 +610,18 @@ mod device_monitor_tests {
         assert!(should_compensate_device_refresh(true, false));
         assert!(!should_compensate_device_refresh(false, false));
         assert!(!should_compensate_device_refresh(true, true));
+    }
+
+    #[test]
+    fn api_integrity_failure_never_falls_through_the_advisory_allow_path() {
+        let authorization =
+            authorization_for_error(&CloudflareError::Integrity(IntegrityFailure::SpkiMismatch));
+
+        assert!(!authorization.allowed);
+        assert!(authorization
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("完整性")));
     }
 
     #[test]
@@ -812,6 +845,9 @@ mod device_monitor_tests {
 }
 
 pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
+    let app_state = AppState::try_new().map_err(|error| {
+        tauri::Error::Setup((Box::new(error) as Box<dyn std::error::Error>).into())
+    })?;
     let app_builder: tauri::Builder<Wry> =
         tauri::Builder::default().plugin(tauri_plugin_dialog::init());
     #[cfg(feature = "e2e")]
@@ -830,7 +866,7 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
             state.bind_device_monitor(app.handle().clone());
             Ok(())
         })
-        .manage(AppState::new())
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::auth::auth_login,
             commands::auth::auth_logout,

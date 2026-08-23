@@ -14,11 +14,15 @@ use url::Url;
 
 use nwflash_domain::UsageLogEntry;
 
+use crate::pinned_tls::{classify_reqwest_error, ApiTlsPolicy, PinnedApiClient, PinsetClaims};
+
 pub const DEFAULT_BASE_URL: &str = "https://api.nwflash.cc.cd";
 pub const DEFAULT_APP_VERSION: &str = "1.0.1";
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum CloudflareError {
+    #[error("网络完整性校验失败: {0}")]
+    Integrity(crate::pinned_tls::IntegrityFailure),
     #[error("网络错误: {0}")]
     Transport(String),
     #[error("服务端返回 {status}: {message}")]
@@ -68,6 +72,10 @@ pub struct LoginResult {
     pub token: String,
     pub username: String,
     pub name: String,
+    #[serde(default)]
+    pub lease_payload: String,
+    #[serde(default)]
+    pub lease_signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +103,10 @@ pub struct HeartbeatRequest {
 pub struct HeartbeatResult {
     pub force_exit: bool,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub lease_payload: String,
+    #[serde(default)]
+    pub lease_signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,10 +183,12 @@ pub struct CloudflareClient {
     base_url: String,
     app_version: String,
     http: Client,
+    pinned: Option<PinnedApiClient>,
 }
 
 impl CloudflareClient {
-    pub fn new(base_url: impl Into<String>, app_version: impl Into<String>) -> Self {
+    /// Explicit non-production constructor for wiremock and local adapters.
+    pub fn new_injected(base_url: impl Into<String>, app_version: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
             app_version: app_version.into(),
@@ -186,11 +200,26 @@ impl CloudflareClient {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("HTTP client should build"),
+            pinned: None,
         }
     }
 
-    pub fn new_default() -> Self {
-        Self::new(DEFAULT_BASE_URL, DEFAULT_APP_VERSION)
+    pub fn new_pinned(
+        policy: ApiTlsPolicy,
+        app_version: impl Into<String>,
+    ) -> CloudflareResult<Self> {
+        let pinned = PinnedApiClient::new(policy)?;
+        Ok(Self {
+            base_url: pinned.base_url().to_string(),
+            app_version: app_version.into(),
+            http: pinned.http_client(),
+            pinned: Some(pinned),
+        })
+    }
+
+    pub fn new_default() -> CloudflareResult<Self> {
+        let policy = ApiTlsPolicy::production().map_err(CloudflareError::Integrity)?;
+        Self::new_pinned(policy, DEFAULT_APP_VERSION)
     }
 
     pub fn base_url(&self) -> &str {
@@ -264,7 +293,7 @@ impl CloudflareClient {
             .headers(self.default_headers(Some(token)))
             .send()
             .await
-            .map_err(|err| CloudflareError::Transport(err.to_string()))?;
+            .map_err(classify_reqwest_error)?;
         let body = self.handle_api_error(response).await?;
         self.parse_json(body).await
     }
@@ -366,9 +395,21 @@ impl CloudflareClient {
             .headers(self.default_headers(None))
             .send()
             .await
-            .map_err(|error| CloudflareError::Transport(error.to_string()))?;
+            .map_err(classify_reqwest_error)?;
         let body = self.handle_api_error(response).await?;
         self.parse_json::<super::version_client::VersionCheckResponse>(body)
+            .await
+    }
+
+    pub async fn refresh_pinset(&self) -> CloudflareResult<PinsetClaims> {
+        self.pinned
+            .as_ref()
+            .ok_or_else(|| {
+                CloudflareError::InvalidInput(
+                    "pinset refresh is unavailable for an injected client".to_string(),
+                )
+            })?
+            .refresh_pinset()
             .await
     }
 
@@ -390,10 +431,7 @@ impl CloudflareClient {
             builder
         };
 
-        let response = request
-            .send()
-            .await
-            .map_err(|error| CloudflareError::Transport(error.to_string()))?;
+        let response = request.send().await.map_err(classify_reqwest_error)?;
 
         Ok(response)
     }
@@ -402,10 +440,7 @@ impl CloudflareClient {
         let status = response.status();
         let status_code = status.as_u16();
 
-        let text = response
-            .text()
-            .await
-            .map_err(|error| CloudflareError::Transport(error.to_string()))?;
+        let text = response.text().await.map_err(classify_reqwest_error)?;
 
         if status == StatusCode::UPGRADE_REQUIRED {
             let update = self.parse_update_required(&text)?;

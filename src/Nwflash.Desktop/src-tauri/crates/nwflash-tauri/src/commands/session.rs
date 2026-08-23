@@ -125,6 +125,8 @@ mod tests {
                     Ok(HeartbeatResult {
                         force_exit: false,
                         reason: None,
+                        lease_payload: String::new(),
+                        lease_signature: String::new(),
                     })
                 });
             future
