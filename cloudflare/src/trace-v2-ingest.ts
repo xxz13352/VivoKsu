@@ -102,6 +102,19 @@ export async function ingestTraceUploadV2(
         lastBatchError = error;
       }
     }
+
+    const finalConflict = await findCrossUserOwnershipConflict(env.DB, sanitized.payload, user.id);
+    if (finalConflict.length > 0) {
+      return traceError(409, "TRACE_OWNERSHIP_CONFLICT", "日志标识已属于其他用户。", finalConflict);
+    }
+    const finalPrepared = await prepareTraceUpload(env.DB, sanitized.payload);
+    if (finalPrepared.rejected.length > 0) {
+      return traceJson({
+        ok: true,
+        accepted: { runs: [], events: [], output_chunks: [] },
+        rejected: finalPrepared.rejected,
+      } satisfies TraceUploadResponseV2, 200);
+    }
     throw lastBatchError;
   } catch (error) {
     if (error instanceof TraceUploadTooLargeError) {
