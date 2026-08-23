@@ -4,7 +4,7 @@
 
 ## Authentication and privacy
 
-Login creates the `__Host-nwflash_user` cookie. It is `Secure`, `HttpOnly`, `SameSite=Strict`, and scoped to `/`; an optional remembered login lasts 30 days. The browser never receives, persists, or sends a bearer token through JavaScript. Non-GET API requests also require `X-Requested-With: XMLHttpRequest`.
+Login creates the `__Host-nwflash_user` cookie. It is `Secure`, `HttpOnly`, `SameSite=Strict`, and scoped to `/`; an optional remembered login lasts 30 days. The browser never receives, persists, or sends a bearer token through JavaScript. `POST /api/login` is unauthenticated and does not require `X-Requested-With`. `POST /api/logout` does not require an authenticated cookie, but requires `X-Requested-With: XMLHttpRequest` and always expires the portal cookie. Other `/api/me` write endpoints require both a valid cookie and that header.
 
 Activities are restricted to the authenticated owner and return only safe summaries. Operation detail currently returns `steps_state: "unavailable"`, an empty `steps` array, and `steps_message: "无更详细数据"`; the portal must not invent steps. Sessions expose only `ip_masked`, never the raw IP.
 
@@ -12,7 +12,7 @@ Changing a password replaces the authoritative `api_users.token` with a `revoked
 
 ## Current API
 
-All responses are JSON. All non-login endpoints require the HttpOnly cookie. All non-GET endpoints require the XMLHttpRequest header.
+All responses are JSON. `/api/me` endpoints require the HttpOnly cookie. The login and logout exceptions are described above.
 
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
