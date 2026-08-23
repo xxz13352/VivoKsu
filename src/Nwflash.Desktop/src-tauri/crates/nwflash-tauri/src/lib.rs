@@ -38,8 +38,8 @@ const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 enum SessionLifecycleEvent {
-    ForceExit(String),
-    UpdateRequired(UpdateRequiredInfo),
+    ForceExit(String, String),
+    UpdateRequired(String, UpdateRequiredInfo),
 }
 
 pub struct AppState {
@@ -219,13 +219,15 @@ impl AppState {
         };
 
         let tx_force_exit = session_events_tx.clone();
-        let on_force_exit = std::sync::Arc::new(move |reason: String| {
-            let _ = tx_force_exit.send(SessionLifecycleEvent::ForceExit(reason));
+        let on_force_exit = std::sync::Arc::new(move |generation: String, reason: String| {
+            let _ = tx_force_exit.send(SessionLifecycleEvent::ForceExit(generation, reason));
         });
         let tx_update_required = session_events_tx.clone();
-        let on_update_required = std::sync::Arc::new(move |update: UpdateRequiredInfo| {
-            let _ = tx_update_required.send(SessionLifecycleEvent::UpdateRequired(update));
-        });
+        let on_update_required =
+            std::sync::Arc::new(move |generation: String, update: UpdateRequiredInfo| {
+                let _ = tx_update_required
+                    .send(SessionLifecycleEvent::UpdateRequired(generation, update));
+            });
 
         let operation_log_store = Arc::new(OperationLogStore::with_default_path(500));
         operation_log_store.start_new_session();
@@ -358,14 +360,16 @@ impl AppState {
             spawn(async move {
                 while let Some(event) = receiver.recv().await {
                     match event {
-                        SessionLifecycleEvent::ForceExit(reason) => {
-                            let _ = app_handle
-                                .emit(SESSION_FORCE_EXIT_EVENT, SessionForceExitPayload { reason });
+                        SessionLifecycleEvent::ForceExit(generation, reason) => {
+                            let _ = app_handle.emit(
+                                SESSION_FORCE_EXIT_EVENT,
+                                SessionForceExitPayload { generation, reason },
+                            );
                         }
-                        SessionLifecycleEvent::UpdateRequired(update) => {
+                        SessionLifecycleEvent::UpdateRequired(generation, update) => {
                             let _ = app_handle.emit(
                                 SESSION_UPDATE_REQUIRED_EVENT,
-                                SessionUpdateRequiredPayload::from(update),
+                                SessionUpdateRequiredPayload::from_generation(generation, update),
                             );
                         }
                     }
@@ -427,21 +431,24 @@ fn should_compensate_device_refresh(was_device_busy: bool, is_device_busy: bool)
 
 #[derive(Serialize, Clone)]
 struct SessionForceExitPayload {
+    generation: String,
     reason: String,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SessionUpdateRequiredPayload {
+    generation: String,
     message: String,
     latest: Option<String>,
     min_version: Option<String>,
     download_url: Option<String>,
 }
 
-impl From<UpdateRequiredInfo> for SessionUpdateRequiredPayload {
-    fn from(value: UpdateRequiredInfo) -> Self {
+impl SessionUpdateRequiredPayload {
+    fn from_generation(generation: String, value: UpdateRequiredInfo) -> Self {
         Self {
+            generation,
             message: value.message,
             latest: value.latest,
             min_version: value.min_version,
@@ -565,6 +572,7 @@ mod device_monitor_tests {
 
     use super::{
         authorization_for_error, should_compensate_device_refresh, AppState, OperationLogBuffer,
+        SessionForceExitPayload, SessionUpdateRequiredPayload,
     };
     use futures::future::BoxFuture;
     use nwflash_application::{
@@ -602,6 +610,33 @@ mod device_monitor_tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("完整性")));
+    }
+
+    #[test]
+    fn terminal_event_payloads_expose_generation_without_session_secrets() {
+        let force = serde_json::to_value(SessionForceExitPayload {
+            generation: "generation-force".to_string(),
+            reason: "terminal".to_string(),
+        })
+        .unwrap();
+        let update = serde_json::to_value(SessionUpdateRequiredPayload::from_generation(
+            "generation-update".to_string(),
+            nwflash_infrastructure::api_client::UpdateRequiredInfo {
+                message: "update".to_string(),
+                latest: Some("2.0.0".to_string()),
+                min_version: Some("2.0.0".to_string()),
+                download_url: None,
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(force["generation"], "generation-force");
+        assert_eq!(update["generation"], "generation-update");
+        for payload in [force, update] {
+            let text = payload.to_string();
+            assert!(!text.contains("session_id"));
+            assert!(!text.contains("token"));
+        }
     }
 
     #[test]

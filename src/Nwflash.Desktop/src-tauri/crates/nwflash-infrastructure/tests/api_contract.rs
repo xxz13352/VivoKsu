@@ -1,3 +1,4 @@
+use reqwest::header::AUTHORIZATION;
 use wiremock::{matchers::*, Mock, MockServer, ResponseTemplate};
 
 use nwflash_domain::UsageLogEntry;
@@ -8,6 +9,25 @@ use nwflash_infrastructure::{
 
 fn create_client(base_url: &str) -> CloudflareClient {
     CloudflareClient::new_injected(base_url, DEFAULT_APP_VERSION)
+}
+
+#[test]
+fn authorization_header_is_fallible_sensitive_and_debug_redacted() {
+    let api = create_client("http://127.0.0.1:1");
+    let headers = api
+        .authenticated_headers_for_test("header-secret")
+        .expect("valid token should construct a header");
+    let authorization = headers.get(AUTHORIZATION).unwrap();
+
+    assert!(authorization.is_sensitive());
+    assert!(!format!("{headers:?}").contains("header-secret"));
+    let request = reqwest::Client::new()
+        .get("http://127.0.0.1:1/private")
+        .headers(headers)
+        .build()
+        .unwrap();
+    assert!(!format!("{request:?}").contains("header-secret"));
+    assert!(api.authenticated_headers_for_test("bad\nheader").is_err());
 }
 
 fn process_identity() -> ProcessIdentity {
@@ -218,7 +238,8 @@ async fn resolve_async_maps_insufficient_credits_status() {
         .expect_err("insufficient credits should be mapped");
 
     assert_eq!(error.status_code(), Some(402));
-    assert!(format!("{error}").contains("INSUFFICIENT_CREDITS"));
+    assert!(format!("{error}").contains("信用点不足"));
+    assert!(!format!("{error}").contains("INSUFFICIENT_CREDITS"));
 }
 
 #[tokio::test]

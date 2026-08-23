@@ -73,6 +73,7 @@ const setupMocks = () => {
         healthy: false,
         running: true,
         session_id: 'signed-session',
+        generation: 'generation-active',
       };
     }
 
@@ -84,6 +85,7 @@ const setupMocks = () => {
       return {
         username: 'admin',
         name: '管理员',
+        generation: 'generation-active',
       };
     }
 
@@ -135,7 +137,9 @@ describe('会话事件联动', () => {
     const onForceExit = hostListeners.get(IPC_EVENTS.sessionForceExit);
     expect(onForceExit).toBeDefined();
 
-    onForceExit?.({ payload: { reason: 'token 已失效' } });
+    onForceExit?.({
+      payload: { generation: 'generation-active', reason: 'token 已失效' },
+    });
     await waitUntil(() => host.querySelector('[aria-label="点击登录"]') !== null);
 
     const loginAfter = host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement;
@@ -152,6 +156,7 @@ describe('会话事件联动', () => {
     expect(onUpdateRequired).toBeDefined();
     onUpdateRequired?.({
       payload: {
+        generation: 'generation-active',
         message: '请更新到2.0以继续使用',
         latest: '2.0',
         minVersion: null,
@@ -179,11 +184,13 @@ describe('会话事件联动', () => {
           healthy: true,
           running: true,
           session_id: 'signed-session',
+          generation: 'generation-active',
         };
       }
       if (command === 'auth_validate_token') {
         hostListeners.get(IPC_EVENTS.sessionUpdateRequired)?.({
           payload: {
+            generation: 'generation-active',
             message: '恢复会话时发现版本已停用',
             latest: '2.0.0',
             minVersion: '2.0.0',

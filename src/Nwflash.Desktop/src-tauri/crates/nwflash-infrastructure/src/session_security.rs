@@ -25,6 +25,10 @@ impl SecretToken {
         self.0.is_empty()
     }
 
+    pub fn is_header_safe(&self) -> bool {
+        !self.0.is_empty() && self.0.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
+    }
+
     /// Creates the only supported owned copy: another zeroizing request scope.
     pub fn request_scope(&self) -> Self {
         Self::new(self.0.to_string())
@@ -102,6 +106,10 @@ impl ProcessIdentity {
     pub fn fresh_session_id(&self) -> Result<String, IntegrityFailure> {
         random_identifier("session-")
     }
+
+    pub fn fresh_generation(&self) -> Result<String, IntegrityFailure> {
+        random_identifier("generation-")
+    }
 }
 
 impl fmt::Debug for ProcessIdentity {
@@ -147,9 +155,13 @@ mod tests {
         let second_session = first
             .fresh_session_id()
             .expect("session id should generate");
+        let generation = first
+            .fresh_generation()
+            .expect("generation should generate");
 
         assert_ne!(first.process_nonce(), second.process_nonce());
         assert_ne!(first_session, second_session);
         assert!(first_session.len() <= 64);
+        assert!(generation.starts_with("generation-"));
     }
 }

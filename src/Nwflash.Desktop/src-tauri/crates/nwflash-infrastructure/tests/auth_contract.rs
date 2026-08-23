@@ -75,10 +75,29 @@ async fn mount_login(
     lease_signature: String,
     response_token: &str,
 ) {
+    mount_login_for(
+        server,
+        USERNAME,
+        USERNAME,
+        lease_payload,
+        lease_signature,
+        response_token,
+    )
+    .await;
+}
+
+async fn mount_login_for(
+    server: &MockServer,
+    request_username: &str,
+    response_username: &str,
+    lease_payload: String,
+    lease_signature: String,
+    response_token: &str,
+) {
     Mock::given(method("POST"))
         .and(path("/api/login"))
         .and(body_json(serde_json::json!({
-            "username": USERNAME,
+            "username": request_username,
             "password": PASSWORD,
             "client_version": DEFAULT_APP_VERSION,
             "build_id": BUILD_ID,
@@ -88,13 +107,109 @@ async fn mount_login(
         .and(header("X-Nwflash-Version", DEFAULT_APP_VERSION))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "token": response_token,
-            "username": USERNAME,
+            "username": response_username,
             "name": "演示用户",
             "lease_payload": lease_payload,
             "lease_signature": lease_signature
         })))
         .mount(server)
         .await;
+}
+
+#[tokio::test]
+async fn submitted_trimmed_principal_is_the_login_wire_and_lease_binding() {
+    let server = MockServer::start().await;
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let issued_at = now();
+    let mut candidate = claims(
+        LeaseKind::Login,
+        TOKEN,
+        BUILD_ID,
+        PROCESS_NONCE,
+        SESSION_ID,
+        1,
+        issued_at,
+        issued_at + 300,
+    );
+    candidate.username = "trimmed-user".to_string();
+    let (payload, signature) = sign(&signing_key, candidate);
+    mount_login_for(
+        &server,
+        "trimmed-user",
+        "trimmed-user",
+        payload,
+        signature,
+        TOKEN,
+    )
+    .await;
+
+    let session = create_service(&server.uri(), &signing_key)
+        .login("  trimmed-user  ", PASSWORD, &identity(), SESSION_ID)
+        .await
+        .expect("trimmed requested principal should bind the admitted lease");
+
+    assert_eq!(session.username, "trimmed-user");
+}
+
+#[tokio::test]
+async fn signed_claim_and_unsigned_response_cannot_replace_the_requested_principal() {
+    let server = MockServer::start().await;
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let issued_at = now();
+    let mut candidate = claims(
+        LeaseKind::Login,
+        TOKEN,
+        BUILD_ID,
+        PROCESS_NONCE,
+        SESSION_ID,
+        1,
+        issued_at,
+        issued_at + 300,
+    );
+    candidate.username = "other-user".to_string();
+    let (payload, signature) = sign(&signing_key, candidate);
+    mount_login_for(&server, USERNAME, "other-user", payload, signature, TOKEN).await;
+
+    let error = create_service(&server.uri(), &signing_key)
+        .login(USERNAME, PASSWORD, &identity(), SESSION_ID)
+        .await
+        .expect_err("server response principal cannot replace the requested user");
+
+    assert!(matches!(
+        error,
+        nwflash_infrastructure::CloudflareError::Integrity(IntegrityFailure::LeaseBinding)
+    ));
+}
+
+#[tokio::test]
+async fn client_version_and_login_kind_mismatch_fail_closed_in_auth_service() {
+    for mismatch in ["client-version", "kind"] {
+        let server = MockServer::start().await;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let issued_at = now();
+        let mut candidate = claims(
+            LeaseKind::Login,
+            TOKEN,
+            BUILD_ID,
+            PROCESS_NONCE,
+            SESSION_ID,
+            1,
+            issued_at,
+            issued_at + 300,
+        );
+        if mismatch == "client-version" {
+            candidate.client_version = "9.9.9".to_string();
+        } else {
+            candidate.kind = LeaseKind::Heartbeat;
+        }
+        let (payload, signature) = sign(&signing_key, candidate);
+        mount_login(&server, payload, signature, TOKEN).await;
+
+        create_service(&server.uri(), &signing_key)
+            .login(USERNAME, PASSWORD, &identity(), SESSION_ID)
+            .await
+            .expect_err(mismatch);
+    }
 }
 
 async fn login_with_lease(
@@ -277,6 +392,41 @@ async fn signed_login_sequence_other_than_one_fails_closed() {
         error,
         nwflash_infrastructure::CloudflareError::Integrity(IntegrityFailure::LeaseSequence)
     ));
+}
+
+#[tokio::test]
+async fn signed_login_with_header_unsafe_token_is_rejected_before_publication() {
+    let server = MockServer::start().await;
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let unsafe_token = "signed-token\nheader-injection";
+    let issued_at = now();
+    let (payload, signature) = sign(
+        &signing_key,
+        claims(
+            LeaseKind::Login,
+            unsafe_token,
+            BUILD_ID,
+            PROCESS_NONCE,
+            SESSION_ID,
+            1,
+            issued_at,
+            issued_at + 300,
+        ),
+    );
+    mount_login(&server, payload, signature, unsafe_token).await;
+
+    let error = create_service(&server.uri(), &signing_key)
+        .login(USERNAME, PASSWORD, &identity(), SESSION_ID)
+        .await
+        .expect_err("header-unsafe signed token must not publish AuthSession");
+    let display = error.to_string();
+
+    assert!(matches!(
+        error,
+        nwflash_infrastructure::CloudflareError::InvalidInput(_)
+    ));
+    assert!(!display.contains("signed-token"));
+    assert!(!display.contains("header-injection"));
 }
 
 async fn admitted_login(

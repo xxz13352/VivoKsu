@@ -47,6 +47,7 @@ type VersionCheckPayload = {
 };
 
 type ReadinessDialog = 'resources' | 'drivers' | null;
+const MAX_TERMINAL_GENERATIONS = 32;
 
 export const formatCurrentTime = (value = new Date()): string => {
   const month = String(value.getMonth() + 1).padStart(2, '0');
@@ -176,6 +177,8 @@ export const App: FC = () => {
   const closingWindow = useRef(false);
   const sessionUpdateRequiredRef = useRef(false);
   const startupCancelledRef = useRef(false);
+  const currentGenerationRef = useRef<string | null>(null);
+  const terminalGenerationsRef = useRef<Set<string>>(new Set());
 
   const isVersionBlocked = versionBlock !== null;
 
@@ -229,6 +232,28 @@ export const App: FC = () => {
     await showDriverReminderIfNeeded();
   }, [showDriverReminderIfNeeded]);
 
+  const rememberTerminalGeneration = useCallback((generation: string) => {
+    const generations = terminalGenerationsRef.current;
+    if (generations.has(generation)) {
+      return;
+    }
+    generations.add(generation);
+    while (generations.size > MAX_TERMINAL_GENERATIONS) {
+      const oldest = generations.values().next().value as string | undefined;
+      if (!oldest) {
+        break;
+      }
+      generations.delete(oldest);
+    }
+  }, []);
+
+  const isCurrentLiveGeneration = useCallback(
+    (generation: string) =>
+      currentGenerationRef.current === generation &&
+      !terminalGenerationsRef.current.has(generation),
+    [],
+  );
+
   const refreshSessionState = useCallback(async () => {
     try {
       const sessionState = await invoke<SessionStateV2Payload>('session_state');
@@ -236,13 +261,22 @@ export const App: FC = () => {
         return;
       }
       if (!sessionState.has_token || !sessionState.running) {
+        currentGenerationRef.current = null;
         setIsLoggedIn(false);
         setAccountName('未登录');
         return;
       }
+      const generation = sessionState.generation;
+      if (!generation || terminalGenerationsRef.current.has(generation)) {
+        currentGenerationRef.current = null;
+        setIsLoggedIn(false);
+        setAccountName('未登录');
+        return;
+      }
+      currentGenerationRef.current = generation;
 
       const validated = await invoke<string | null>('auth_validate_token');
-      if (startupCancelledRef.current) {
+      if (startupCancelledRef.current || !isCurrentLiveGeneration(generation)) {
         return;
       }
       if (!validated) {
@@ -267,6 +301,9 @@ export const App: FC = () => {
       }
 
       await runPostLoginReadiness();
+      if (!isCurrentLiveGeneration(generation)) {
+        return;
+      }
     } catch (error) {
       const updateDetails = updateRequiredDetailsFromError(error);
       if (updateDetails) {
@@ -277,7 +314,7 @@ export const App: FC = () => {
       setAccountName('未登录');
       console.debug('会话恢复失败:', error);
     }
-  }, [runPostLoginReadiness]);
+  }, [isCurrentLiveGeneration, runPostLoginReadiness]);
 
   const applyVersionBlock = useCallback(
     (check: VersionCheckPayload, reason = '版本不符合要求，请先更新。') => {
@@ -339,6 +376,7 @@ export const App: FC = () => {
     try {
       await invoke<void>('session_stop');
       await invoke<void>('auth_logout');
+      currentGenerationRef.current = null;
       setIsLoggedIn(false);
       setAccountName('未登录');
       setLoginPassword('');
@@ -453,9 +491,23 @@ export const App: FC = () => {
     setLoginPassword('');
     try {
       const response = await invoke<AuthSessionPayload>('auth_login', loginPayload);
+      const generation = response.generation;
+      if (!generation || terminalGenerationsRef.current.has(generation)) {
+        currentGenerationRef.current = null;
+        setIsLoggedIn(false);
+        setAccountName('未登录');
+        return;
+      }
+      currentGenerationRef.current = generation;
+      sessionUpdateRequiredRef.current = false;
+      clearVersionBlock();
+      setSessionNotice('');
       setAccountName(response.name || response.username || 'admin');
       setIsLoggedIn(true);
       await runPostLoginReadiness();
+      if (!isCurrentLiveGeneration(generation)) {
+        return;
+      }
     } catch (error) {
       const updateDetails = updateRequiredDetailsFromError(error);
       if (updateDetails) {
@@ -469,7 +521,14 @@ export const App: FC = () => {
     } finally {
       setIsBusyAction(false);
     }
-  }, [loginPassword, loginUsername, isVersionBlocked, runPostLoginReadiness]);
+  }, [
+    clearVersionBlock,
+    isCurrentLiveGeneration,
+    isVersionBlocked,
+    loginPassword,
+    loginUsername,
+    runPostLoginReadiness,
+  ]);
 
   const closeResourceReadiness = useCallback(() => {
     setReadinessDialog(null);
@@ -575,6 +634,15 @@ export const App: FC = () => {
           if (!active) {
             return;
           }
+          const generation = event.payload.generation;
+          rememberTerminalGeneration(generation);
+          const currentGeneration = currentGenerationRef.current;
+          if (currentGeneration !== null && currentGeneration !== generation) {
+            return;
+          }
+          if (currentGeneration === generation) {
+            currentGenerationRef.current = null;
+          }
           setOperations([]);
           setSessionNotice(`会话已退出：${event.payload.reason}`);
           setIsLoggedIn(false);
@@ -587,6 +655,15 @@ export const App: FC = () => {
         (event) => {
           if (!active) {
             return;
+          }
+          const generation = event.payload.generation;
+          rememberTerminalGeneration(generation);
+          const currentGeneration = currentGenerationRef.current;
+          if (currentGeneration !== null && currentGeneration !== generation) {
+            return;
+          }
+          if (currentGeneration === generation) {
+            currentGenerationRef.current = null;
           }
           sessionUpdateRequiredRef.current = true;
           setOperations([]);
@@ -622,7 +699,13 @@ export const App: FC = () => {
         unlisten();
       }
     };
-  }, [clearVersionBlock, checkVersionGate, refreshSessionState, upsertOperation]);
+  }, [
+    clearVersionBlock,
+    checkVersionGate,
+    refreshSessionState,
+    rememberTerminalGeneration,
+    upsertOperation,
+  ]);
 
   if (!isLoggedIn) {
     return (

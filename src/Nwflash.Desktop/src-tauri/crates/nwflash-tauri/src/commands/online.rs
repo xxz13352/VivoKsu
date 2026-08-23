@@ -29,7 +29,7 @@ pub async fn online_sessions(state: State<'_, AppState>) -> Result<Vec<OnlineSes
         .get_online(token.as_str())
         .await
         .map(OnlineSessionDto::from_model_list)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.user_message())
 }
 
 impl OnlineSessionDto {

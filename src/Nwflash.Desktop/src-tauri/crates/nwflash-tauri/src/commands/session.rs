@@ -9,6 +9,7 @@ pub struct SessionState {
     pub running: bool,
     pub healthy: bool,
     pub session_id: Option<String>,
+    pub generation: Option<String>,
     pub has_token: bool,
 }
 
@@ -58,6 +59,7 @@ async fn read_session_state(state: &AppState) -> SessionState {
         running: state.session_lifecycle.is_running().await,
         healthy: state.session_lifecycle.is_healthy(),
         session_id: state.session_lifecycle.session_id().await,
+        generation: state.session_lifecycle.generation().await,
         has_token: state
             .session_token
             .read()

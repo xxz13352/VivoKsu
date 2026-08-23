@@ -26,6 +26,7 @@ pub struct HeartbeatInput {
     pub token: SecretToken,
     pub username: String,
     pub lease: SessionLease,
+    pub generation: String,
     pub active: bool,
 }
 
@@ -36,6 +37,7 @@ impl fmt::Debug for HeartbeatInput {
             .field("token", &"[REDACTED]")
             .field("username", &self.username)
             .field("lease", &self.lease)
+            .field("generation", &self.generation)
             .field("active", &self.active)
             .finish()
     }
@@ -45,15 +47,48 @@ pub struct SessionLifecycleSession {
     token: SecretToken,
     username: String,
     lease: SessionLease,
+    generation: String,
 }
 
+pub struct PreparedSessionLifecycleSession(SessionLifecycleSession);
+
 impl SessionLifecycleSession {
-    pub fn new(token: SecretToken, username: String, lease: SessionLease) -> Self {
+    pub fn new(
+        token: SecretToken,
+        username: String,
+        lease: SessionLease,
+        generation: String,
+    ) -> Self {
         Self {
             token,
             username,
             lease,
+            generation,
         }
+    }
+
+    pub fn prepare(
+        token: SecretToken,
+        username: String,
+        lease: SessionLease,
+        generation: String,
+    ) -> Result<PreparedSessionLifecycleSession, SessionLifecycleError> {
+        let session = Self::new(token, username, lease, generation);
+        session.validate()?;
+        Ok(PreparedSessionLifecycleSession(session))
+    }
+
+    fn validate(&self) -> Result<(), SessionLifecycleError> {
+        if !self.token.is_header_safe()
+            || self.username.trim().is_empty()
+            || self.lease.session_id().trim().is_empty()
+            || self.generation.trim().is_empty()
+        {
+            return Err(SessionLifecycleError::Message(
+                "signed session input is invalid".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -64,6 +99,7 @@ impl fmt::Debug for SessionLifecycleSession {
             .field("token", &"[REDACTED]")
             .field("username", &self.username)
             .field("lease", &self.lease)
+            .field("generation", &self.generation)
             .finish()
     }
 }
@@ -73,8 +109,8 @@ pub type HeartbeatCallback = Arc<
         + Send
         + Sync,
 >;
-pub type ForceExitCallback = Arc<dyn Fn(String) + Send + Sync>;
-pub type UpdateRequiredCallback = Arc<dyn Fn(UpdateRequiredInfo) + Send + Sync>;
+pub type ForceExitCallback = Arc<dyn Fn(String, String) + Send + Sync>;
+pub type UpdateRequiredCallback = Arc<dyn Fn(String, UpdateRequiredInfo) + Send + Sync>;
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const HEARTBEAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -166,32 +202,53 @@ impl SessionLifecycle {
             .map(|session| session.lease.session_id().to_string())
     }
 
+    pub async fn generation(&self) -> Option<String> {
+        self.state
+            .session
+            .read()
+            .await
+            .as_ref()
+            .map(|session| session.generation.clone())
+    }
+
     pub async fn start(
         &self,
         session: SessionLifecycleSession,
     ) -> Result<(), SessionLifecycleError> {
-        if session.token.is_empty()
-            || session.username.trim().is_empty()
-            || session.lease.session_id().trim().is_empty()
-        {
-            return Err(SessionLifecycleError::Message(
-                "signed session 与 token 不能为空".to_string(),
-            ));
-        }
+        session.validate()?;
 
         let mut task = self.state.running_task.lock().await;
         if self.state.running.load(Ordering::Acquire) || self.state.session.read().await.is_some() {
             return Err(SessionLifecycleError::AlreadyRunning);
         }
 
-        *self.state.session.write().await = Some(session);
+        self.install_prepared(PreparedSessionLifecycleSession(session), &mut task)
+            .await;
+        Ok(())
+    }
+
+    pub async fn start_prepared(&self, prepared: PreparedSessionLifecycleSession) {
+        let mut task = self.state.running_task.lock().await;
+        assert!(
+            !self.state.running.load(Ordering::Acquire)
+                && self.state.session.read().await.is_none(),
+            "prepared lifecycle activation requires completed teardown"
+        );
+        self.install_prepared(prepared, &mut task).await;
+    }
+
+    async fn install_prepared(
+        &self,
+        prepared: PreparedSessionLifecycleSession,
+        task: &mut Option<JoinHandle<()>>,
+    ) {
+        *self.state.session.write().await = Some(prepared.0);
         let stop_token = CancellationToken::new();
         *self.state.stop_token.lock().await = Some(stop_token.clone());
         self.state.transient_failures.store(0, Ordering::Release);
         self.state.healthy.store(false, Ordering::Release);
         self.state.running.store(true, Ordering::Release);
         *task = Some(self.spawn_heartbeat_loop(stop_token));
-        Ok(())
     }
 
     /// Explicit closeout used by logout/user stop and later by the Task 6 supervisor.
@@ -237,6 +294,7 @@ impl SessionLifecycle {
                 token: session.token.request_scope(),
                 username: session.username.clone(),
                 lease: session.lease.clone(),
+                generation: session.generation.clone(),
                 active,
             })
     }
@@ -269,13 +327,15 @@ impl SessionLifecycle {
         };
         let previous_session_id = input.lease.session_id().to_string();
         let previous_sequence = input.lease.sequence();
+        let generation = input.generation.clone();
         let response = timeout(self.request_timeout, (self.heartbeat_fn)(input)).await;
 
         match response {
             Ok(Ok(HeartbeatAdmission::Accepted(next))) => {
                 if next.session_id() != previous_session_id || next.sequence() <= previous_sequence
                 {
-                    return self.terminal_force_exit("会话租约序号校验失败".to_string());
+                    return self
+                        .terminal_force_exit(generation, "会话租约序号校验失败".to_string());
                 }
 
                 let mut stored = self.state.session.write().await;
@@ -292,18 +352,22 @@ impl SessionLifecycle {
                 self.state.healthy.store(true, Ordering::Release);
                 TickResult::continue_()
             }
-            Ok(Ok(HeartbeatAdmission::ForceExit(reason))) => self.terminal_force_exit(reason),
-            Ok(Ok(HeartbeatAdmission::Goodbye)) => {
-                self.terminal_force_exit("活动心跳响应无有效租约".to_string())
+            Ok(Ok(HeartbeatAdmission::ForceExit(reason))) => {
+                self.terminal_force_exit(generation, reason)
             }
-            Ok(Err(CloudflareError::UpdateRequired(update))) => self.terminal_update(update),
-            Ok(Err(error)) if is_transient(&error) => self.record_transient_failure(),
-            Ok(Err(error)) => self.terminal_force_exit(terminal_reason(&error)),
-            Err(_) => self.record_transient_failure(),
+            Ok(Ok(HeartbeatAdmission::Goodbye)) => {
+                self.terminal_force_exit(generation, "活动心跳响应无有效租约".to_string())
+            }
+            Ok(Err(CloudflareError::UpdateRequired(update))) => {
+                self.terminal_update(generation, update)
+            }
+            Ok(Err(error)) if is_transient(&error) => self.record_transient_failure(generation),
+            Ok(Err(error)) => self.terminal_force_exit(generation, terminal_reason(&error)),
+            Err(_) => self.record_transient_failure(generation),
         }
     }
 
-    fn record_transient_failure(&self) -> TickResult {
+    fn record_transient_failure(&self, generation: String) -> TickResult {
         self.state.healthy.store(false, Ordering::Release);
         let failures = self
             .state
@@ -311,29 +375,29 @@ impl SessionLifecycle {
             .fetch_add(1, Ordering::AcqRel)
             .saturating_add(1);
         if failures == MAX_CONSECUTIVE_TRANSIENT_FAILURES {
-            self.terminal_force_exit("连续三次心跳失败".to_string())
+            self.terminal_force_exit(generation, "连续三次心跳失败".to_string())
         } else {
             TickResult::continue_()
         }
     }
 
-    fn terminal_force_exit(&self, reason: String) -> TickResult {
+    fn terminal_force_exit(&self, generation: String, reason: String) -> TickResult {
         self.state.healthy.store(false, Ordering::Release);
         self.state.running.store(false, Ordering::Release);
         self.state.in_callback.store(true, Ordering::Release);
         if let Some(callback) = self.on_force_exit.as_ref() {
-            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(reason)));
+            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(generation, reason)));
         }
         self.state.in_callback.store(false, Ordering::Release);
         TickResult::stop()
     }
 
-    fn terminal_update(&self, update: UpdateRequiredInfo) -> TickResult {
+    fn terminal_update(&self, generation: String, update: UpdateRequiredInfo) -> TickResult {
         self.state.healthy.store(false, Ordering::Release);
         self.state.running.store(false, Ordering::Release);
         self.state.in_callback.store(true, Ordering::Release);
         if let Some(callback) = self.on_update_required.as_ref() {
-            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(update)));
+            let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| callback(generation, update)));
         }
         self.state.in_callback.store(false, Ordering::Release);
         TickResult::stop()

@@ -12,6 +12,7 @@ pub(crate) struct SessionCapabilityUnavailable;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionSecurityState {
     pub(crate) epoch: u64,
+    pub(crate) generation: String,
     pub(crate) username: String,
     pub(crate) lease: SessionLease,
 }
@@ -35,6 +36,7 @@ impl SessionCapabilityScope {
 
     pub(crate) fn activate_verified(
         &self,
+        generation: String,
         username: String,
         lease: SessionLease,
     ) -> SessionCapabilityLease {
@@ -47,6 +49,7 @@ impl SessionCapabilityScope {
         let capability = SessionCapabilityLease { epoch: state.epoch };
         state.security = Some(SessionSecurityState {
             epoch: capability.epoch,
+            generation,
             username,
             lease,
         });
@@ -79,6 +82,27 @@ impl SessionCapabilityScope {
         previous_sequence: u64,
         next: SessionLease,
     ) -> Result<(), SessionCapabilityUnavailable> {
+        self.refresh_verified_inner(capability, previous_sequence, next, || {})
+    }
+
+    #[cfg(test)]
+    fn refresh_verified_with_hook(
+        &self,
+        capability: SessionCapabilityLease,
+        previous_sequence: u64,
+        next: SessionLease,
+        before_publish: impl FnOnce(),
+    ) -> Result<(), SessionCapabilityUnavailable> {
+        self.refresh_verified_inner(capability, previous_sequence, next, before_publish)
+    }
+
+    fn refresh_verified_inner(
+        &self,
+        capability: SessionCapabilityLease,
+        previous_sequence: u64,
+        next: SessionLease,
+        before_publish: impl FnOnce(),
+    ) -> Result<(), SessionCapabilityUnavailable> {
         let mut state = self.lock_state();
         if !state.active || state.epoch != capability.epoch {
             return Err(SessionCapabilityUnavailable);
@@ -94,6 +118,7 @@ impl SessionCapabilityScope {
         {
             return Err(SessionCapabilityUnavailable);
         }
+        before_publish();
         security.lease = next;
         Ok(())
     }
@@ -221,12 +246,17 @@ mod tests {
     fn verified_activation_publishes_security_state_with_the_artifact_epoch() {
         let scope = SessionCapabilityScope::new();
 
-        let epoch = scope.activate_verified("user".to_string(), verified_lease(1));
+        let epoch = scope.activate_verified(
+            "generation-one".to_string(),
+            "user".to_string(),
+            verified_lease(1),
+        );
         let security = scope
             .security()
             .expect("verified session should be visible");
 
         assert_eq!(security.epoch, epoch.epoch);
+        assert_eq!(security.generation, "generation-one");
         assert_eq!(security.username, "user");
         assert_eq!(security.lease.session_id(), "signed-session");
         assert_eq!(security.lease.sequence(), 1);
@@ -235,7 +265,11 @@ mod tests {
     #[test]
     fn heartbeat_refresh_is_atomic_and_rejection_preserves_the_previous_sequence() {
         let scope = SessionCapabilityScope::new();
-        let epoch = scope.activate_verified("user".to_string(), verified_lease(1));
+        let epoch = scope.activate_verified(
+            "generation-one".to_string(),
+            "user".to_string(),
+            verified_lease(1),
+        );
 
         scope
             .refresh_verified(epoch, 1, verified_lease(2))
@@ -248,6 +282,55 @@ mod tests {
         assert!(rejected.is_err());
         assert_eq!(security.lease.sequence(), 2);
         assert!(scope.is_current(epoch));
+    }
+
+    #[test]
+    fn heartbeat_refresh_and_invalidation_are_serialized_by_the_capability_barrier() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        let epoch = scope.activate_verified(
+            "generation-one".to_string(),
+            "user".to_string(),
+            verified_lease(1),
+        );
+        let (refresh_entered_tx, refresh_entered_rx) = mpsc::channel();
+        let (release_refresh_tx, release_refresh_rx) = mpsc::channel();
+        let refresher = std::thread::spawn({
+            let scope = scope.clone();
+            move || {
+                scope.refresh_verified_with_hook(epoch, 1, verified_lease(2), || {
+                    refresh_entered_tx.send(()).unwrap();
+                    release_refresh_rx.recv().unwrap();
+                })
+            }
+        });
+        refresh_entered_rx.recv().unwrap();
+
+        let (invalidate_attempt_tx, invalidate_attempt_rx) = mpsc::channel();
+        let (clear_entered_tx, clear_entered_rx) = mpsc::channel();
+        let invalidator = std::thread::spawn({
+            let scope = scope.clone();
+            move || {
+                invalidate_attempt_tx.send(()).unwrap();
+                scope.invalidate(|| clear_entered_tx.send(()).unwrap());
+            }
+        });
+        invalidate_attempt_rx.recv().unwrap();
+        let invalidation_interleaved = clear_entered_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_ok();
+
+        release_refresh_tx.send(()).unwrap();
+        refresher.join().unwrap().unwrap();
+        if !invalidation_interleaved {
+            clear_entered_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+        }
+        invalidator.join().unwrap();
+
+        assert!(!invalidation_interleaved);
+        assert!(scope.capture().is_err());
+        assert!(scope.security().is_err());
     }
 
     #[test]

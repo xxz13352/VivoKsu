@@ -85,6 +85,7 @@ fn lifecycle_session(sequence: u64) -> SessionLifecycleSession {
         SecretToken::new(TOKEN.to_string()),
         USERNAME.to_string(),
         signed_lease(sequence),
+        "generation-test".to_string(),
     )
 }
 
@@ -222,7 +223,9 @@ async fn force_exit_is_terminal_once_and_does_not_send_goodbye_early() {
     let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
     let lifecycle = short_lifecycle(
         callback,
-        Some(Arc::new(move |reason| terminal_tx.send(reason).unwrap())),
+        Some(Arc::new(move |_generation, reason| {
+            terminal_tx.send(reason).unwrap()
+        })),
         None,
     );
     lifecycle.start(lifecycle_session(1)).await.unwrap();
@@ -282,7 +285,9 @@ async fn integrity_and_terminal_status_failures_stop_on_the_first_occurrence() {
         let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
         let lifecycle = short_lifecycle(
             callback,
-            Some(Arc::new(move |reason| terminal_tx.send(reason).unwrap())),
+            Some(Arc::new(move |_generation, reason| {
+                terminal_tx.send(reason).unwrap()
+            })),
             None,
         );
         lifecycle.start(lifecycle_session(1)).await.unwrap();
@@ -315,7 +320,9 @@ async fn update_required_is_terminal_on_the_first_occurrence_without_early_goodb
     let lifecycle = short_lifecycle(
         callback,
         None,
-        Some(Arc::new(move |update| update_tx.send(update).unwrap())),
+        Some(Arc::new(move |_generation, update| {
+            update_tx.send(update).unwrap()
+        })),
     );
     lifecycle.start(lifecycle_session(1)).await.unwrap();
 
@@ -344,7 +351,9 @@ async fn transient_failures_become_terminal_on_exactly_the_third_consecutive_att
     let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
     let lifecycle = short_lifecycle(
         callback,
-        Some(Arc::new(move |reason| terminal_tx.send(reason).unwrap())),
+        Some(Arc::new(move |_generation, reason| {
+            terminal_tx.send(reason).unwrap()
+        })),
         None,
     );
     lifecycle.start(lifecycle_session(1)).await.unwrap();
@@ -396,7 +405,9 @@ async fn accepted_heartbeat_resets_the_transient_failure_counter() {
     let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
     let lifecycle = short_lifecycle(
         callback,
-        Some(Arc::new(move |reason| terminal_tx.send(reason).unwrap())),
+        Some(Arc::new(move |_generation, reason| {
+            terminal_tx.send(reason).unwrap()
+        })),
         None,
     );
     lifecycle.start(lifecycle_session(1)).await.unwrap();
@@ -420,6 +431,7 @@ async fn start_rejects_an_empty_secret_and_stop_without_context_is_not_started()
         SecretToken::new(String::new()),
         USERNAME.to_string(),
         signed_lease(1),
+        "generation-invalid".to_string(),
     );
 
     assert!(matches!(
@@ -430,4 +442,97 @@ async fn start_rejects_an_empty_secret_and_stop_without_context_is_not_started()
         lifecycle.stop().await,
         Err(SessionLifecycleError::NotStarted)
     ));
+}
+
+#[tokio::test]
+async fn terminal_callback_carries_the_rust_issued_session_generation() {
+    let callback: HeartbeatCallback = Arc::new(|_input| {
+        Box::pin(async { Ok(HeartbeatAdmission::ForceExit("terminal".to_string())) })
+    });
+    let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+    let lifecycle = short_lifecycle(
+        callback,
+        Some(Arc::new(move |generation, reason| {
+            terminal_tx.send((generation, reason)).unwrap();
+        })),
+        None,
+    );
+    lifecycle
+        .start(SessionLifecycleSession::new(
+            SecretToken::new(TOKEN.to_string()),
+            USERNAME.to_string(),
+            signed_lease(1),
+            "generation-runtime".to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        timeout(Duration::from_millis(150), terminal_rx.recv())
+            .await
+            .unwrap(),
+        Some(("generation-runtime".to_string(), "terminal".to_string()))
+    );
+    assert_eq!(
+        lifecycle.generation().await.as_deref(),
+        Some("generation-runtime")
+    );
+    lifecycle.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn prepared_activation_rejects_fallible_start_inputs_before_state_mutation() {
+    let invalid_token = SessionLifecycleSession::prepare(
+        SecretToken::new("bad\nheader".to_string()),
+        USERNAME.to_string(),
+        signed_lease(1),
+        "generation-valid".to_string(),
+    );
+    let invalid_username = SessionLifecycleSession::prepare(
+        SecretToken::new(TOKEN.to_string()),
+        " ".to_string(),
+        signed_lease(1),
+        "generation-valid".to_string(),
+    );
+    let invalid_generation = SessionLifecycleSession::prepare(
+        SecretToken::new(TOKEN.to_string()),
+        USERNAME.to_string(),
+        signed_lease(1),
+        String::new(),
+    );
+
+    assert!(invalid_token.is_err());
+    assert!(invalid_username.is_err());
+    assert!(invalid_generation.is_err());
+
+    let callback: HeartbeatCallback = Arc::new(|_input| {
+        Box::pin(async { Ok(HeartbeatAdmission::ForceExit("terminal".to_string())) })
+    });
+    let lifecycle = SessionLifecycle::new(callback, None, None);
+    assert!(!lifecycle.is_running().await);
+    assert!(lifecycle.session_id().await.is_none());
+    assert!(lifecycle.generation().await.is_none());
+}
+
+#[tokio::test]
+async fn prepared_activation_start_has_no_post_teardown_error_path() {
+    let callback: HeartbeatCallback = Arc::new(|_input| {
+        Box::pin(async { Ok(HeartbeatAdmission::ForceExit("terminal".to_string())) })
+    });
+    let lifecycle = SessionLifecycle::new(callback, None, None);
+    let prepared = SessionLifecycleSession::prepare(
+        SecretToken::new(TOKEN.to_string()),
+        USERNAME.to_string(),
+        signed_lease(1),
+        "generation-prepared".to_string(),
+    )
+    .unwrap();
+
+    lifecycle.start_prepared(prepared).await;
+
+    assert_eq!(
+        lifecycle.generation().await.as_deref(),
+        Some("generation-prepared")
+    );
+    lifecycle.stop().await.unwrap();
 }

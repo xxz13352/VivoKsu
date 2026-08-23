@@ -64,17 +64,21 @@ impl AuthService {
         identity: &ProcessIdentity,
         session_id: &str,
     ) -> CloudflareResult<AuthSession> {
+        let requested_username = username.trim();
         let result = self
             .client
-            .login(username, password, identity, session_id)
+            .login(requested_username, password, identity, session_id)
             .await?;
 
         // Cryptographic verification deliberately precedes every claim/binding check.
         let verified = self
             .client
             .verify_session_lease(&result.signed_envelope())?;
+        if result.username != requested_username {
+            return Err(CloudflareError::Integrity(IntegrityFailure::LeaseBinding));
+        }
         let binding = LeaseBinding::new(
-            &result.username,
+            requested_username,
             TokenDigest::sha256(result.token.as_str().as_bytes()),
             self.client.app_version(),
             identity.build_id(),
@@ -83,6 +87,11 @@ impl AuthService {
         );
         let lease =
             accept_login_lease(&verified, &binding, unix_now()).map_err(map_lease_rejection)?;
+        if !result.token.is_header_safe() {
+            return Err(CloudflareError::InvalidInput(
+                "认证令牌格式无效。".to_string(),
+            ));
+        }
 
         Ok(AuthSession::from_login(result, lease))
     }

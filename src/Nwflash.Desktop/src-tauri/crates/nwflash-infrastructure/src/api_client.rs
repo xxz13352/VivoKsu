@@ -16,7 +16,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use url::Url;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use nwflash_domain::UsageLogEntry;
 
@@ -50,6 +50,32 @@ impl CloudflareError {
             _ => None,
         }
     }
+
+    pub fn user_message(&self) -> String {
+        match self {
+            CloudflareError::Integrity(_) => "网络完整性校验失败，已拒绝请求。".to_string(),
+            CloudflareError::Transport(_) => "网络连接失败，请稍后重试。".to_string(),
+            CloudflareError::ApiError { status: 401, .. } => {
+                "用户名或密码错误，或账号不可用。".to_string()
+            }
+            CloudflareError::ApiError { status: 403, .. } => "服务端拒绝了当前请求。".to_string(),
+            CloudflareError::ApiError { status: 409, .. } => {
+                "会话已失效或发生冲突，请重新登录。".to_string()
+            }
+            CloudflareError::ApiError { status: 429, .. } => {
+                "请求过于频繁，请稍后重试。".to_string()
+            }
+            CloudflareError::ApiError {
+                status: 500..=599, ..
+            } => "服务暂时不可用，请稍后重试。".to_string(),
+            CloudflareError::ApiError { .. } => "服务端拒绝了当前请求。".to_string(),
+            CloudflareError::UpdateRequired(_) => {
+                "需要更新: 客户端版本过低，请更新后重试。".to_string()
+            }
+            CloudflareError::InvalidInput(_) => "请求参数无效。".to_string(),
+            CloudflareError::InvalidResponse(_) => "服务端响应无效。".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,6 +93,35 @@ impl Display for UpdateRequiredInfo {
 }
 
 pub type CloudflareResult<T> = Result<T, CloudflareError>;
+
+struct ZeroizingResponseBody(Zeroizing<String>);
+
+impl ZeroizingResponseBody {
+    fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for ZeroizingResponseBody {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ZeroizingResponseBody([REDACTED])")
+    }
+}
+
+impl Zeroize for ZeroizingResponseBody {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 #[derive(Serialize)]
 pub struct LoginRequest {
@@ -435,7 +490,7 @@ impl CloudflareClient {
         let response = self
             .http
             .get(request_url)
-            .headers(self.default_headers(Some(token)))
+            .headers(self.default_headers(Some(token))?)
             .send()
             .await
             .map_err(classify_reqwest_error)?;
@@ -583,7 +638,7 @@ impl CloudflareClient {
         let response = self
             .http
             .get(request_url)
-            .headers(self.default_headers(None))
+            .headers(self.default_headers(None)?)
             .send()
             .await
             .map_err(classify_reqwest_error)?;
@@ -616,13 +671,17 @@ impl CloudflareClient {
         let builder = self
             .http
             .request(method, self.url(relative_path))
-            .headers(self.default_headers(token));
+            .headers(self.default_headers(token)?);
 
         let request = if let Some(body) = body {
             builder.json(body)
         } else {
             builder
         };
+
+        // reqwest/rustls necessarily own serialized header/body bytes while encrypting and
+        // transmitting the request. Client-owned bearer/password intermediates remain
+        // zeroizing, and the Authorization value is marked sensitive for library Debug output.
 
         let response = request.send().await.map_err(classify_reqwest_error)?;
         self.ensure_integrity_response(&response)?;
@@ -644,21 +703,23 @@ impl CloudflareClient {
         Ok(())
     }
 
-    async fn handle_api_error(&self, response: Response) -> CloudflareResult<String> {
+    async fn handle_api_error(
+        &self,
+        response: Response,
+    ) -> CloudflareResult<ZeroizingResponseBody> {
         let status = response.status();
         let status_code = status.as_u16();
 
-        let text = response.text().await.map_err(classify_reqwest_error)?;
+        let text =
+            ZeroizingResponseBody::new(response.text().await.map_err(classify_reqwest_error)?);
 
         if status == StatusCode::UPGRADE_REQUIRED {
-            let update = self.parse_update_required(&text)?;
+            let update = self.parse_update_required(text.as_str())?;
             return Err(CloudflareError::UpdateRequired(update));
         }
 
         if !status.is_success() {
-            let message = self
-                .parse_error_message(&text)
-                .unwrap_or_else(|| fallback_message(status_code));
+            let message = fallback_message(status_code);
             return Err(CloudflareError::ApiError {
                 status: status_code,
                 message,
@@ -668,8 +729,11 @@ impl CloudflareClient {
         Ok(text)
     }
 
-    async fn parse_json<T: DeserializeOwned>(&self, body: String) -> CloudflareResult<T> {
-        serde_json::from_str(&body)
+    async fn parse_json<T: DeserializeOwned>(
+        &self,
+        body: ZeroizingResponseBody,
+    ) -> CloudflareResult<T> {
+        serde_json::from_str(body.as_str())
             .map_err(|err| CloudflareError::InvalidResponse(format!("响应格式无效: {err}")))
     }
 
@@ -694,13 +758,6 @@ impl CloudflareClient {
         }
     }
 
-    fn parse_error_message(&self, text: &str) -> Option<String> {
-        let root = serde_json::from_str::<Value>(text).ok()?;
-        root.get("error")
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string)
-    }
-
     fn parse_update_required(&self, text: &str) -> CloudflareResult<UpdateRequiredInfo> {
         let root = serde_json::from_str::<Value>(text)
             .map_err(|error| CloudflareError::InvalidResponse(format!("响应格式无效: {error}")))?;
@@ -710,32 +767,39 @@ impl CloudflareClient {
                 .and_then(|value| value.as_str())
                 .map(str::to_string)
         };
-        let fallback = "需要更新 VivoKsu 后才能继续使用。".to_string();
         Ok(UpdateRequiredInfo {
-            message: get("error").unwrap_or(fallback),
+            message: "需要更新 VivoKsu 后才能继续使用。".to_string(),
             latest: get("latest"),
             min_version: get("min"),
             download_url: get("download_url"),
         })
     }
 
-    fn default_headers(&self, token: Option<&str>) -> HeaderMap {
+    #[cfg(debug_assertions)]
+    pub fn authenticated_headers_for_test(&self, token: &str) -> CloudflareResult<HeaderMap> {
+        self.default_headers(Some(token))
+    }
+
+    fn default_headers(&self, token: Option<&str>) -> CloudflareResult<HeaderMap> {
         let mut headers = HeaderMap::new();
         let app_version = HeaderValue::from_str(&self.app_version)
-            .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_APP_VERSION));
+            .map_err(|_| CloudflareError::InvalidInput("客户端版本头格式无效。".to_string()))?;
         headers.insert("X-Nwflash-Version", app_version);
 
         if let Some(token) = token {
-            if !token.trim().is_empty() {
-                let bearer = Zeroizing::new(format!("Bearer {token}"));
-                headers.insert(
-                    AUTHORIZATION,
-                    HeaderValue::from_str(&bearer).expect("固定构造的 Authorization 头应始终有效"),
-                );
+            if token.is_empty() {
+                return Err(CloudflareError::InvalidInput(
+                    "认证令牌格式无效。".to_string(),
+                ));
             }
+            let bearer = Zeroizing::new(format!("Bearer {token}"));
+            let mut authorization = HeaderValue::from_str(&bearer)
+                .map_err(|_| CloudflareError::InvalidInput("认证令牌格式无效。".to_string()))?;
+            authorization.set_sensitive(true);
+            headers.insert(AUTHORIZATION, authorization);
         }
 
-        headers
+        Ok(headers)
     }
 
     fn url(&self, relative_path: &str) -> String {
@@ -769,5 +833,21 @@ fn fallback_message(status: u16) -> String {
         400 => "查询参数不合法。".to_string(),
         429 => "请求过于频繁,请稍后再试。".to_string(),
         _ => "服务端返回错误。".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zeroize::Zeroize as _;
+
+    use super::ZeroizingResponseBody;
+
+    #[test]
+    fn aggregate_response_body_is_redacted_and_explicitly_zeroizable() {
+        let mut body = ZeroizingResponseBody::new("response-secret".to_string());
+
+        assert!(!format!("{body:?}").contains("response-secret"));
+        body.zeroize();
+        assert!(body.is_empty());
     }
 }

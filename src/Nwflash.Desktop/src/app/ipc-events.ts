@@ -58,18 +58,22 @@ export interface SessionStateV2Payload {
   readonly healthy: boolean;
   readonly running: boolean;
   readonly session_id: string | null;
+  readonly generation: string | null;
 }
 
 export interface AuthSessionPayload {
   readonly username: string;
   readonly name: string;
+  readonly generation: string;
 }
 
 export interface SessionForceExitPayload {
+  readonly generation: string;
   readonly reason: string;
 }
 
 export interface SessionUpdateRequiredPayload {
+  readonly generation: string;
   readonly message: string;
   readonly latest: string | null;
   readonly minVersion: string | null;

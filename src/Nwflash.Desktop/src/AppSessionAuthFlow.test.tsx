@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from './app/App';
+import { IPC_EVENTS } from './app/ipc-events';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -77,6 +78,7 @@ const setupInvokeMocks = () => {
       return {
         username: 'admin',
         name: '管理员',
+        generation: 'generation-default',
       };
     }
 
@@ -277,7 +279,7 @@ describe('登录态界面', () => {
         return { has_token: false, healthy: false, running: false, session_id: null };
       }
       if (command === 'auth_login') {
-        return { username: 'admin', name: '管理员' };
+        return { username: 'admin', name: '管理员', generation: 'generation-login' };
       }
       if (command === 'resource_inventory') {
         return [
@@ -363,6 +365,153 @@ describe('登录态界面', () => {
     rejectLogin?.('登录失败');
     await waitUntil(() => host.querySelector('.nw-login-notice')?.textContent === '登录失败');
     expect((host.querySelector('[aria-label="密码"]') as HTMLInputElement).value).toBe('');
+  });
+
+  test('登录响应前同代 force-exit 到达时后续成功响应不能恢复登录', async () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    const listeners = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    let resolveLogin: ((value: { username: string; name: string; generation: string }) => void)
+      | undefined;
+    const deferredLogin = new Promise<{ username: string; name: string; generation: string }>(
+      (resolve) => {
+        resolveLogin = resolve;
+      },
+    );
+    (listen as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (event: string, handler: (event: { payload: Record<string, unknown> }) => void) => {
+        listeners.set(event, handler);
+        return () => {};
+      },
+    );
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'version_check') {
+        return { update_required: false, force_update: false };
+      }
+      if (command === 'session_state') {
+        return { has_token: false, healthy: false, running: false, session_id: null, generation: null };
+      }
+      if (command === 'auth_login') {
+        return deferredLogin;
+      }
+      return {};
+    });
+
+    flushSync(() => root.render(<App />));
+    await waitUntil(() => listeners.has(IPC_EVENTS.sessionForceExit));
+    setInputValue(host.querySelector('[aria-label="账号"]') as HTMLInputElement, 'test');
+    setInputValue(host.querySelector('[aria-label="密码"]') as HTMLInputElement, 'secret');
+    await waitUntil(
+      () => !(host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).disabled,
+    );
+    (host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).click();
+    await waitUntil(() => invokeMock.mock.calls.some(([command]) => command === 'auth_login'));
+
+    listeners.get(IPC_EVENTS.sessionForceExit)?.({
+      payload: { generation: 'generation-new', reason: 'terminal-before-response' },
+    });
+    resolveLogin?.({ username: 'test', name: 'Test', generation: 'generation-new' });
+    await flushPromises();
+    await flushPromises();
+
+    expect(host.querySelector('.nw-shell')).toBeNull();
+    expect(host.textContent).toContain('会话已退出');
+  });
+
+  test('登录响应前同代 update 到达时后续成功响应不能越过更新门禁', async () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    const listeners = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    let resolveLogin: ((value: { username: string; name: string; generation: string }) => void)
+      | undefined;
+    const deferredLogin = new Promise<{ username: string; name: string; generation: string }>(
+      (resolve) => {
+        resolveLogin = resolve;
+      },
+    );
+    (listen as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (event: string, handler: (event: { payload: Record<string, unknown> }) => void) => {
+        listeners.set(event, handler);
+        return () => {};
+      },
+    );
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'version_check') {
+        return { update_required: false, force_update: false };
+      }
+      if (command === 'session_state') {
+        return { has_token: false, healthy: false, running: false, session_id: null, generation: null };
+      }
+      if (command === 'auth_login') {
+        return deferredLogin;
+      }
+      return {};
+    });
+
+    flushSync(() => root.render(<App />));
+    await waitUntil(() => listeners.has(IPC_EVENTS.sessionUpdateRequired));
+    setInputValue(host.querySelector('[aria-label="账号"]') as HTMLInputElement, 'test');
+    setInputValue(host.querySelector('[aria-label="密码"]') as HTMLInputElement, 'secret');
+    await waitUntil(
+      () => !(host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).disabled,
+    );
+    (host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).click();
+    await waitUntil(() => invokeMock.mock.calls.some(([command]) => command === 'auth_login'));
+
+    listeners.get(IPC_EVENTS.sessionUpdateRequired)?.({
+      payload: {
+        generation: 'generation-new',
+        message: 'terminal-update-before-response',
+        latest: '2.0.0',
+        minVersion: '2.0.0',
+        downloadUrl: null,
+      },
+    });
+    resolveLogin?.({ username: 'test', name: 'Test', generation: 'generation-new' });
+    await flushPromises();
+    await flushPromises();
+
+    expect(host.querySelector('.nw-shell')).toBeNull();
+    expect(host.textContent).toContain('terminal-update-before-response');
+  });
+
+  test('新登录完成后延迟到达的旧代终止事件不能影响替换会话', async () => {
+    const invokeMock = invoke as unknown as ReturnType<typeof vi.fn>;
+    const listeners = new Map<string, (event: { payload: Record<string, unknown> }) => void>();
+    (listen as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (event: string, handler: (event: { payload: Record<string, unknown> }) => void) => {
+        listeners.set(event, handler);
+        return () => {};
+      },
+    );
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'version_check') {
+        return { update_required: false, force_update: false };
+      }
+      if (command === 'session_state') {
+        return { has_token: false, healthy: false, running: false, session_id: null, generation: null };
+      }
+      if (command === 'auth_login') {
+        return { username: 'test', name: 'Test', generation: 'generation-new' };
+      }
+      return {};
+    });
+
+    flushSync(() => root.render(<App />));
+    await waitUntil(() => listeners.has(IPC_EVENTS.sessionForceExit));
+    setInputValue(host.querySelector('[aria-label="账号"]') as HTMLInputElement, 'test');
+    setInputValue(host.querySelector('[aria-label="密码"]') as HTMLInputElement, 'secret');
+    await waitUntil(
+      () => !(host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).disabled,
+    );
+    (host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement).click();
+    await waitUntil(() => host.querySelector('.nw-shell') !== null);
+
+    listeners.get(IPC_EVENTS.sessionForceExit)?.({
+      payload: { generation: 'generation-old', reason: 'stale-old-terminal' },
+    });
+    await flushPromises();
+
+    expect(host.querySelector('.nw-shell')).not.toBeNull();
+    expect(host.textContent).not.toContain('stale-old-terminal');
   });
 
   test('Rust 返回字符串错误时显示实际登录错误而不是伪装成密码错误', async () => {

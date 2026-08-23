@@ -509,7 +509,8 @@ pub async fn safe_flash_prepare_online(
                     .await
                     .map_err(|error| {
                         DomainError::RemoteApi(format!(
-                            "查询在线固件失败（PD: {pd}，版本: {version}）：{error}"
+                            "查询在线固件失败（PD: {pd}，版本: {version}）：{}",
+                            error.user_message()
                         ))
                     })?;
                 if cancellation.is_cancelled() {
