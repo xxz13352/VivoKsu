@@ -34,28 +34,79 @@ describe("personal ops Worker with real Workerd D1", () => {
     const body = await response.json() as Record<string, unknown>;
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("set-cookie")).toContain("__Host-nwflash_user=");
-    expect(response.headers.get("set-cookie")).toContain("HttpOnly");
-    expect(response.headers.get("set-cookie")).toContain("SameSite=Strict");
-    expect(response.headers.get("set-cookie")).not.toContain("Max-Age");
+    const setCookie = response.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("__Host-nwflash_user=");
+    expect(setCookie).toContain("; Path=/");
+    expect(setCookie).toContain("; Secure");
+    expect(setCookie).toContain("; HttpOnly");
+    expect(setCookie).toContain("; SameSite=Strict");
+    expect(setCookie).not.toContain("Domain=");
+    expect(setCookie).not.toContain("Max-Age");
     expect(body).toMatchObject({ ok: true, username: "alice", name: "Alice" });
     expect(body).not.toHaveProperty("token");
   });
 
-  it("uses an exact 30-day remembered cookie, hashes attempt keys, and removes stale windows", async () => {
+  it("requires the requested-with header before processing login", async () => {
+    await seedUser();
+
+    const response = await request("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "alice", password: PASSWORD, remember: false }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ message: "请求缺少必要请求头。" });
+    expect(await scalar("SELECT COUNT(*) AS value FROM login_attempts")).toBe(0);
+  });
+
+  it("uses exact distinct rate keys, a coarse IP ceiling, and removes stale windows", async () => {
     await seedUser();
     await env.DB.prepare(
       "INSERT INTO login_attempts (k, window_start, count) VALUES ('stale-hash', ?, 1)",
     ).bind(Math.floor(FIXED_NOW_MS / 1000) - 7_200).run();
 
     const response = await postLogin("alice", PASSWORD, true, "203.0.113.45");
-    const key = await storedString("SELECT k AS value FROM login_attempts LIMIT 1");
+    const rows = await env.DB.prepare(
+      "SELECT k, count FROM login_attempts ORDER BY k",
+    ).all<{ k: string; count: number }>();
 
     expect(response.headers.get("set-cookie")).toContain("Max-Age=2592000");
-    expect(key).toMatch(/^[0-9a-f]{64}$/);
-    expect(key).not.toContain("203.0.113.45");
-    expect(key).not.toContain("alice");
+    expect(rows.results).toEqual([
+      { k: "59a5a6b7d26ccec4f492b4e9b87a0830472f793d6deb6e9acd27ac6a445dd3b2", count: 1 },
+      { k: "faa01814b0208fc8db3d8040fb093c7bea121545071d072953792dbe7e26331b", count: 1 },
+    ]);
     expect(await scalar("SELECT COUNT(*) AS value FROM login_attempts WHERE k = 'stale-hash'")).toBe(0);
+
+    await env.DB.prepare(
+      "UPDATE login_attempts SET count = 24 WHERE k = ?",
+    ).bind("59a5a6b7d26ccec4f492b4e9b87a0830472f793d6deb6e9acd27ac6a445dd3b2").run();
+    const limited = await postLogin("another-name", "wrong password", false, "203.0.113.45");
+    expect(limited.status).toBe(429);
+  });
+
+  it("performs exactly one PBKDF2 for every credential outcome", async () => {
+    await seedUser();
+    await seedUser({ id: 8, username: "disabled", name: "Disabled", token: "8".repeat(64) });
+    await seedUser({ id: 9, username: "banned", name: "Banned", token: "9".repeat(64) });
+    await seedUser({ id: 10, username: "passwordless", name: "Passwordless", token: "c".repeat(64) });
+    await env.DB.batch([
+      env.DB.prepare("UPDATE api_users SET enabled = 0 WHERE id = 8"),
+      env.DB.prepare("UPDATE api_users SET banned = 1 WHERE id = 9"),
+      env.DB.prepare("UPDATE api_users SET password = NULL, salt = NULL WHERE id = 10"),
+    ]);
+    const deriveBits = vi.spyOn(crypto.subtle, "deriveBits");
+
+    const responses = await Promise.all([
+      postLogin("missing", "wrong password", false),
+      postLogin("disabled", "wrong password", false),
+      postLogin("banned", "wrong password", false),
+      postLogin("passwordless", "wrong password", false),
+      postLogin("alice", "wrong password", false),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([401, 401, 401, 401, 401]);
+    expect(deriveBits).toHaveBeenCalledTimes(5);
   });
 
   it("authenticates only the portal cookie and expires invalid or revoked cookies", async () => {
@@ -166,20 +217,24 @@ describe("personal ops Worker with real Workerd D1", () => {
 
     expect(response.status).toBe(409);
     expect(await storedToken()).toBe(winningToken);
-    expect(await scalar("SELECT COUNT(*) AS value FROM session_leases WHERE user_id = 7")).toBe(0);
-    expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions WHERE user_id = 7")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM session_leases WHERE user_id = 7")).toBe(2);
+    expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions WHERE user_id = 7")).toBe(2);
   });
 
-  it("computes overview counts only from the authenticated user's records", async () => {
+  it("computes overview counts only from the authenticated user's last seven days", async () => {
     await seedUser();
     await seedUser({ id: 8, username: "bob", name: "Bob", token: BOB_TOKEN });
     const now = Math.floor(FIXED_NOW_MS / 1000);
+    const recent = now - (6 * 24 * 60 * 60);
+    const old = now - (8 * 24 * 60 * 60);
     await env.DB.batch([
-      usage(7, "Flashing", "success", 100),
-      usage(7, "Rebooting", "failed", 101),
-      usage(8, "Installing", "success", 102),
-      access(7, "PD-A", "1.0", 200, "https://safe.invalid/alice"),
-      access(8, "PD-B", "1.0", 404, "https://safe.invalid/bob"),
+      usage(7, "Flashing", "success", recent),
+      usage(7, "Rebooting", "failed", now - 1),
+      usage(7, "Installing", "success", old),
+      usage(8, "Installing", "success", recent),
+      access(7, "PD-A", "1.0", 200, "https://safe.invalid/alice", sqliteDate(recent)),
+      access(7, "PD-OLD", "0.9", 404, "https://safe.invalid/old", sqliteDate(old)),
+      access(8, "PD-B", "1.0", 404, "https://safe.invalid/bob", sqliteDate(recent)),
       online(7, "alice-live", "203.0.113.1", now - 10),
       online(8, "bob-live", "203.0.113.2", now - 10),
     ]);
@@ -346,7 +401,35 @@ describe("personal ops Worker with real Workerd D1", () => {
 
     expect(kicked.status).toBe(200);
     expect(body.sessions).toHaveLength(1);
-    expect(body.sessions[0]).toMatchObject({ id: "alice-session", pendingExit: true });
+    expect(body.sessions[0]).toEqual({
+      id: "alice-session",
+      clientVersion: "1.4.0",
+      ip_masked: "203.0.113.••",
+      connectedAt: new Date((now - 60) * 1000).toISOString(),
+      lastSeenAt: new Date(now * 1000).toISOString(),
+      duration: "1 分钟",
+      pendingExit: true,
+    });
+    expect(JSON.stringify(body)).not.toContain("用户在本门户强制下线");
+  });
+
+  it("accepts a 128-character password", async () => {
+    await seedUser();
+
+    const response = await changePassword(cookie(ALICE_TOKEN), PASSWORD, "x".repeat(128));
+
+    expect(response.status).toBe(200);
+    expect(await storedToken()).toMatch(/^revoked:[0-9a-f]{64}$/);
+  });
+
+  it("rejects a 129-character password without changing credentials", async () => {
+    await seedUser();
+
+    const response = await changePassword(cookie(ALICE_TOKEN), PASSWORD, "x".repeat(129));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ message: "新密码不能超过 128 位。" });
+    expect(await storedToken()).toBe(ALICE_TOKEN);
   });
 
   it("serves strict-CSP portal assets with their exact content types", async () => {
@@ -436,6 +519,10 @@ function access(userId: number, pd: string, version: string, status: number, url
   ).bind(userId, pd, version, status, url, createdAt);
 }
 
+function sqliteDate(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toISOString().slice(0, 19).replace("T", " ");
+}
+
 function online(userId: number, sessionId: string, ip: string, lastSeenAt: number): D1PreparedStatement {
   return env.DB.prepare(
     `INSERT INTO online_sessions
@@ -447,7 +534,11 @@ function online(userId: number, sessionId: string, ip: string, lastSeenAt: numbe
 async function postLogin(username: string, password: string, remember: boolean, ip = "198.51.100.10"): Promise<Response> {
   return request("/api/login", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+    headers: {
+      "Content-Type": "application/json",
+      "CF-Connecting-IP": ip,
+      "X-Requested-With": "XMLHttpRequest",
+    },
     body: JSON.stringify({ username, password, remember }),
   });
 }

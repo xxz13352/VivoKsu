@@ -12,6 +12,10 @@ export interface Env {
 const PBKDF2_ITERATIONS = 100_000;
 const LOGIN_WINDOW_SEC = 60;
 const LOGIN_MAX_ATTEMPTS = 8;
+const LOGIN_IP_MAX_ATTEMPTS = 24;
+const ACTIVITY_WINDOW_SEC = 7 * 24 * 60 * 60;
+const DUMMY_PASSWORD_SALT = "6e77666c6173682d64756d6d792d7631";
+const DUMMY_PASSWORD_HASH = "0".repeat(64);
 const USER_COOKIE = "__Host-nwflash_user";
 const REVOKED_TOKEN_PREFIX = "revoked:";
 const REMEMBER_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -86,11 +90,11 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   const { method } = request;
   const path = url.pathname;
 
-  if (method === "POST" && path === "/api/login") return login(request, env);
-
   if (method !== "GET" && request.headers.get("X-Requested-With") !== "XMLHttpRequest") {
     return json({ message: "请求缺少必要请求头。" }, 403);
   }
+
+  if (method === "POST" && path === "/api/login") return login(request, env);
 
   if (method === "POST" && path === "/api/logout") {
     return json({ ok: true }, 200, { "Set-Cookie": expiredCookie() });
@@ -136,10 +140,19 @@ async function login(request: Request, env: Env): Promise<Response> {
     banned: number;
   }>();
 
-  if (!user || user.enabled !== 1 || user.banned !== 0 || !user.password || !user.salt) {
-    return json({ message: "用户名或密码错误。" }, 401);
-  }
-  if (await pbkdf2(password, user.salt) !== user.password) {
+  const hasCredential = Boolean(
+    user
+    && user.enabled === 1
+    && user.banned === 0
+    && typeof user.password === "string"
+    && /^[0-9a-f]{64}$/i.test(user.password)
+    && typeof user.salt === "string"
+    && /^(?:[0-9a-f]{2})+$/i.test(user.salt),
+  );
+  const expectedHash = hasCredential ? user!.password! : DUMMY_PASSWORD_HASH;
+  const selectedSalt = hasCredential ? user!.salt! : DUMMY_PASSWORD_SALT;
+  const suppliedHash = await pbkdf2(password, selectedSalt);
+  if (!user || !hasCredential || suppliedHash !== expectedHash) {
     return json({ message: "用户名或密码错误。" }, 401);
   }
 
@@ -179,17 +192,29 @@ async function loginAllowed(env: Env, request: Request, username: string): Promi
   const ip = request.headers.get("CF-Connecting-IP")
     ?? request.headers.get("x-forwarded-for")
     ?? "unknown";
-  const key = await sha256Hex(`${ip}|${username.toLowerCase()}`);
+  const normalizedUsername = username.trim().toLowerCase();
+  const [credentialKey, ipKey] = await Promise.all([
+    sha256Hex(`user:${ip}|${normalizedUsername}`),
+    sha256Hex(`ip:${ip}`),
+  ]);
   const windowStart = Math.floor(Date.now() / 1000 / LOGIN_WINDOW_SEC) * LOGIN_WINDOW_SEC;
-  const row = await env.DB.prepare(
-    `INSERT INTO login_attempts (k, window_start, count) VALUES (?, ?, 1)
-     ON CONFLICT(k, window_start) DO UPDATE SET count = count + 1
-     RETURNING count`,
-  ).bind(key, windowStart).first<{ count: number }>();
+  const attempts = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO login_attempts (k, window_start, count) VALUES (?, ?, 1)
+       ON CONFLICT(k, window_start) DO UPDATE SET count = count + 1
+       RETURNING count`,
+    ).bind(credentialKey, windowStart),
+    env.DB.prepare(
+      `INSERT INTO login_attempts (k, window_start, count) VALUES (?, ?, 1)
+       ON CONFLICT(k, window_start) DO UPDATE SET count = count + 1
+       RETURNING count`,
+    ).bind(ipKey, windowStart),
+  ]);
   await env.DB.prepare(
     "DELETE FROM login_attempts WHERE window_start < ?",
   ).bind(Math.floor(Date.now() / 1000) - 3_600).run();
-  return Number(row?.count ?? LOGIN_MAX_ATTEMPTS + 1) <= LOGIN_MAX_ATTEMPTS;
+  return resultCount(attempts[0]) <= LOGIN_MAX_ATTEMPTS
+    && resultCount(attempts[1]) <= LOGIN_IP_MAX_ATTEMPTS;
 }
 
 async function authenticateUser(env: Env, request: Request): Promise<AuthUser | Response> {
@@ -219,17 +244,27 @@ async function me(env: Env, user: AuthUser): Promise<Response> {
 }
 
 async function overview(env: Env, user: AuthUser): Promise<Response> {
-  const cutoff = Math.floor(Date.now() / 1000) - onlineTimeoutSec(env);
+  const now = Math.floor(Date.now() / 1000);
+  const activityCutoff = now - ACTIVITY_WINDOW_SEC;
+  const onlineCutoff = now - onlineTimeoutSec(env);
   const row = await env.DB.prepare(
     `SELECT
-       (SELECT COUNT(*) FROM usage_logs WHERE api_user_id = ?) AS operations,
-       (SELECT COUNT(*) FROM access_logs WHERE api_user_id = ?) AS rom,
-       (SELECT COUNT(*) FROM usage_logs WHERE api_user_id = ? AND status = 'success')
-         + (SELECT COUNT(*) FROM access_logs WHERE api_user_id = ? AND status BETWEEN 200 AND 299) AS successes,
-       (SELECT COUNT(*) FROM usage_logs WHERE api_user_id = ? AND status <> 'success')
-         + (SELECT COUNT(*) FROM access_logs WHERE api_user_id = ? AND (status < 200 OR status > 299 OR status IS NULL)) AS failures,
+       (SELECT COUNT(*) FROM usage_logs WHERE api_user_id = ? AND started_at >= ?) AS operations,
+       (SELECT COUNT(*) FROM access_logs WHERE api_user_id = ? AND created_at >= datetime(?, 'unixepoch')) AS rom,
+       (SELECT COUNT(*) FROM usage_logs WHERE api_user_id = ? AND started_at >= ? AND status = 'success')
+         + (SELECT COUNT(*) FROM access_logs WHERE api_user_id = ? AND created_at >= datetime(?, 'unixepoch') AND status BETWEEN 200 AND 299) AS successes,
+       (SELECT COUNT(*) FROM usage_logs WHERE api_user_id = ? AND started_at >= ? AND status <> 'success')
+         + (SELECT COUNT(*) FROM access_logs WHERE api_user_id = ? AND created_at >= datetime(?, 'unixepoch') AND (status < 200 OR status > 299 OR status IS NULL)) AS failures,
        (SELECT COUNT(*) FROM online_sessions WHERE user_id = ? AND last_seen_at >= ?) AS active_sessions`,
-  ).bind(user.id, user.id, user.id, user.id, user.id, user.id, user.id, cutoff).first<{
+  ).bind(
+    user.id, activityCutoff,
+    user.id, activityCutoff,
+    user.id, activityCutoff,
+    user.id, activityCutoff,
+    user.id, activityCutoff,
+    user.id, activityCutoff,
+    user.id, onlineCutoff,
+  ).first<{
     operations: number;
     rom: number;
     successes: number;
@@ -368,6 +403,7 @@ async function changePassword(request: Request, env: Env, user: AuthUser): Promi
   const newPassword = typeof body?.newPassword === "string" ? body.newPassword : "";
   if (!current) return json({ message: "请输入当前密码。" }, 400);
   if (newPassword.length < 8) return json({ message: "新密码至少 8 位。" }, 400);
+  if (newPassword.length > 128) return json({ message: "新密码不能超过 128 位。" }, 400);
   if (current === newPassword) return json({ message: "新密码不能与当前密码相同。" }, 400);
 
   const credential = await env.DB.prepare(
@@ -388,8 +424,16 @@ async function changePassword(request: Request, env: Env, user: AuthUser): Promi
        SET salt = ?, password = ?, token = ?
        WHERE id = ? AND token = ? AND enabled = 1 AND banned = 0`,
     ).bind(newSalt, newHash, revokedToken, user.id, user.token),
-    env.DB.prepare("DELETE FROM session_leases WHERE user_id = ?").bind(user.id),
-    env.DB.prepare("DELETE FROM online_sessions WHERE user_id = ?").bind(user.id),
+    env.DB.prepare(
+      `DELETE FROM session_leases
+       WHERE user_id = ?
+         AND EXISTS (SELECT 1 FROM api_users WHERE id = ? AND token = ?)`,
+    ).bind(user.id, user.id, revokedToken),
+    env.DB.prepare(
+      `DELETE FROM online_sessions
+       WHERE user_id = ?
+         AND EXISTS (SELECT 1 FROM api_users WHERE id = ? AND token = ?)`,
+    ).bind(user.id, user.id, revokedToken),
   ]);
 
   if (changed(results[0]) !== 1) {
@@ -405,7 +449,7 @@ async function changePassword(request: Request, env: Env, user: AuthUser): Promi
 async function sessions(env: Env, user: AuthUser): Promise<Response> {
   const cutoff = Math.floor(Date.now() / 1000) - onlineTimeoutSec(env);
   const rows = await env.DB.prepare(
-    `SELECT session_id, client_version, ip, connected_at, last_seen_at, force_exit_at, force_exit_reason
+    `SELECT session_id, client_version, ip, connected_at, last_seen_at, force_exit_at
      FROM online_sessions
      WHERE user_id = ? AND last_seen_at >= ?
      ORDER BY last_seen_at DESC`,
@@ -416,7 +460,6 @@ async function sessions(env: Env, user: AuthUser): Promise<Response> {
     connected_at: number;
     last_seen_at: number;
     force_exit_at: number | null;
-    force_exit_reason: string | null;
   }>();
 
   const now = Math.floor(Date.now() / 1000);
@@ -430,7 +473,6 @@ async function sessions(env: Env, user: AuthUser): Promise<Response> {
       lastSeenAt: new Date(row.last_seen_at * 1000).toISOString(),
       duration: formatDuration(durationSeconds),
       pendingExit: row.force_exit_at !== null,
-      pendingExitReason: row.force_exit_reason,
     };
   });
   return json({ count: serialized.length, sessions: serialized }, 200);
@@ -551,6 +593,11 @@ function json(body: unknown, status: number, extraHeaders: Record<string, string
 
 function changed(result: D1Result<unknown>): number {
   return Number(result.meta.changes ?? 0);
+}
+
+function resultCount(result: D1Result<unknown>): number {
+  const first = result.results[0] as { count?: unknown } | undefined;
+  return Number(first?.count ?? Number.MAX_SAFE_INTEGER);
 }
 
 function randomHex(bytes: number): string {

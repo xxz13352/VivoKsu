@@ -6,6 +6,8 @@ This is the frozen `cloudflare/user` contract. JSON is used for every request an
 
 ### `POST /api/login`
 
+Required request header: `X-Requested-With: XMLHttpRequest`.
+
 Request:
 
 ```json
@@ -39,6 +41,8 @@ An expired or revoked cookie also returns 401, with `{"loggedIn":false,"message"
 ## Personal Ops data
 
 ### `GET /api/me/overview`
+
+Activity totals (`total`, `operations`, `rom`, `successes`, and `failures`) cover the most recent seven days. `activeSessions` is current at request time.
 
 Success (200):
 
@@ -83,10 +87,10 @@ Malformed IDs are 400. Missing or another user's activity is deliberately indist
 Success (200):
 
 ```json
-{"count":1,"sessions":[{"id":"session-1","clientVersion":"1.0.0","ip_masked":"203.0.113.••","connectedAt":"2024-07-03T00:00:00.000Z","lastSeenAt":"2024-07-03T00:01:00.000Z","duration":"1 分钟","pendingExit":false,"pendingExitReason":null}]}
+{"count":1,"sessions":[{"id":"session-1","clientVersion":"1.0.0","ip_masked":"203.0.113.••","connectedAt":"2024-07-03T00:00:00.000Z","lastSeenAt":"2024-07-03T00:01:00.000Z","duration":"1 分钟","pendingExit":false}]}
 ```
 
-`ip_masked` is the only IP field. When a kick is pending, the session remains listed with `pendingExit: true`; the portal polls every two seconds, up to six attempts, and confirms success only when the session disappears.
+The session object has exactly the allowlisted keys shown above. `ip_masked` is the only IP field, and no pending-exit reason is returned. When a kick is pending, the session remains listed with `pendingExit: true`; the portal derives polling from that authoritative field even after reload, polls every two seconds up to six attempts, and confirms success only when the session disappears.
 
 ### `POST /api/me/sessions/kick`
 
@@ -120,9 +124,11 @@ Success (200; expires the cookie):
 {"ok":true,"reauthenticate":true}
 ```
 
-The new password must be at least eight characters and differ from the current one (400 otherwise). An incorrect current password is 401. A concurrent credential change is 409 and expires the cookie. The client must immediately return to login on a successful response or any 401.
+The new password must be 8–128 characters and differ from the current one (400 otherwise). An incorrect current password is 401. A concurrent credential change is 409 and expires the cookie; its stale request does not delete leases or sessions. The client must immediately return to login on a successful response or any authenticated API 401.
 
 ### `POST /api/logout`
+
+Required request header: `X-Requested-With: XMLHttpRequest`. An authenticated cookie is not required.
 
 Success (200; expires the cookie):
 

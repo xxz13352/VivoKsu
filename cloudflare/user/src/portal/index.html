@@ -8,17 +8,24 @@
   </head>
   <body>
     <main class="portal-shell">
-      <section class="login-surface" data-view="login" aria-labelledby="login-title">
+      <section class="login-surface" data-view="login" aria-labelledby="login-title" aria-busy="true">
         <p class="eyebrow">PERSONAL OPS</p>
         <h1 id="login-title">登录以继续</h1>
-        <p>请使用您的帐户凭据进入个人工作区。</p>
-        <form data-login-form>
-          <label>用户名<input required data-login-username autocomplete="username"></label>
-          <label>密码<input required type="password" data-login-password autocomplete="current-password"></label>
-          <label class="remember-choice"><input type="checkbox" data-login-remember> 保持登录状态</label>
-          <p data-login-error role="alert"></p>
-          <button type="submit">登录</button>
-        </form>
+        <div data-bootstrap-loading role="status">正在确认登录状态…</div>
+        <div data-bootstrap-error role="alert" hidden>
+          <p data-bootstrap-error-message>暂时无法确认登录状态。</p>
+          <button type="button" data-bootstrap-retry>重试</button>
+        </div>
+        <div data-login-content hidden>
+          <p>请使用您的帐户凭据进入个人工作区。</p>
+          <form data-login-form aria-busy="false">
+            <label>用户名<input required data-login-username autocomplete="username"></label>
+            <label>密码<input required type="password" data-login-password autocomplete="current-password"></label>
+            <label class="remember-choice"><input type="checkbox" data-login-remember> 保持登录状态</label>
+            <p data-login-error role="alert"></p>
+            <button type="submit">登录</button>
+          </form>
+        </div>
       </section>
 
       <section class="application" data-app data-view="app" hidden>
@@ -34,18 +41,20 @@
         </aside>
 
         <section class="workspace">
-          <p class="live-status" data-live-status aria-live="polite" aria-atomic="true"></p>
-          <section data-view="overview" aria-labelledby="overview-title">
+          <p class="live-status" data-live-status role="status" aria-live="polite" aria-atomic="true"></p>
+
+          <section data-view="overview" aria-labelledby="overview-title" aria-busy="false">
             <p class="eyebrow">工作区</p>
             <h2 id="overview-title">概览</h2>
-            <div data-overview-loading>正在加载概览…</div>
+            <p data-overview-scope>活动指标统计最近 7 天；活跃会话为当前状态。</p>
+            <div data-overview-loading role="status">正在加载概览…</div>
             <div data-overview-empty hidden>暂无可显示的活动。</div>
-            <div data-overview-error hidden>
+            <div data-overview-error role="alert" hidden>
               <p data-overview-error-message>暂时无法加载概览。</p>
               <button type="button" data-overview-retry>重试</button>
             </div>
             <dl class="metric-grid" data-overview-content hidden>
-              <div><dt>活动总数</dt><dd data-overview-total></dd></div>
+              <div><dt>最近 7 天活动总数</dt><dd data-overview-total></dd></div>
               <div><dt>工具操作</dt><dd data-overview-operations></dd></div>
               <div><dt>ROM 查询</dt><dd data-overview-rom></dd></div>
               <div><dt>成功</dt><dd data-overview-successes></dd></div>
@@ -54,38 +63,62 @@
             </dl>
           </section>
 
-          <section data-view="activity" hidden aria-labelledby="activity-title">
+          <section data-view="activity" hidden aria-labelledby="activity-title" aria-busy="false">
             <p class="eyebrow">记录</p>
             <h2 id="activity-title">我的活动</h2>
             <div class="filter-row" aria-label="活动筛选">
               <label>类型<select data-activity-type><option value="all">全部活动</option><option value="operation">工具操作</option><option value="rom">ROM 查询</option></select></label>
               <label>状态<select data-activity-status><option value="all">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="canceled">已取消</option></select></label>
             </div>
-            <div data-activity-loading>正在加载活动…</div>
+            <div data-activity-loading role="status">正在加载活动…</div>
             <div data-activity-empty hidden>暂无活动记录。</div>
-            <div data-activity-error hidden>
+            <div data-activity-error role="alert" hidden>
               <p data-activity-error-message>暂时无法加载活动。</p>
               <button type="button" data-activity-retry hidden>重试</button>
             </div>
             <div class="activity-layout">
               <div data-activity-list aria-label="活动列表"></div>
-              <aside data-activity-detail aria-live="polite">
-                <p data-step-state>选择一项活动以查看安全摘要。</p>
-                <div data-step-list></div>
+              <aside data-activity-detail aria-labelledby="activity-detail-title" aria-busy="false">
+                <h3 id="activity-detail-title">活动详情</h3>
+                <div data-detail-idle>
+                  <p>选择一项活动以查看安全摘要。</p>
+                </div>
+                <div data-detail-loading role="status" hidden>正在加载活动详情…</div>
+                <div data-detail-error role="alert" hidden>
+                  <p data-detail-error-message>暂时无法加载活动详情。</p>
+                  <button type="button" data-detail-retry>重试</button>
+                </div>
+                <div data-detail-content hidden>
+                  <dl class="detail-grid">
+                    <div><dt>活动 ID</dt><dd data-detail-id></dd></div>
+                    <div><dt>类型</dt><dd data-detail-type></dd></div>
+                    <div><dt>状态</dt><dd data-detail-status></dd></div>
+                    <div><dt>安全摘要</dt><dd data-detail-summary></dd></div>
+                    <div><dt>开始时间</dt><dd data-detail-time></dd></div>
+                    <div><dt>结束时间</dt><dd data-detail-end-time></dd></div>
+                    <div><dt>时长</dt><dd data-detail-duration></dd></div>
+                    <div><dt>PD</dt><dd data-detail-pd></dd></div>
+                    <div><dt>版本</dt><dd data-detail-version></dd></div>
+                    <div><dt>HTTP 状态</dt><dd data-detail-http-status></dd></div>
+                    <div><dt>步骤遥测</dt><dd data-detail-telemetry></dd></div>
+                  </dl>
+                  <p data-step-state></p>
+                  <div data-step-list></div>
+                </div>
               </aside>
             </div>
           </section>
 
-          <section data-view="sessions" hidden aria-labelledby="sessions-title">
+          <section data-view="sessions" hidden aria-labelledby="sessions-title" aria-busy="false">
             <p class="eyebrow">设备</p>
-            <h2 id="sessions-title">设备与会话</h2>
-            <div data-sessions-loading>正在加载会话…</div>
+            <h2 id="sessions-title" tabindex="-1">设备与会话</h2>
+            <div data-sessions-loading role="status">正在加载会话…</div>
             <div data-sessions-empty hidden>当前没有活跃会话。</div>
-            <div data-sessions-error hidden>
+            <div data-sessions-error role="alert" hidden>
               <p data-sessions-error-message>暂时无法加载会话。</p>
               <button type="button" data-sessions-retry hidden>重试</button>
             </div>
-            <div data-session-list></div>
+            <div data-session-list aria-label="活跃会话"></div>
           </section>
 
           <section data-view="security" hidden aria-labelledby="security-title">
@@ -102,16 +135,20 @@
       <form method="dialog">
         <h2 id="kick-dialog-title">结束此会话？</h2>
         <p>服务器确认该会话消失前，它会保持“请求已发送”状态。</p>
+        <div data-kick-error role="alert" hidden>
+          <p data-kick-error-message></p>
+          <button type="button" data-retry-kick>重试发送</button>
+        </div>
         <menu><button type="button" data-cancel-kick>取消</button><button type="button" data-confirm-kick>发送请求</button></menu>
       </form>
     </dialog>
 
     <dialog data-password-dialog aria-labelledby="password-dialog-title">
-      <form data-password-form>
+      <form data-password-form aria-busy="false">
         <h2 id="password-dialog-title">更改密码</h2>
         <p>成功后，旧令牌和全部会话将立即失效。</p>
         <label>当前密码<input required type="password" data-password-current autocomplete="current-password"></label>
-        <label>新密码<input required type="password" minlength="8" data-password-new autocomplete="new-password"></label>
+        <label>新密码<input required type="password" minlength="8" maxlength="128" data-password-new autocomplete="new-password"></label>
         <p data-password-error role="alert"></p>
         <menu><button type="button" data-cancel-password>取消</button><button type="submit">确认更改</button></menu>
       </form>
