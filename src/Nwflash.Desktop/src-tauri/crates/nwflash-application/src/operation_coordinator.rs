@@ -331,6 +331,11 @@ impl OperationCoordinator {
         }
     }
 
+    async fn finish_denied_admission(&self, permit: OwnedSemaphorePermit) {
+        self.state.clear_current().await;
+        drop(permit);
+    }
+
     pub async fn run_async<F, Fut>(
         &self,
         kind: OperationKind,
@@ -362,7 +367,7 @@ impl OperationCoordinator {
             let authorization = match gate.authorize(kind, title.clone()).await {
                 Ok(authorization) => authorization,
                 Err(error) => {
-                    self.state.clear_current().await;
+                    self.finish_denied_admission(permit).await;
                     return Err(OperationCoordinatorError::Failed(
                         public_operation_failure_message(&error).to_string(),
                     ));
@@ -376,15 +381,13 @@ impl OperationCoordinator {
                 let message = format!("服务端未许可此操作: {reason}");
                 self.state.emit_blocked(message.clone());
                 self.state.log(OperationLogLevel::Warning, message, None);
-                self.state.clear_current().await;
-                drop(permit);
+                self.finish_denied_admission(permit).await;
                 return Err(OperationCoordinatorError::Denied(reason));
             }
         }
 
         if cancellation.is_cancelled() {
-            self.state.clear_current().await;
-            drop(permit);
+            self.finish_denied_admission(permit).await;
             return Err(OperationCoordinatorError::Canceled);
         }
 
@@ -392,9 +395,20 @@ impl OperationCoordinator {
         let started_at = epoch_seconds_now();
         let started_at_instant = Instant::now();
 
-        if let Err(error) = self.admit_operation_start(&title, kind, &operation_id) {
-            self.state.clear_current().await;
-            drop(permit);
+        let admission_error = {
+            let admission = self.admission.lock();
+            match ensure_running(&admission) {
+                Ok(()) => {
+                    self.is_busy.store(true, Ordering::Release);
+                    self.state
+                        .set_running(&title, kind, operation_id.clone(), true);
+                    None
+                }
+                Err(error) => Some(error),
+            }
+        };
+        if let Some(error) = admission_error {
+            self.finish_denied_admission(permit).await;
             return Err(error);
         }
         self.state.log(
@@ -480,19 +494,6 @@ impl OperationCoordinator {
         self.admission.lock().disposed = true;
     }
 
-    fn admit_operation_start(
-        &self,
-        title: &str,
-        kind: OperationKind,
-        operation_id: &str,
-    ) -> Result<(), OperationCoordinatorError> {
-        let admission = self.admission.lock();
-        ensure_running(&admission)?;
-        self.is_busy.store(true, Ordering::Release);
-        self.state
-            .set_running(title, kind, operation_id.to_string(), true);
-        Ok(())
-    }
 }
 
 fn ensure_running(admission: &AdmissionGateState) -> Result<(), OperationCoordinatorError> {

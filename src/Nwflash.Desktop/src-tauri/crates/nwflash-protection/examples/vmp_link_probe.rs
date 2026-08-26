@@ -16,7 +16,7 @@ fn main() {
     let session = accept_login_lease(&login, &binding(), NOW).expect("probe login must bind");
     let heartbeat = verified_lease(&signing_key, LeaseKind::Heartbeat, 2);
     let heartbeat = classify_heartbeat_lease(&heartbeat, &binding(), 1, NOW);
-    let admission = admit_local_operation(&session, NOW);
+    let admission = admit_local_operation(&session, "layout-build", "layout-nonce", NOW);
     let integrity = verify_image_integrity(&VmpIntegrityProbe);
     let identity = build_identity_matches("layout-build", "layout-build");
 

@@ -44,7 +44,7 @@ async fn auth_login_inner(
         .process_identity
         .fresh_generation()
         .map_err(|error| error.to_string())?;
-    let session = state
+    let session = match state
         .auth_service
         .login(
             &username,
@@ -53,7 +53,26 @@ async fn auth_login_inner(
             &session_id,
         )
         .await
-        .map_err(|error| error.user_message())?;
+    {
+        Ok(session) => session,
+        Err(error @ nwflash_infrastructure::CloudflareError::Integrity(_)) => {
+            let nwflash_infrastructure::CloudflareError::Integrity(failure) = &error else {
+                unreachable!();
+            };
+            let request = crate::exit_request_for_integrity_at(
+                None,
+                failure.clone(),
+                crate::exit_supervisor::ExitPhase::Login,
+            );
+            let _ = state.exit_supervisor.request(request);
+            return Err(error.user_message());
+        }
+        Err(error) => return Err(error.user_message()),
+    };
+    state
+        .protection
+        .verify_safe_point(crate::exit_supervisor::ExitPhase::Login)
+        .map_err(|_| "本地完整性校验失败，无法建立会话。".to_string())?;
     let dto = AuthSessionDto {
         username: session.username.clone(),
         name: session.name.clone(),
@@ -191,6 +210,10 @@ pub(crate) fn clear_session_token(slot: &mut Option<SecretToken>) -> Option<Secr
 mod tests {
     use std::{
         fs,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -199,8 +222,8 @@ mod tests {
     use nwflash_domain::FlashImageInfo;
     use nwflash_infrastructure::{AuthSession, CloudflareClient, SecretToken, DEFAULT_APP_VERSION};
     use nwflash_protection::{
-        accept_login_lease, verify_signed_lease, LeaseBinding, LeaseClaims, LeaseKind,
-        SignedEnvelope, TokenDigest,
+        accept_login_lease, verify_signed_lease, IntegrityProbe, IntegritySignals, LeaseBinding,
+        LeaseClaims, LeaseKind, SignedEnvelope, TokenDigest,
     };
     use rand_core::OsRng;
     use wiremock::{matchers::*, Mock, MockServer, Request, ResponseTemplate};
@@ -212,10 +235,60 @@ mod tests {
     };
     use crate::{
         commands::root::RootImageKind,
-        exit_supervisor::{ExitReason, ExitRequest, ExitRequestDisposition},
-        AppState,
+        exit_supervisor::{ExitPhase, ExitReason, ExitRequest, ExitRequestDisposition},
+        AppState, EpochClock, ProtectionTerminalSink, RuntimeProtectionDependencies,
     };
 
+    #[derive(Clone)]
+    struct MutableCountingProbe {
+        calls: Arc<AtomicUsize>,
+        signals: Arc<Mutex<IntegritySignals>>,
+    }
+
+    impl MutableCountingProbe {
+        fn valid() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                signals: Arc::new(Mutex::new(IntegritySignals::available(
+                    true, true, false, false,
+                ))),
+            }
+        }
+
+        fn invalidate_crc(&self) {
+            *self.signals.lock().unwrap() = IntegritySignals::available(true, false, false, false);
+        }
+
+        fn count(&self) -> usize {
+            self.calls.load(Ordering::Acquire)
+        }
+    }
+
+    impl IntegrityProbe for MutableCountingProbe {
+        fn signals(&self) -> IntegritySignals {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            *self.signals.lock().unwrap()
+        }
+    }
+
+    struct FixedClock(i64);
+
+    impl EpochClock for FixedClock {
+        fn unix_seconds(&self) -> i64 {
+            self.0
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingProtectionSink {
+        requests: Mutex<Vec<ExitRequest>>,
+    }
+
+    impl ProtectionTerminalSink for RecordingProtectionSink {
+        fn request(&self, request: ExitRequest) {
+            self.requests.lock().unwrap().push(request);
+        }
+    }
     fn verified_auth_session(token: &str, session_id: &str) -> AuthSession {
         let signing_key = SigningKey::generate(&mut OsRng);
         let now = SystemTime::now()
@@ -408,6 +481,114 @@ mod tests {
         );
 
         state.session_lifecycle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn verified_login_runs_one_crc_check_before_session_publication() {
+        let server = MockServer::start().await;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        mount_runtime_signed_login(&server, &signing_key, "verified-token").await;
+        let probe = Arc::new(MutableCountingProbe::valid());
+        let sink = Arc::new(RecordingProtectionSink::default());
+        let client = CloudflareClient::new_injected_with_lease_key(
+            server.uri(),
+            DEFAULT_APP_VERSION,
+            signing_key.verifying_key(),
+        );
+        let state = AppState::try_with_client_and_runtime_protection(
+            client,
+            Arc::new(crate::AppStateTestTerminator::default()),
+            RuntimeProtectionDependencies::injected(
+                probe.clone(),
+                Arc::new(FixedClock(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                )),
+                sink,
+            ),
+        )
+        .unwrap();
+        assert_eq!(probe.count(), 1);
+
+        auth_login_inner(
+            &state,
+            "user".to_string(),
+            Zeroizing::new("password".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(probe.count(), 2);
+        assert!(state.session_capabilities.security().is_ok());
+        auth_logout_inner(&state).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_login_crc_preserves_the_existing_session_before_publication() {
+        let server = MockServer::start().await;
+        let signing_key = SigningKey::generate(&mut OsRng);
+        mount_runtime_signed_login(&server, &signing_key, "new-token").await;
+        let probe = Arc::new(MutableCountingProbe::valid());
+        let sink = Arc::new(RecordingProtectionSink::default());
+        let client = CloudflareClient::new_injected_with_lease_key(
+            server.uri(),
+            DEFAULT_APP_VERSION,
+            signing_key.verifying_key(),
+        );
+        let state = AppState::try_with_client_and_runtime_protection(
+            client,
+            Arc::new(crate::AppStateTestTerminator::default()),
+            RuntimeProtectionDependencies::injected(
+                probe.clone(),
+                Arc::new(FixedClock(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                )),
+                sink.clone(),
+            ),
+        )
+        .unwrap();
+        finalize_login_session(
+            &state,
+            verified_auth_session("old-token", "old-signed-session"),
+            "generation-old".to_string(),
+        )
+        .await
+        .unwrap();
+        probe.invalidate_crc();
+
+        let result = auth_login_inner(
+            &state,
+            "user".to_string(),
+            Zeroizing::new("password".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(probe.count(), 2);
+        assert_eq!(
+            state
+                .session_token
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(SecretToken::as_str),
+            Some("old-token")
+        );
+        assert_eq!(
+            state.session_capabilities.security().unwrap().generation,
+            "generation-old"
+        );
+        {
+            let requests = sink.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].phase(), ExitPhase::Login);
+        }
+        auth_logout_inner(&state).await.unwrap();
     }
 
     #[tokio::test]

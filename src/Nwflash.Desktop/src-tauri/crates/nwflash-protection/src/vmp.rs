@@ -45,7 +45,7 @@ enum ProbeAvailability {
 }
 
 /// Injectable source of normalized VMProtect integrity and telemetry signals.
-pub trait IntegrityProbe {
+pub trait IntegrityProbe: Send + Sync {
     fn signals(&self) -> IntegritySignals;
 }
 

@@ -120,6 +120,11 @@ impl ExitRequest {
     }
 
     #[cfg(test)]
+    pub(crate) fn phase(&self) -> ExitPhase {
+        self.phase
+    }
+
+    #[cfg(test)]
     pub(crate) fn reason(&self) -> ExitReason {
         self.reason
     }

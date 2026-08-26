@@ -157,9 +157,33 @@ impl OperationPermissionGate for CountingPermissionGate {
         _operation: OperationKind,
         _title: String,
     ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::AcqRel);
         futures::future::ready(Ok(OperationAuthorization::allow())).boxed()
     }
+}
+
+#[tokio::test]
+async fn one_admission_check_precedes_the_operation_and_is_never_repeated_by_progress_loops() {
+    let gate = CountingPermissionGate::default();
+    let coordinator =
+        OperationCoordinator::new(None, Some(Arc::new(gate.clone())), None, None, None);
+
+    coordinator
+        .run_async(
+            OperationKind::Flashing,
+            "write-loop",
+            |context, _| async move {
+                for index in 0..64 {
+                    context.report_stage(format!("write-{index}"));
+                    context.report_progress(index as f64 / 64.0);
+                }
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(gate.calls.load(Ordering::Acquire), 1);
 }
 
 #[tokio::test]
@@ -586,6 +610,7 @@ async fn run_async_permission_deny_does_not_start_operation_or_usage_log() {
         .entries()
         .iter()
         .any(|message| message.contains("许可")));
+    assert!(coordinator.try_acquire_idle().is_ok());
 }
 
 #[tokio::test]

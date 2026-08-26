@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nwflash_protection::{IntegrityProbe, IntegritySignals};
 use nwflash_tauri::{
@@ -6,14 +6,14 @@ use nwflash_tauri::{
 };
 
 struct CountingProbe {
-    calls: Cell<usize>,
+    calls: AtomicUsize,
     signals: IntegritySignals,
 }
 
 impl CountingProbe {
     fn new(signals: IntegritySignals) -> Self {
         Self {
-            calls: Cell::new(0),
+            calls: AtomicUsize::new(0),
             signals,
         }
     }
@@ -21,7 +21,7 @@ impl CountingProbe {
 
 impl IntegrityProbe for CountingProbe {
     fn signals(&self) -> IntegritySignals {
-        self.calls.set(self.calls.get() + 1);
+        self.calls.fetch_add(1, Ordering::AcqRel);
         self.signals
     }
 }
@@ -37,7 +37,7 @@ fn ordinary_arguments_leave_the_normal_tauri_path_untouched() {
     let action = evaluate_protected_release_probe(&arguments(&["--ordinary"]), &probe);
 
     assert_eq!(action, ProtectedReleaseProbeAction::NotRequested);
-    assert_eq!(probe.calls.get(), 0);
+    assert_eq!(probe.calls.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn exact_probe_argument_returns_machine_readable_success() {
     };
 
     assert_eq!(report.exit_code, 0);
-    assert_eq!(probe.calls.get(), 1);
+    assert_eq!(probe.calls.load(Ordering::Acquire), 1);
     assert_eq!(
         report.to_json_line(),
         concat!(
@@ -77,7 +77,7 @@ fn probe_exit_codes_distinguish_protection_crc_and_availability() {
             panic!("probe invocation must return a report");
         };
         assert_eq!(report.exit_code, expected_exit);
-        assert_eq!(probe.calls.get(), 1);
+        assert_eq!(probe.calls.load(Ordering::Acquire), 1);
     }
 }
 
@@ -94,6 +94,6 @@ fn malformed_probe_invocation_is_code_44_and_never_calls_the_sdk() {
     };
 
     assert_eq!(report.exit_code, 44);
-    assert_eq!(probe.calls.get(), 0);
+    assert_eq!(probe.calls.load(Ordering::Acquire), 0);
     assert!(report.to_json_line().contains(r#""exit_code":44"#));
 }

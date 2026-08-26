@@ -74,8 +74,43 @@ async fn read_session_state(state: &AppState) -> SessionState {
 
 #[cfg(test)]
 mod tests {
-    use super::session_start_inner;
-    use crate::AppState;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use nwflash_infrastructure::CloudflareClient;
+    use nwflash_protection::{IntegrityProbe, IntegritySignals};
+
+    use super::{read_session_state, session_start_inner};
+    use crate::{
+        exit_supervisor::ExitRequest, AppState, AppStateTestTerminator, EpochClock,
+        ProtectionTerminalSink, RuntimeProtectionDependencies,
+    };
+
+    #[derive(Default)]
+    struct CountingProbe(AtomicUsize);
+
+    impl IntegrityProbe for CountingProbe {
+        fn signals(&self) -> IntegritySignals {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            IntegritySignals::available(true, true, false, false)
+        }
+    }
+
+    struct FixedClock;
+
+    impl EpochClock for FixedClock {
+        fn unix_seconds(&self) -> i64 {
+            1_800_000_001
+        }
+    }
+
+    struct NoopTerminalSink;
+
+    impl ProtectionTerminalSink for NoopTerminalSink {
+        fn request(&self, _request: ExitRequest) {}
+    }
 
     #[tokio::test]
     async fn retained_session_start_cannot_activate_without_a_signed_rust_login() {
@@ -90,5 +125,26 @@ mod tests {
         assert!(state.session_capabilities.capture().is_err());
         assert!(state.session_token.read().unwrap().is_none());
         assert!(!state.session_lifecycle.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn rejected_compatibility_start_and_display_state_never_probe_integrity() {
+        let probe = Arc::new(CountingProbe::default());
+        let state = AppState::try_with_client_and_runtime_protection(
+            CloudflareClient::new_injected("https://unit.test", "1.0.1"),
+            Arc::new(AppStateTestTerminator::default()),
+            RuntimeProtectionDependencies::injected(
+                probe.clone(),
+                Arc::new(FixedClock),
+                Arc::new(NoopTerminalSink),
+            ),
+        )
+        .unwrap();
+        assert_eq!(probe.0.load(Ordering::Acquire), 1);
+
+        assert!(session_start_inner(&state).await.is_err());
+        let _ = read_session_state(&state).await;
+
+        assert_eq!(probe.0.load(Ordering::Acquire), 1);
     }
 }

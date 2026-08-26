@@ -1,4 +1,5 @@
-use nwflash_protection::SessionLease;
+use nwflash_infrastructure::ProcessIdentity;
+use nwflash_protection::{admit_local_operation, OperationDecision, SessionLease};
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,23 @@ pub(crate) struct SessionSecurityState {
     pub(crate) generation: String,
     pub(crate) username: String,
     pub(crate) lease: SessionLease,
+    pub(crate) last_verified_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalLeaseAdmission {
+    pub(crate) generation: String,
+    pub(crate) sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalLeaseAdmissionFailure {
+    Inactive,
+    StaleEpoch,
+    SequenceMismatch,
+    Expired,
+    BuildIdMismatch,
+    ProcessNonceMismatch,
 }
 
 #[derive(Debug, Default)]
@@ -47,11 +65,13 @@ impl SessionCapabilityScope {
             .expect("session capability epoch exhausted");
         state.active = true;
         let capability = SessionCapabilityLease { epoch: state.epoch };
+        let last_verified_sequence = lease.sequence();
         state.security = Some(SessionSecurityState {
             epoch: capability.epoch,
             generation,
             username,
             lease,
+            last_verified_sequence,
         });
         capability
     }
@@ -119,8 +139,54 @@ impl SessionCapabilityScope {
             return Err(SessionCapabilityUnavailable);
         }
         before_publish();
+        security.last_verified_sequence = next.sequence();
         security.lease = next;
         Ok(())
+    }
+
+    pub(crate) fn admit_local(
+        &self,
+        identity: &ProcessIdentity,
+        now: i64,
+    ) -> Result<LocalLeaseAdmission, LocalLeaseAdmissionFailure> {
+        let snapshot = {
+            let state = self.lock_state();
+            if !state.active {
+                return Err(LocalLeaseAdmissionFailure::Inactive);
+            }
+            let security = state
+                .security
+                .as_ref()
+                .ok_or(LocalLeaseAdmissionFailure::Inactive)?;
+            if security.epoch != state.epoch {
+                return Err(LocalLeaseAdmissionFailure::StaleEpoch);
+            }
+            if security.last_verified_sequence < 1
+                || security.lease.sequence() != security.last_verified_sequence
+            {
+                return Err(LocalLeaseAdmissionFailure::SequenceMismatch);
+            }
+            security.clone()
+        };
+
+        match admit_local_operation(
+            &snapshot.lease,
+            identity.build_id(),
+            identity.process_nonce(),
+            now,
+        ) {
+            OperationDecision::Allow => Ok(LocalLeaseAdmission {
+                generation: snapshot.generation,
+                sequence: snapshot.last_verified_sequence,
+            }),
+            OperationDecision::DenyExpired => Err(LocalLeaseAdmissionFailure::Expired),
+            OperationDecision::DenyBuildIdMismatch => {
+                Err(LocalLeaseAdmissionFailure::BuildIdMismatch)
+            }
+            OperationDecision::DenyProcessNonceMismatch => {
+                Err(LocalLeaseAdmissionFailure::ProcessNonceMismatch)
+            }
+        }
     }
 
     pub(crate) fn capture(&self) -> Result<SessionCapabilityLease, SessionCapabilityUnavailable> {
@@ -181,13 +247,14 @@ mod tests {
 
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use ed25519_dalek::{Signer as _, SigningKey};
+    use nwflash_infrastructure::ProcessIdentity;
     use nwflash_protection::{
         accept_login_lease, classify_heartbeat_lease, verify_signed_lease, HeartbeatDecision,
         LeaseBinding, LeaseClaims, LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
     };
     use rand_core::OsRng;
 
-    use super::{SessionCapabilityLease, SessionCapabilityScope};
+    use super::{LocalLeaseAdmissionFailure, SessionCapabilityLease, SessionCapabilityScope};
 
     fn verified_lease(sequence: u64) -> SessionLease {
         let signing_key = SigningKey::generate(&mut OsRng);
@@ -260,6 +327,7 @@ mod tests {
         assert_eq!(security.username, "user");
         assert_eq!(security.lease.session_id(), "signed-session");
         assert_eq!(security.lease.sequence(), 1);
+        assert_eq!(security.last_verified_sequence, 1);
     }
 
     #[test]
@@ -281,7 +349,88 @@ mod tests {
 
         assert!(rejected.is_err());
         assert_eq!(security.lease.sequence(), 2);
+        assert_eq!(security.last_verified_sequence, 2);
         assert!(scope.is_current(epoch));
+    }
+
+    #[test]
+    fn local_admission_rejects_inactive_stale_sequence_and_process_binding_snapshots() {
+        let identity = ProcessIdentity::new_injected("debug-build", "process-nonce").unwrap();
+        let scope = SessionCapabilityScope::new();
+
+        assert_eq!(
+            scope.admit_local(&identity, 1_800_000_001),
+            Err(LocalLeaseAdmissionFailure::Inactive)
+        );
+
+        scope.activate_verified(
+            "generation-one".to_string(),
+            "user".to_string(),
+            verified_lease(1),
+        );
+        {
+            let mut state = scope.state.lock().unwrap();
+            state.security.as_mut().unwrap().epoch -= 1;
+        }
+        assert_eq!(
+            scope.admit_local(&identity, 1_800_000_001),
+            Err(LocalLeaseAdmissionFailure::StaleEpoch)
+        );
+
+        let scope = SessionCapabilityScope::new();
+        scope.activate_verified(
+            "generation-two".to_string(),
+            "user".to_string(),
+            verified_lease(1),
+        );
+        {
+            let mut state = scope.state.lock().unwrap();
+            state.security.as_mut().unwrap().last_verified_sequence = 2;
+        }
+        assert_eq!(
+            scope.admit_local(&identity, 1_800_000_001),
+            Err(LocalLeaseAdmissionFailure::SequenceMismatch)
+        );
+
+        let scope = SessionCapabilityScope::new();
+        scope.activate_verified(
+            "generation-three".to_string(),
+            "user".to_string(),
+            verified_lease(1),
+        );
+        let wrong_build = ProcessIdentity::new_injected("other-build", "process-nonce").unwrap();
+        assert_eq!(
+            scope.admit_local(&wrong_build, 1_800_000_001),
+            Err(LocalLeaseAdmissionFailure::BuildIdMismatch)
+        );
+        let wrong_nonce = ProcessIdentity::new_injected("debug-build", "other-nonce").unwrap();
+        assert_eq!(
+            scope.admit_local(&wrong_nonce, 1_800_000_001),
+            Err(LocalLeaseAdmissionFailure::ProcessNonceMismatch)
+        );
+        assert_eq!(
+            scope.admit_local(&identity, 1_800_000_300),
+            Err(LocalLeaseAdmissionFailure::Expired)
+        );
+    }
+
+    #[test]
+    fn local_admission_returns_the_current_generation_after_atomic_refresh() {
+        let identity = ProcessIdentity::new_injected("debug-build", "process-nonce").unwrap();
+        let scope = SessionCapabilityScope::new();
+        let capability = scope.activate_verified(
+            "generation-current".to_string(),
+            "user".to_string(),
+            verified_lease(1),
+        );
+        scope
+            .refresh_verified(capability, 1, verified_lease(2))
+            .unwrap();
+
+        let admission = scope.admit_local(&identity, 1_800_000_001).unwrap();
+
+        assert_eq!(admission.generation, "generation-current");
+        assert_eq!(admission.sequence, 2);
     }
 
     #[test]
