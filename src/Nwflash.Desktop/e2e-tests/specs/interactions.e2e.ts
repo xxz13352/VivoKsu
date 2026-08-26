@@ -228,17 +228,28 @@ describe('奶蛙Flash interaction baseline', () => {
   it('requires explicit confirmation before flashing an extracted firmware artifact', async () => {
     await mockCommand('plugin:dialog|open', 'firmware-selection');
     await mockCommand('firmware_inspect_local', VISUAL_STATE_FIXTURES.firmwareInspection);
-    await mockCommand('firmware_extract_vivo_local', VISUAL_STATE_FIXTURES.firmwareExtraction);
+    await mockCommand('firmware_select_output_directory', {
+      selectionId: 'firmware-output-8d03772f-0062-4cc1-92ec-b10c85e75ca8',
+    });
+    const extractLocal = await browser.tauri.mock('firmware_extract_vivo_local');
+    await extractLocal.mockResolvedValue(VISUAL_STATE_FIXTURES.firmwareExtraction);
     await mockCommand('firmware_prepare_extracted_artifact', { artifactId: 'firmware-artifact-boot' });
     await mockCommand('quick_flash_prepare_firmware_artifact', VISUAL_STATE_FIXTURES.firmwareArtifactConfirmation);
     await mockCommand('quick_flash_execute_firmware_artifact', null);
 
     await openPage('FirmwareExtract');
     await $('.nw-test-firmware-select').click();
+    await $('.nw-test-firmware-inspect').click();
     await $('.nw-test-firmware-entry').waitForDisplayed();
     await $('.nw-test-firmware-entry').click();
     await $('.nw-test-firmware-extract').click();
     await $('.nw-test-firmware-flash').waitForDisplayed();
+    await extractLocal.update();
+    assert.deepEqual(extractLocal.mock.calls, [[{
+      sourcePath: 'firmware-selection',
+      selectedIds: ['firmware-entry-boot'],
+      outputDirectoryId: 'firmware-output-8d03772f-0062-4cc1-92ec-b10c85e75ca8',
+    }]]);
     await $('.nw-test-firmware-flash').click();
 
     const dialog = await $('[role="dialog"]');
@@ -249,6 +260,34 @@ describe('奶蛙Flash interaction baseline', () => {
     await $('.nw-test-firmware-confirm-flash').click();
     await dialog.waitForDisplayed({ reverse: true });
     await expect($('.nw-firmware-status')).toHaveText('镜像刷写已完成。');
+  });
+
+  it('submits only a Rust-issued output capability for remote firmware extraction', async () => {
+    await mockCommand('firmware_inspect_remote', {
+      format: 'zip',
+      entries: [{ id: 'remote-entry-boot', name: 'boot', sizeBytes: 2048 }],
+    });
+    await mockCommand('firmware_select_output_directory', {
+      selectionId: 'firmware-output-8d03772f-0062-4cc1-92ec-b10c85e75ca8',
+    });
+    const extractRemote = await browser.tauri.mock('firmware_extract_remote');
+    await extractRemote.mockResolvedValue(VISUAL_STATE_FIXTURES.firmwareExtraction);
+
+    await openPage('FirmwareExtract');
+    await $('.nw-test-firmware-source').setValue('https://firmware.example.test/ota.zip');
+    await $('.nw-test-firmware-inspect').click();
+    await $('.nw-test-firmware-entry').waitForDisplayed();
+    await $('.nw-test-firmware-entry').click();
+    await $('.nw-test-firmware-extract').click();
+    await expect($('.nw-firmware-status')).toHaveText('已提取 1 个镜像。');
+
+    await extractRemote.update();
+    assert.deepEqual(extractRemote.mock.calls, [[{
+      url: 'https://firmware.example.test/ota.zip',
+      selectedIds: ['remote-entry-boot'],
+      outputDirectoryId: 'firmware-output-8d03772f-0062-4cc1-92ec-b10c85e75ca8',
+    }]]);
+    assert.doesNotMatch(JSON.stringify(extractRemote.mock.calls), /private/);
   });
 
   it('requires an accessible Chinese confirmation before a Safe Flash can run or be canceled', async () => {

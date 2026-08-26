@@ -20,13 +20,17 @@ use nwflash_infrastructure::remote_firmware::{
     RemoteFirmwareError, RemoteFirmwareKind, ZipMember,
 };
 use serde::Serialize;
-use tauri::State;
-use tokio::task;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
+use tokio::{sync::oneshot, task};
+use uuid::Uuid;
 
 use crate::AppState;
 
 pub(crate) const FIRMWARE_PROGRESS_EVENT: &str = "firmware:progress";
 const FIRMWARE_PROGRESS_THROTTLE: Duration = Duration::from_millis(100);
+const FIRMWARE_OUTPUT_DIRECTORY_SELECTION_ERROR: &str =
+    "提取输出目录选择已失效，请重新选择。";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,6 +206,12 @@ pub struct ExtractedFirmwareImageDto {
 #[serde(rename_all = "camelCase")]
 pub struct FirmwareExtractionDto {
     pub images: Vec<ExtractedFirmwareImageDto>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareOutputDirectorySelectionDto {
+    pub selection_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -520,6 +530,93 @@ pub struct RemoteFirmwareInspectionRuntime {
     inspection: Arc<Mutex<Option<RemoteFirmwareInspection>>>,
 }
 
+#[derive(Clone, Default)]
+pub struct FirmwareOutputDirectoryRuntime {
+    state: Arc<Mutex<FirmwareOutputDirectoryState>>,
+}
+
+#[derive(Default)]
+struct FirmwareOutputDirectoryState {
+    picker_epoch: u64,
+    selection: Option<(String, PathBuf)>,
+}
+
+#[derive(Clone, Copy)]
+struct FirmwareOutputDirectoryPickerLease {
+    epoch: u64,
+}
+
+impl FirmwareOutputDirectoryRuntime {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace(&self, directory: PathBuf) -> FirmwareOutputDirectorySelectionDto {
+        let picker = self.begin_selection();
+        self.publish_selection(picker, Some(directory))
+            .expect("a newly opened picker should remain current")
+            .expect("a selected directory should publish a capability")
+    }
+
+    fn begin_selection(&self) -> FirmwareOutputDirectoryPickerLease {
+        let mut state = self
+            .state
+            .lock()
+            .expect("firmware output directory lock should not be poisoned");
+        state.picker_epoch = state
+            .picker_epoch
+            .checked_add(1)
+            .expect("firmware output directory picker epoch exhausted");
+        FirmwareOutputDirectoryPickerLease {
+            epoch: state.picker_epoch,
+        }
+    }
+
+    fn publish_selection(
+        &self,
+        picker: FirmwareOutputDirectoryPickerLease,
+        selected: Option<PathBuf>,
+    ) -> Result<Option<FirmwareOutputDirectorySelectionDto>, String> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("firmware output directory lock should not be poisoned");
+        if picker.epoch != state.picker_epoch {
+            return Err(FIRMWARE_OUTPUT_DIRECTORY_SELECTION_ERROR.to_string());
+        }
+        let Some(directory) = selected else {
+            return Ok(None);
+        };
+        let selection_id = format!("firmware-output-{}", Uuid::new_v4());
+        state.selection = Some((selection_id.clone(), directory));
+        Ok(Some(FirmwareOutputDirectorySelectionDto { selection_id }))
+    }
+
+    pub(crate) fn resolve(&self, selection_id: &str) -> Result<PathBuf, String> {
+        self.state
+            .lock()
+            .expect("firmware output directory lock should not be poisoned")
+            .selection
+            .as_ref()
+            .filter(|(stored_id, _)| !selection_id.is_empty() && stored_id == selection_id)
+            .map(|(_, directory)| directory.clone())
+            .ok_or_else(|| FIRMWARE_OUTPUT_DIRECTORY_SELECTION_ERROR.to_string())
+    }
+
+    pub(crate) fn clear(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("firmware output directory lock should not be poisoned");
+        state.picker_epoch = state
+            .picker_epoch
+            .checked_add(1)
+            .expect("firmware output directory picker epoch exhausted");
+        state.selection.take();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RemoteFirmwareInspection {
     source: String,
@@ -539,6 +636,19 @@ struct RemoteFirmwareExtractionRequest {
     source: String,
     selected_ids: Vec<String>,
     output_directory: PathBuf,
+}
+
+fn build_remote_extraction_request(
+    output_directories: &FirmwareOutputDirectoryRuntime,
+    source: String,
+    selected_ids: Vec<String>,
+    output_directory_id: &str,
+) -> Result<RemoteFirmwareExtractionRequest, String> {
+    Ok(RemoteFirmwareExtractionRequest {
+        source,
+        selected_ids,
+        output_directory: output_directories.resolve(output_directory_id)?,
+    })
 }
 
 impl RemoteFirmwareInspectionRuntime {
@@ -1064,6 +1174,32 @@ async fn extract_remote_firmware_operation(
 }
 
 #[tauri::command]
+pub async fn firmware_select_output_directory(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<FirmwareOutputDirectorySelectionDto>, String> {
+    let picker = state.firmware_output_directories.begin_selection();
+    let selected = select_firmware_output_directory(&app_handle).await?;
+    state
+        .firmware_output_directories
+        .publish_selection(picker, selected)
+}
+
+async fn select_firmware_output_directory(
+    app_handle: &AppHandle,
+) -> Result<Option<PathBuf>, String> {
+    let (sender, receiver) = oneshot::channel();
+    app_handle.dialog().file().pick_folder(move |selected| {
+        let _ = sender.send(selected.map(|path| path.into_path()));
+    });
+    receiver
+        .await
+        .map_err(|_| "提取输出目录选择窗口已关闭。".to_string())?
+        .transpose()
+        .map_err(|_| "无法读取所选提取输出目录。".to_string())
+}
+
+#[tauri::command]
 pub async fn firmware_inspect_remote(
     state: State<'_, AppState>,
     url: String,
@@ -1089,23 +1225,25 @@ pub async fn firmware_extract_remote(
     state: State<'_, AppState>,
     url: String,
     selected_ids: Vec<String>,
-    output_directory: String,
+    output_directory_id: String,
 ) -> Result<FirmwareExtractionDto, String> {
     let source = url.trim().to_string();
     validate_http_url(&source)
         .map_err(remote_error_to_domain)
         .map_err(|error| error.to_string())?;
+    let request = build_remote_extraction_request(
+        &state.firmware_output_directories,
+        source,
+        selected_ids,
+        &output_directory_id,
+    )?;
     state.firmware_extraction.clear();
     extract_remote_firmware_operation(
         state.operation_coordinator.clone(),
         state.firmware_extraction.clone(),
         state.remote_firmware_inspection.clone(),
         default_payload_provisioner(),
-        RemoteFirmwareExtractionRequest {
-            source,
-            selected_ids,
-            output_directory: PathBuf::from(output_directory),
-        },
+        request,
         state.firmware_progress.start(),
     )
     .await
@@ -1141,8 +1279,11 @@ pub async fn firmware_extract_vivo_local(
     state: State<'_, AppState>,
     source_path: String,
     selected_ids: Vec<String>,
-    output_directory: String,
+    output_directory_id: String,
 ) -> Result<FirmwareExtractionDto, String> {
+    let output_directory = state
+        .firmware_output_directories
+        .resolve(&output_directory_id)?;
     state.firmware_extraction.clear();
     let progress = state.firmware_progress.start();
     let extracted = Arc::new(Mutex::new(None));
@@ -1155,7 +1296,6 @@ pub async fn firmware_extract_vivo_local(
             move |context, cancellation| async move {
                 context.report_stage("正在提取已选择的固件分区");
                 let source_path = PathBuf::from(source_path);
-                let output_directory = PathBuf::from(output_directory);
                 let progress = progress.clone();
                 let extraction = task::spawn_blocking(move || {
                     FirmwareExtractService::extract_local_with_cancel_and_progress(
@@ -1384,8 +1524,11 @@ async fn extract_payload_with_provisioner_operation(
 pub async fn firmware_extract_payload_local(
     state: State<'_, AppState>,
     selected_ids: Vec<String>,
-    output_directory: String,
+    output_directory_id: String,
 ) -> Result<FirmwareExtractionDto, String> {
+    let output_directory = state
+        .firmware_output_directories
+        .resolve(&output_directory_id)?;
     state.firmware_extraction.clear();
     extract_payload_with_provisioner_operation(
         state.operation_coordinator.clone(),
@@ -1393,7 +1536,7 @@ pub async fn firmware_extract_payload_local(
         state.payload_inspection.clone(),
         default_payload_provisioner(),
         selected_ids,
-        PathBuf::from(output_directory),
+        output_directory,
         Some(state.firmware_progress.start()),
     )
     .await
@@ -2121,6 +2264,160 @@ mod tests {
                 .kind,
             RemoteFirmwareKind::DirectImageZip
         );
+    }
+
+    #[test]
+    fn firmware_output_directory_capability_rejects_empty_forged_and_raw_path_ids() {
+        let runtime = FirmwareOutputDirectoryRuntime::new();
+        let private_directory = PathBuf::from(r"C:\private\firmware-output");
+        let selection = runtime.replace(private_directory.clone());
+
+        assert_eq!(
+            runtime
+                .resolve(&selection.selection_id)
+                .expect("the Rust-issued capability should resolve"),
+            private_directory
+        );
+        for forged in [
+            "",
+            "firmware-output-forged",
+            r"C:\private\firmware-output",
+        ] {
+            let error = runtime
+                .resolve(forged)
+                .expect_err("browser-provided non-capabilities must fail closed");
+            assert_eq!(error, "提取输出目录选择已失效，请重新选择。");
+            assert!(!error.contains("private"));
+            if !forged.is_empty() {
+                assert!(!error.contains(forged));
+            }
+        }
+    }
+
+    #[test]
+    fn firmware_output_directory_selection_dto_exposes_only_the_opaque_id() {
+        let runtime = FirmwareOutputDirectoryRuntime::new();
+        let selection = runtime.replace(PathBuf::from(r"C:\private\firmware-output"));
+        let json = serde_json::to_value(&selection).expect("selection should serialize");
+
+        assert_eq!(json.as_object().map(serde_json::Map::len), Some(1));
+        assert_eq!(json["selectionId"], selection.selection_id);
+        assert!(json.get("directoryPath").is_none());
+        assert!(!json.to_string().contains("private"));
+        assert!(!json.to_string().contains("firmware-output\\"));
+    }
+
+    #[test]
+    fn firmware_output_directory_capability_is_unpredictable_reusable_and_replaceable() {
+        let runtime = FirmwareOutputDirectoryRuntime::new();
+        let first_path = PathBuf::from(r"C:\private\first-output");
+        let second_path = PathBuf::from(r"C:\private\second-output");
+        let first = runtime.replace(first_path);
+        let opaque = first
+            .selection_id
+            .strip_prefix("firmware-output-")
+            .expect("capability should use the fixed namespace");
+        let parsed = uuid::Uuid::parse_str(opaque).expect("capability should contain a UUID");
+
+        assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
+        assert_eq!(
+            runtime.resolve(&first.selection_id).unwrap(),
+            runtime.resolve(&first.selection_id).unwrap(),
+            "a current selection remains reusable for repeated remote extraction"
+        );
+
+        let second = runtime.replace(second_path.clone());
+        assert_ne!(first.selection_id, second.selection_id);
+        assert!(runtime.resolve(&first.selection_id).is_err());
+        assert_eq!(runtime.resolve(&second.selection_id).unwrap(), second_path);
+
+        runtime.clear();
+        assert!(runtime.resolve(&second.selection_id).is_err());
+    }
+
+    #[test]
+    fn remote_extraction_request_resolves_only_the_rust_issued_output_capability() {
+        let runtime = FirmwareOutputDirectoryRuntime::new();
+        let private_directory = PathBuf::from(r"C:\private\remote-output");
+        let selection = runtime.replace(private_directory.clone());
+
+        let request = build_remote_extraction_request(
+            &runtime,
+            "https://firmware.example.test/ota.zip".to_string(),
+            vec!["0".to_string()],
+            &selection.selection_id,
+        )
+        .expect("the current capability should build a request");
+        assert_eq!(request.output_directory, private_directory);
+
+        let error = match build_remote_extraction_request(
+            &runtime,
+            "https://firmware.example.test/ota.zip".to_string(),
+            vec!["0".to_string()],
+            r"C:\private\attacker-selected-output",
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a raw output path must not cross the remote command boundary"),
+        };
+        assert_eq!(error, "提取输出目录选择已失效，请重新选择。");
+        assert!(!error.contains("attacker-selected-output"));
+    }
+
+    #[test]
+    fn canceling_output_directory_selection_preserves_the_current_capability() {
+        let runtime = FirmwareOutputDirectoryRuntime::new();
+        let current_path = PathBuf::from(r"C:\private\current-output");
+        let current = runtime.replace(current_path.clone());
+        let picker = runtime.begin_selection();
+
+        assert!(runtime
+            .publish_selection(picker, None)
+            .expect("the current picker may be canceled")
+            .is_none());
+        assert_eq!(runtime.resolve(&current.selection_id).unwrap(), current_path);
+    }
+
+    #[test]
+    fn cleanup_invalidates_a_pending_picker_before_it_can_publish() {
+        let runtime = FirmwareOutputDirectoryRuntime::new();
+        let pending = runtime.begin_selection();
+        runtime.clear();
+
+        let error = match runtime.publish_selection(
+            pending,
+            Some(PathBuf::from(r"C:\private\post-logout-output")),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a picker that predates cleanup must not publish"),
+        };
+
+        assert_eq!(error, "提取输出目录选择已失效，请重新选择。");
+        assert!(!error.contains("post-logout-output"));
+        assert!(runtime.resolve("firmware-output-forged").is_err());
+    }
+
+    #[test]
+    fn newer_picker_and_its_cancelation_prevent_an_older_picker_from_overwriting_selection() {
+        let runtime = FirmwareOutputDirectoryRuntime::new();
+        let current_path = PathBuf::from(r"C:\private\current-output");
+        let current = runtime.replace(current_path.clone());
+        let older = runtime.begin_selection();
+        let newer = runtime.begin_selection();
+
+        assert!(runtime
+            .publish_selection(newer, None)
+            .expect("the newest picker may be canceled")
+            .is_none());
+        let stale = match runtime.publish_selection(
+            older,
+            Some(PathBuf::from(r"C:\private\stale-output")),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("an older picker must not overwrite the current selection"),
+        };
+
+        assert_eq!(stale, "提取输出目录选择已失效，请重新选择。");
+        assert_eq!(runtime.resolve(&current.selection_id).unwrap(), current_path);
     }
 
     #[test]

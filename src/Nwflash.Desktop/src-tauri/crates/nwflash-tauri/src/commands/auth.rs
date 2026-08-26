@@ -428,6 +428,9 @@ mod tests {
         )
         .await
         .expect("signed login should publish its generation");
+        let output_selection = state
+            .firmware_output_directories
+            .replace(std::path::PathBuf::from(r"C:\private\firmware-output"));
 
         auth_logout_inner(&state)
             .await
@@ -444,6 +447,10 @@ mod tests {
             state.operation_coordinator.admission_state(),
             nwflash_application::OperationAdmissionState::Running
         );
+        assert!(state
+            .firmware_output_directories
+            .resolve(&output_selection.selection_id)
+            .is_err());
     }
 
     #[tokio::test]

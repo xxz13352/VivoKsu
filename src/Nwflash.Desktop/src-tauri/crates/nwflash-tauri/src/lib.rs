@@ -81,6 +81,7 @@ pub struct AppState {
     pub firmware_extraction: commands::firmware::FirmwareExtractionRuntime,
     pub payload_inspection: commands::firmware::PayloadInspectionRuntime,
     pub remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime,
+    pub firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime,
     pub(crate) firmware_progress: commands::firmware::FirmwareProgressRuntime,
     pub prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
     pub prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
@@ -104,6 +105,7 @@ struct AppStateExitCleanup {
     root_ota_runtime: commands::root_ota::RootOtaRuntime,
     safe_flash_runtime: commands::safe_flash::SafeFlashRuntime,
     firmware_artifacts: commands::firmware::FirmwareArtifactRuntime,
+    firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime,
     prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
     prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
 }
@@ -118,6 +120,7 @@ impl AppStateExitCleanup {
             root_ota_runtime: state.root_ota_runtime.clone(),
             safe_flash_runtime: state.safe_flash_runtime.clone(),
             firmware_artifacts: state.firmware_artifacts.clone(),
+            firmware_output_directories: state.firmware_output_directories.clone(),
             prepared_firmware_artifact: state.prepared_firmware_artifact.clone(),
             prepared_dual_slot: state.prepared_dual_slot.clone(),
         }
@@ -130,6 +133,7 @@ impl AppStateExitCleanup {
             owned_roots.extend(self.root_ota_runtime.clear_owned());
             owned_roots.extend(self.safe_flash_runtime.clear_owned());
             owned_roots.extend(self.firmware_artifacts.clear_owned());
+            self.firmware_output_directories.clear();
             self.prepared_firmware_artifact.clear();
             self.prepared_dual_slot.clear();
             owned_roots
@@ -429,6 +433,8 @@ impl AppState {
             firmware_extraction: commands::firmware::FirmwareExtractionRuntime::new(),
             payload_inspection: commands::firmware::PayloadInspectionRuntime::new(),
             remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime::new(),
+            firmware_output_directories:
+                commands::firmware::FirmwareOutputDirectoryRuntime::new(),
             firmware_progress: commands::firmware::FirmwareProgressRuntime::new(),
             prepared_firmware_artifact:
                 commands::quick_flash::PreparedFirmwareArtifactRuntime::with_scope(
@@ -912,6 +918,25 @@ mod device_monitor_tests {
         assert!(state.session_token.read().unwrap().is_none());
     }
 
+    #[test]
+    fn session_cleanup_invalidates_firmware_output_directory_capabilities() {
+        let state = AppState::new();
+        let selection = state
+            .firmware_output_directories
+            .replace(std::path::PathBuf::from(r"C:\private\firmware-output"));
+        assert!(state
+            .firmware_output_directories
+            .resolve(&selection.selection_id)
+            .is_ok());
+
+        AppStateExitCleanup::from_state(&state).revoke_capabilities();
+
+        assert!(state
+            .firmware_output_directories
+            .resolve(&selection.selection_id)
+            .is_err());
+    }
+
     #[tokio::test]
     async fn setup_started_receiver_handles_terminal_request_without_react_authority() {
         let terminator = Arc::new(RecordingTerminator::default());
@@ -1181,6 +1206,7 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
             commands::auth::auth_validate_token,
             commands::firmware::firmware_inspect_local,
             commands::firmware::firmware_inspect_remote,
+            commands::firmware::firmware_select_output_directory,
             commands::firmware::firmware_inspect_payload_local,
             commands::firmware::firmware_extract_payload_local,
             commands::firmware::firmware_inspect_line_flash_package,

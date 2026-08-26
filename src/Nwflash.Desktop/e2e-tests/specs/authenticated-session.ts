@@ -21,7 +21,11 @@ export const prepareE2eLogin = async ({ operationLogs }: E2eLoginOptions = {}): 
   await mockCommand('session_state', VISUAL_STATE_FIXTURES.signedOutSession);
   await mockCommand('auth_validate_token', null);
   await mockCommand('version_check', VISUAL_STATE_FIXTURES.versionAllowed);
-  await mockCommand('auth_login', { name: '验收用户', username: 'acceptance-user' });
+  await mockCommand('auth_login', {
+    name: '验收用户',
+    username: 'acceptance-user',
+    generation: 'generation-e2e',
+  });
   await mockCommand('session_start', null);
   await mockCommand('session_stop', null);
   await mockCommand('auth_logout', null);
