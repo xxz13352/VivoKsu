@@ -69,8 +69,19 @@ describe("actual Worker route with Workerd D1", () => {
     }
 
     for (const rejectedToken of [supersededToken, revokedMarker]) {
-      expect((await getMe(rejectedToken)).status).toBe(401);
-      expect((await postHeartbeat(rejectedToken, "workerd-revived-session-a", 1)).status).toBe(401);
+      const auth = await getMe(rejectedToken);
+      const heartbeat = await postHeartbeat(rejectedToken, "workerd-revived-session-a", 1);
+      const authBody = await auth.json() as Record<string, unknown>;
+      const heartbeatBody = await heartbeat.json() as Record<string, unknown>;
+
+      expect(auth.status).toBe(401);
+      expect(heartbeat.status).toBe(401);
+      expect(authBody).not.toHaveProperty("token");
+      expect(heartbeatBody).not.toHaveProperty("token");
+      expect(JSON.stringify(authBody)).not.toContain(rejectedToken);
+      expect(JSON.stringify(heartbeatBody)).not.toContain(rejectedToken);
+      expect(JSON.stringify(authBody)).not.toContain("revoked:");
+      expect(JSON.stringify(heartbeatBody)).not.toContain("revoked:");
     }
 
     const heartbeat = await postHeartbeat(activeToken, "workerd-revived-session-a", 1);
@@ -81,6 +92,42 @@ describe("actual Worker route with Workerd D1", () => {
       token_sha256: await sha256Base64Url(activeToken),
       sequence: 2,
     });
+  });
+
+  it("does not persist a signed login when the credential generation changes before session insert", async () => {
+    const originalToken = "workerd-generation-original-token";
+    const revokedMarker = `revoked:${"cd".repeat(32)}`;
+    const nextSalt = "ffeeddccbbaa99887766554433221100";
+    const nextPassword = await passwordHash("new correct horse", nextSalt);
+    await seedUser(originalToken);
+    await env.DB.prepare(
+      `CREATE TRIGGER replace_generation_after_login_check
+       AFTER UPDATE OF token ON api_users
+       WHEN OLD.id = 7 AND OLD.token = '${originalToken}' AND NEW.token = OLD.token
+       BEGIN
+         UPDATE api_users
+         SET password = '${nextPassword}', salt = '${nextSalt}', token = '${revokedMarker}'
+         WHERE id = 7;
+         DELETE FROM session_leases WHERE user_id = 7;
+         DELETE FROM online_sessions WHERE user_id = 7;
+       END`,
+    ).run();
+
+    const response = await postLogin("workerd-generation-race-session");
+    const body = await response.json() as Record<string, unknown>;
+    const stored = await env.DB.prepare(
+      "SELECT token, password, salt FROM api_users WHERE id = 7",
+    ).first<{ token: string; password: string; salt: string }>();
+
+    expect(response.status).toBe(409);
+    expect(body).not.toHaveProperty("token");
+    expect(body).not.toHaveProperty("lease_payload");
+    expect(body).not.toHaveProperty("lease_signature");
+    expect(JSON.stringify(body)).not.toContain(originalToken);
+    expect(JSON.stringify(body)).not.toContain(revokedMarker);
+    expect(stored).toEqual({ token: revokedMarker, password: nextPassword, salt: nextSalt });
+    expect(await scalar("SELECT COUNT(*) AS value FROM session_leases")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions")).toBe(0);
   });
 
   it("allows only one signed lease for concurrent same-sequence heartbeats", async () => {
