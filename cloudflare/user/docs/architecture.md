@@ -25,7 +25,7 @@ cloudflare/user/
 
 Password change enforces a different 8–128-character value and validates the current password. One D1 batch compare-and-swaps this request's unique `revoked:` token marker and makes both session-table deletes conditional on that marker. A winner removes the user's session leases and online sessions; a stale CAS loser changes zero rows and cannot delete sessions. The response expires the cookie. The portal returns to login when the response requests reauthentication or when an authenticated API call returns 401. Login may atomically exchange a revoked marker for a fresh local token before setting a cookie.
 
-The later shared API Worker must perform its own compare-and-swap exchange after password verification and before signed-lease creation, never emit a revoked marker, and make old-token heartbeat/auth return 401 so the desktop exits. Client integration waits until the coordinating task implements and contract-tests that behavior.
+The shared API Worker now performs its own generation-bound compare-and-swap after password verification and before signed-lease creation, never emits a revoked marker, and returns 401 for old-token heartbeat/auth after the version gate. Deterministic shared-API tests force two login reads to observe the same marker before releasing the real D1 CAS; the user Workerd suite also runs the complete password-change → marker → shared login → signed heartbeat flow against the same real D1 database. The frozen contract and executable references are in [client-api-handoff.md](client-api-handoff.md).
 
 ## Personal data flows
 
@@ -45,7 +45,7 @@ Cookie authentication plus SameSite=Strict is the primary CSRF control; every no
 
 ## Verification and release boundary
 
-UI tests cover rendering, URL/back-forward behavior, dialogs, retry states, and forced reauthentication. Workerd tests cover Worker routing, cookies, login/revocation, ownership 404s, sanitization, sessions, and security headers.
+UI tests cover rendering, URL/back-forward behavior, dialogs, retry states, and forced reauthentication. Workerd tests cover Worker routing, cookies, login/revocation, ownership 404s, sanitization, sessions, security headers, and the real-D1 handoff to the shared API Worker.
 
 Run from `cloudflare/user`:
 
@@ -54,4 +54,4 @@ npm test
 npm run typecheck
 ```
 
-These checks include a dry-run Worker build. They do not deploy. Deployment, shared-schema changes, the shared API Worker change, and desktop-client integration are outside this subsystem handoff and remain with the coordinating task.
+These checks include a dry-run Worker build. They do not deploy. The shared API handoff behavior is implemented and tested without a schema change; production deployment and desktop-client rollout remain separate coordinating-task release actions.
