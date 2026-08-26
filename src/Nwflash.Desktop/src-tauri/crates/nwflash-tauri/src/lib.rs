@@ -389,14 +389,19 @@ impl LocalProtectionGate {
 }
 
 fn requires_high_risk_recheck(operation: OperationKind) -> bool {
-    matches!(
-        operation,
+    match operation {
         OperationKind::Flashing
-            | OperationKind::Installing
-            | OperationKind::Rebooting
-            | OperationKind::Transferring
-            | OperationKind::Mirroring
-    )
+        | OperationKind::Installing
+        | OperationKind::Rebooting
+        | OperationKind::Transferring
+        | OperationKind::Mirroring => true,
+        OperationKind::Idle
+        | OperationKind::Discovering
+        | OperationKind::Hashing
+        | OperationKind::Completed
+        | OperationKind::Canceled
+        | OperationKind::Failed => false,
+    }
 }
 
 impl OperationPermissionGate for LocalProtectionGate {
@@ -1137,8 +1142,8 @@ mod protection_context_tests {
     use nwflash_domain::{DomainError, OperationKind};
     use nwflash_infrastructure::{CloudflareClient, ProcessIdentity};
     use nwflash_protection::{
-        accept_login_lease, verify_signed_lease, IntegrityProbe, IntegritySignals, LeaseBinding,
-        LeaseClaims, LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
+        accept_signed_login_lease, IntegrityProbe, IntegritySignals, LeaseBinding, LeaseClaims,
+        LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
     };
     use rand_core::OsRng;
 
@@ -1238,16 +1243,13 @@ mod protection_context_tests {
         };
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
         let signature = URL_SAFE_NO_PAD.encode(signing_key.sign(payload.as_bytes()).to_bytes());
-        let verified = verify_signed_lease(
-            &SignedEnvelope {
-                lease_payload: payload,
-                lease_signature: signature,
-            },
+        let envelope = SignedEnvelope {
+            lease_payload: payload,
+            lease_signature: signature,
+        };
+        accept_signed_login_lease(
+            &envelope,
             &signing_key.verifying_key(),
-        )
-        .unwrap();
-        accept_login_lease(
-            &verified,
             &LeaseBinding::new(
                 "user",
                 TokenDigest::sha256(b"token"),

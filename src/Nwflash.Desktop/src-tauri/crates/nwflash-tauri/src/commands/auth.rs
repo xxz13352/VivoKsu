@@ -222,8 +222,8 @@ mod tests {
     use nwflash_domain::FlashImageInfo;
     use nwflash_infrastructure::{AuthSession, CloudflareClient, SecretToken, DEFAULT_APP_VERSION};
     use nwflash_protection::{
-        accept_login_lease, verify_signed_lease, IntegrityProbe, IntegritySignals, LeaseBinding,
-        LeaseClaims, LeaseKind, SignedEnvelope, TokenDigest,
+        accept_signed_login_lease, IntegrityProbe, IntegritySignals, LeaseBinding, LeaseClaims,
+        LeaseKind, SignedEnvelope, TokenDigest,
     };
     use rand_core::OsRng;
     use wiremock::{matchers::*, Mock, MockServer, Request, ResponseTemplate};
@@ -310,14 +310,10 @@ mod tests {
         };
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
         let signature = URL_SAFE_NO_PAD.encode(signing_key.sign(payload.as_bytes()).to_bytes());
-        let verified = verify_signed_lease(
-            &SignedEnvelope {
-                lease_payload: payload,
-                lease_signature: signature,
-            },
-            &signing_key.verifying_key(),
-        )
-        .unwrap();
+        let envelope = SignedEnvelope {
+            lease_payload: payload,
+            lease_signature: signature,
+        };
         let binding = LeaseBinding::new(
             "user",
             TokenDigest::sha256(token.as_bytes()),
@@ -326,7 +322,13 @@ mod tests {
             "process-nonce",
             session_id,
         );
-        let lease = accept_login_lease(&verified, &binding, now).unwrap();
+        let lease = accept_signed_login_lease(
+            &envelope,
+            &signing_key.verifying_key(),
+            &binding,
+            now,
+        )
+        .unwrap();
         AuthSession {
             token: SecretToken::new(token.to_string()),
             username: "user".to_string(),

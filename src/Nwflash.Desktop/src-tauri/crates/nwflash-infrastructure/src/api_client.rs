@@ -3,11 +3,8 @@ use std::fmt::{self, Display, Formatter};
 #[cfg(debug_assertions)]
 use std::time::Duration;
 
-#[cfg(debug_assertions)]
 use ed25519_dalek::VerifyingKey;
-#[cfg(debug_assertions)]
-use nwflash_protection::verify_signed_lease;
-use nwflash_protection::{LeaseVerificationError, SignedEnvelope, VerifiedLease};
+use nwflash_protection::SignedEnvelope;
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
     Client, Method, Response, StatusCode,
@@ -664,31 +661,25 @@ impl CloudflareClient {
         Ok(())
     }
 
-    pub(crate) fn verify_session_lease(
-        &self,
-        envelope: &SignedEnvelope,
-    ) -> CloudflareResult<VerifiedLease> {
-        let verified = if let Some(pinned) = self.pinned.as_ref() {
-            pinned.verify_session_lease(envelope)
+    pub(crate) fn session_verifying_key(&self) -> CloudflareResult<&VerifyingKey> {
+        if let Some(pinned) = self.pinned.as_ref() {
+            Ok(pinned.session_verifying_key())
         } else {
             #[cfg(debug_assertions)]
             {
-                let key = self.injected_lease_key.as_ref().ok_or({
+                self.injected_lease_key.as_ref().ok_or({
                     CloudflareError::Integrity(
                         crate::pinned_tls::IntegrityFailure::MissingVerificationKey,
                     )
-                })?;
-                verify_signed_lease(envelope, key)
+                })
             }
             #[cfg(not(debug_assertions))]
             {
-                return Err(CloudflareError::Integrity(
+                Err(CloudflareError::Integrity(
                     crate::pinned_tls::IntegrityFailure::MissingVerificationKey,
-                ));
+                ))
             }
-        };
-
-        verified.map_err(map_lease_verification_error)
+        }
     }
 
     pub async fn get_online(&self, token: &str) -> CloudflareResult<Vec<OnlineSession>> {
@@ -933,17 +924,6 @@ impl CloudflareClient {
             relative_path.trim_start_matches('/')
         )
     }
-}
-
-fn map_lease_verification_error(error: LeaseVerificationError) -> CloudflareError {
-    use crate::pinned_tls::IntegrityFailure;
-
-    let failure = match error {
-        LeaseVerificationError::MalformedEnvelope => IntegrityFailure::LeaseEnvelope,
-        LeaseVerificationError::InvalidSignature => IntegrityFailure::LeaseSignature,
-        LeaseVerificationError::MalformedClaims => IntegrityFailure::LeaseClaims,
-    };
-    CloudflareError::Integrity(failure)
 }
 
 fn fallback_message(status: u16) -> String {

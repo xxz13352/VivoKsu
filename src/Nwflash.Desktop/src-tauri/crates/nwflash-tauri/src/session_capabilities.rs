@@ -249,7 +249,7 @@ mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
     use nwflash_infrastructure::ProcessIdentity;
     use nwflash_protection::{
-        accept_login_lease, classify_heartbeat_lease, verify_signed_lease, HeartbeatDecision,
+        accept_signed_login_lease, classify_signed_heartbeat_lease, HeartbeatDecision,
         LeaseBinding, LeaseClaims, LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
     };
     use rand_core::OsRng;
@@ -266,7 +266,7 @@ mod tests {
             "process-nonce",
             "signed-session",
         );
-        let make_verified = |kind, sequence| {
+        let make_signed = |kind, sequence| {
             let claims = LeaseClaims {
                 version: 1,
                 kind,
@@ -282,26 +282,27 @@ mod tests {
             };
             let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
             let signature = URL_SAFE_NO_PAD.encode(signing_key.sign(payload.as_bytes()).to_bytes());
-            verify_signed_lease(
-                &SignedEnvelope {
-                    lease_payload: payload,
-                    lease_signature: signature,
-                },
-                &signing_key.verifying_key(),
-            )
-            .unwrap()
+            SignedEnvelope {
+                lease_payload: payload,
+                lease_signature: signature,
+            }
         };
 
-        let login = make_verified(LeaseKind::Login, 1);
-        let mut lease = accept_login_lease(&login, &binding, 1_800_000_001).unwrap();
+        let verifying_key = signing_key.verifying_key();
+        let login = make_signed(LeaseKind::Login, 1);
+        let mut lease =
+            accept_signed_login_lease(&login, &verifying_key, &binding, 1_800_000_001).unwrap();
         for next in 2..=sequence {
-            let heartbeat = make_verified(LeaseKind::Heartbeat, next);
-            lease = match classify_heartbeat_lease(
+            let heartbeat = make_signed(LeaseKind::Heartbeat, next);
+            lease = match classify_signed_heartbeat_lease(
                 &heartbeat,
+                &verifying_key,
                 &binding,
                 lease.sequence(),
                 1_800_000_001,
-            ) {
+            )
+            .unwrap()
+            {
                 HeartbeatDecision::Continue(lease) => lease,
                 HeartbeatDecision::ExitPending(reason) => panic!("fixture rejected: {reason:?}"),
             };

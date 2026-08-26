@@ -58,8 +58,7 @@ pub enum ProtectionFailure {
 }
 
 /// Dispatches a normalized protection decision and denies malformed routes.
-#[inline(never)]
-#[export_name = "nwflash_protection_dispatch_decision"]
+/// This is a pure protocol utility, not an additional VMP release leaf.
 pub fn dispatch_protection_decision(selector: u32, input: DecisionInput) -> ProtectionDecision {
     match (decode_selector(selector), input) {
         (

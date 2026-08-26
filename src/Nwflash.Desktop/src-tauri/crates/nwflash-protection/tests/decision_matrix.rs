@@ -1,8 +1,8 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey};
 use nwflash_protection::{
-    accept_login_lease, admit_local_operation, dispatch_protection_decision, encoded_selector,
-    verify_signed_lease, DecisionInput, LeaseBinding, LeaseClaims, LeaseKind, OperationDecision,
+    accept_signed_login_lease, admit_local_operation, dispatch_protection_decision,
+    encoded_selector, DecisionInput, LeaseBinding, LeaseClaims, LeaseKind, OperationDecision,
     ProtectionDecision, ProtectionFailure, ProtectionSelector, SignedEnvelope, TokenDigest,
 };
 use rand_core::OsRng;
@@ -26,16 +26,13 @@ fn accepted_login(expires_at: i64) -> nwflash_protection::SessionLease {
     let lease_payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
     let lease_signature =
         URL_SAFE_NO_PAD.encode(signing_key.sign(lease_payload.as_bytes()).to_bytes());
-    let verified = verify_signed_lease(
-        &SignedEnvelope {
-            lease_payload,
-            lease_signature,
-        },
+    let envelope = SignedEnvelope {
+        lease_payload,
+        lease_signature,
+    };
+    accept_signed_login_lease(
+        &envelope,
         &signing_key.verifying_key(),
-    )
-    .unwrap();
-    accept_login_lease(
-        &verified,
         &LeaseBinding::new(
             "alice",
             TokenDigest::from_bytes([9_u8; 32]),

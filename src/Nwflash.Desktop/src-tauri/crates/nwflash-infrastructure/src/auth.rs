@@ -4,8 +4,9 @@ use std::{
 };
 
 use nwflash_protection::{
-    accept_login_lease, classify_heartbeat_lease, HeartbeatDecision, LeaseBinding, LeaseRejection,
-    SessionLease, TokenDigest,
+    accept_signed_login_lease, classify_signed_heartbeat_lease, HeartbeatDecision,
+    LeaseAcceptanceError, LeaseBinding, LeaseRejection, LeaseVerificationError, SessionLease,
+    TokenDigest,
 };
 
 use crate::{
@@ -70,13 +71,6 @@ impl AuthService {
             .login(requested_username, password, identity, session_id)
             .await?;
 
-        // Cryptographic verification deliberately precedes every claim/binding check.
-        let verified = self
-            .client
-            .verify_session_lease(&result.signed_envelope())?;
-        if result.username != requested_username {
-            return Err(CloudflareError::Integrity(IntegrityFailure::LeaseBinding));
-        }
         let binding = LeaseBinding::new(
             requested_username,
             TokenDigest::sha256(result.token.as_str().as_bytes()),
@@ -85,8 +79,18 @@ impl AuthService {
             identity.process_nonce(),
             session_id,
         );
-        let lease =
-            accept_login_lease(&verified, &binding, unix_now()).map_err(map_lease_rejection)?;
+        // Signature verification, result branching, claim parsing, and binding
+        // acceptance execute inside the synchronous Ultra leaf.
+        let lease = accept_signed_login_lease(
+            &result.signed_envelope(),
+            self.client.session_verifying_key()?,
+            &binding,
+            unix_now(),
+        )
+        .map_err(map_lease_acceptance)?;
+        if result.username != requested_username {
+            return Err(CloudflareError::Integrity(IntegrityFailure::LeaseBinding));
+        }
         if !result.token.is_header_safe() {
             return Err(CloudflareError::InvalidInput(
                 "认证令牌格式无效。".to_string(),
@@ -122,10 +126,6 @@ impl AuthService {
             return Ok(HeartbeatAdmission::ForceExit);
         }
 
-        // As with login, no payload fields are considered until Ed25519 succeeds.
-        let verified = self
-            .client
-            .verify_session_lease(&result.signed_envelope())?;
         let binding = LeaseBinding::new(
             username,
             TokenDigest::sha256(token.as_str().as_bytes()),
@@ -134,7 +134,15 @@ impl AuthService {
             identity.process_nonce(),
             lease.session_id(),
         );
-        match classify_heartbeat_lease(&verified, &binding, lease.sequence(), unix_now()) {
+        match classify_signed_heartbeat_lease(
+            &result.signed_envelope(),
+            self.client.session_verifying_key()?,
+            &binding,
+            lease.sequence(),
+            unix_now(),
+        )
+        .map_err(map_lease_verification)?
+        {
             HeartbeatDecision::Continue(next) => Ok(HeartbeatAdmission::Accepted(next)),
             HeartbeatDecision::ExitPending(reason) => Err(map_lease_rejection(reason)),
         }
@@ -188,6 +196,22 @@ fn map_lease_rejection(error: LeaseRejection) -> CloudflareError {
         | LeaseRejection::IssuedInFuture
         | LeaseRejection::InvalidTimeWindow => IntegrityFailure::LeaseTime,
         LeaseRejection::SequenceRollback => IntegrityFailure::LeaseSequence,
+    };
+    CloudflareError::Integrity(failure)
+}
+
+fn map_lease_acceptance(error: LeaseAcceptanceError) -> CloudflareError {
+    match error {
+        LeaseAcceptanceError::Verification(error) => map_lease_verification(error),
+        LeaseAcceptanceError::Rejection(error) => map_lease_rejection(error),
+    }
+}
+
+fn map_lease_verification(error: LeaseVerificationError) -> CloudflareError {
+    let failure = match error {
+        LeaseVerificationError::MalformedEnvelope => IntegrityFailure::LeaseEnvelope,
+        LeaseVerificationError::InvalidSignature => IntegrityFailure::LeaseSignature,
+        LeaseVerificationError::MalformedClaims => IntegrityFailure::LeaseClaims,
     };
     CloudflareError::Integrity(failure)
 }

@@ -1,9 +1,9 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use nwflash_protection::{
-    accept_login_lease, classify_heartbeat_lease, verify_signed_lease, HeartbeatDecision,
-    LeaseBinding, LeaseClaims, LeaseKind, LeaseRejection, SignedEnvelope, TokenDigest,
-    MAX_CLOCK_SKEW_SECONDS,
+    accept_signed_login_lease, classify_signed_heartbeat_lease, verify_signed_lease,
+    HeartbeatDecision, LeaseAcceptanceError, LeaseBinding, LeaseClaims, LeaseKind, LeaseRejection,
+    SignedEnvelope, TokenDigest, MAX_CLOCK_SKEW_SECONDS,
 };
 use rand_core::OsRng;
 
@@ -54,11 +54,6 @@ fn signed_envelope(claims: &LeaseClaims) -> (SignedEnvelope, VerifyingKey) {
     signed_payload(URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap()))
 }
 
-fn verified_login() -> nwflash_protection::VerifiedLease {
-    let (envelope, verification_key) = signed_envelope(&claims(LeaseKind::Login));
-    verify_signed_lease(&envelope, &verification_key).unwrap()
-}
-
 #[test]
 fn verifies_a_signature_over_the_original_base64url_payload_ascii_bytes() {
     let (envelope, verification_key) = signed_envelope(&claims(LeaseKind::Heartbeat));
@@ -77,6 +72,16 @@ fn rejects_a_wrong_signature_before_parsing_claims() {
         verify_signed_lease(&envelope, &verification_key),
         Err(nwflash_protection::LeaseVerificationError::InvalidSignature)
     ));
+    assert_eq!(
+        accept_signed_login_lease(&envelope, &verification_key, &binding(), NOW),
+        Err(LeaseAcceptanceError::Verification(
+            nwflash_protection::LeaseVerificationError::InvalidSignature
+        ))
+    );
+    assert_eq!(
+        classify_signed_heartbeat_lease(&envelope, &verification_key, &binding(), 10, NOW),
+        Err(nwflash_protection::LeaseVerificationError::InvalidSignature)
+    );
 }
 
 #[test]
@@ -110,20 +115,20 @@ fn rejects_expired_and_excessively_future_login_leases() {
     let mut expired = claims(LeaseKind::Login);
     expired.expires_at = NOW - 1;
     let (expired_envelope, expired_key) = signed_envelope(&expired);
-    let expired = verify_signed_lease(&expired_envelope, &expired_key).unwrap();
     assert_eq!(
-        accept_login_lease(&expired, &binding(), NOW),
-        Err(LeaseRejection::Expired)
+        accept_signed_login_lease(&expired_envelope, &expired_key, &binding(), NOW),
+        Err(LeaseAcceptanceError::Rejection(LeaseRejection::Expired))
     );
 
     let mut future = claims(LeaseKind::Login);
     future.issued_at = NOW + MAX_CLOCK_SKEW_SECONDS + 1;
     future.expires_at = future.issued_at + 60;
     let (future_envelope, future_key) = signed_envelope(&future);
-    let future = verify_signed_lease(&future_envelope, &future_key).unwrap();
     assert_eq!(
-        accept_login_lease(&future, &binding(), NOW),
-        Err(LeaseRejection::IssuedInFuture)
+        accept_signed_login_lease(&future_envelope, &future_key, &binding(), NOW),
+        Err(LeaseAcceptanceError::Rejection(
+            LeaseRejection::IssuedInFuture
+        ))
     );
 }
 
@@ -162,10 +167,8 @@ fn rejects_login_claims_that_are_not_bound_to_the_normalized_context() {
         let mut candidate = claims(LeaseKind::Login);
         mutate(&mut candidate);
         let (envelope, verification_key) = signed_envelope(&candidate);
-        let verified = verify_signed_lease(&envelope, &verification_key).unwrap();
-
         assert!(
-            accept_login_lease(&verified, &binding(), NOW).is_err(),
+            accept_signed_login_lease(&envelope, &verification_key, &binding(), NOW).is_err(),
             "{name} mismatch must fail closed"
         );
     }
@@ -176,22 +179,20 @@ fn classifies_heartbeat_sequence_rollback_as_exit_pending() {
     let mut candidate = claims(LeaseKind::Heartbeat);
     candidate.sequence = 11;
     let (envelope, verification_key) = signed_envelope(&candidate);
-    let verified = verify_signed_lease(&envelope, &verification_key).unwrap();
-
     assert_eq!(
-        classify_heartbeat_lease(&verified, &binding(), 11, NOW),
-        HeartbeatDecision::ExitPending(LeaseRejection::SequenceRollback)
+        classify_signed_heartbeat_lease(&envelope, &verification_key, &binding(), 11, NOW),
+        Ok(HeartbeatDecision::ExitPending(
+            LeaseRejection::SequenceRollback
+        ))
     );
 }
 
 #[test]
 fn accepts_a_bound_heartbeat_with_a_strictly_increasing_sequence() {
     let (envelope, verification_key) = signed_envelope(&claims(LeaseKind::Heartbeat));
-    let verified = verify_signed_lease(&envelope, &verification_key).unwrap();
-
     assert!(matches!(
-        classify_heartbeat_lease(&verified, &binding(), 10, NOW),
-        HeartbeatDecision::Continue(_)
+        classify_signed_heartbeat_lease(&envelope, &verification_key, &binding(), 10, NOW),
+        Ok(HeartbeatDecision::Continue(_))
     ));
 }
 
@@ -214,7 +215,6 @@ fn derives_the_sha256_token_digest_before_entering_the_lease_decision_boundary()
     let mut candidate = claims(LeaseKind::Login);
     candidate.token_sha256 = TokenDigest::from_bytes(expected_sha256);
     let (envelope, verification_key) = signed_envelope(&candidate);
-    let verified = verify_signed_lease(&envelope, &verification_key).unwrap();
     let binding = LeaseBinding::new(
         "alice",
         TokenDigest::sha256(b"abc"),
@@ -224,7 +224,7 @@ fn derives_the_sha256_token_digest_before_entering_the_lease_decision_boundary()
         "session-xyz",
     );
 
-    assert!(accept_login_lease(&verified, &binding, NOW).is_ok());
+    assert!(accept_signed_login_lease(&envelope, &verification_key, &binding, NOW).is_ok());
     assert_eq!(
         format!("{:?}", TokenDigest::sha256(b"abc")),
         "TokenDigest([REDACTED])"
@@ -262,5 +262,8 @@ fn signed_envelope_debug_output_redacts_the_wire_values() {
 
 #[test]
 fn verified_login_fixture_is_accepted() {
-    assert!(accept_login_lease(&verified_login(), &binding(), NOW).is_ok());
+    let (envelope, verification_key) = signed_envelope(&claims(LeaseKind::Login));
+    assert!(
+        accept_signed_login_lease(&envelope, &verification_key, &binding(), NOW).is_ok()
+    );
 }

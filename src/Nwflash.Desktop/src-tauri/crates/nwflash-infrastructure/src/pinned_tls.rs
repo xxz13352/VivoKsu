@@ -33,9 +33,6 @@ use url::Url;
 use x509_parser::parse_x509_certificate;
 
 use crate::api_client::{CloudflareError, CloudflareResult};
-use nwflash_protection::{
-    verify_signed_lease, LeaseVerificationError, SignedEnvelope, VerifiedLease,
-};
 
 pub const API_HOST: &str = "api.nwflash.cc.cd";
 pub const BUILTIN_LEAF_SPKI_PIN: &str = "kavrs5Bk3Tjn+0G+uPjWGBqJsXzW5kHFNPzgxuvrcKY=";
@@ -320,11 +317,8 @@ impl PinnedApiClient {
         self.base_url.as_str().trim_end_matches('/')
     }
 
-    pub(crate) fn verify_session_lease(
-        &self,
-        envelope: &SignedEnvelope,
-    ) -> Result<VerifiedLease, LeaseVerificationError> {
-        verify_signed_lease(envelope, &self.pinsets.verifying_key)
+    pub(crate) fn session_verifying_key(&self) -> &VerifyingKey {
+        &self.pinsets.verifying_key
     }
 
     #[cfg(debug_assertions)]

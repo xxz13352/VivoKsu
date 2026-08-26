@@ -225,6 +225,13 @@ pub enum LeaseVerificationError {
     MalformedClaims,
 }
 
+/// A protected login leaf can fail before or after signature verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseAcceptanceError {
+    Verification(LeaseVerificationError),
+    Rejection(LeaseRejection),
+}
+
 /// A locally admitted session capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLease {
@@ -274,8 +281,12 @@ pub enum OperationDecision {
 }
 
 /// Verifies an Ed25519 signature over the original base64url payload ASCII bytes.
-#[inline(never)]
-#[export_name = "nwflash_protection_verify_signed_lease"]
+///
+/// This primitive is forced inline into the two protected lease leaves. The
+/// Ed25519 implementation remains an external call, while the result branch,
+/// payload decoding, and claims construction stay inside the first-party marker
+/// region. It is public only for protocol-focused tests and is not a VMP leaf.
+#[inline(always)]
 pub fn verify_signed_lease(
     envelope: &SignedEnvelope,
     verifying_key: &VerifyingKey,
@@ -307,39 +318,49 @@ pub fn verify_signed_lease(
     Ok(VerifiedLease(claims))
 }
 
-/// Accepts a verified login lease only when every session binding matches.
+/// Verifies and accepts a signed login lease inside one synchronous Ultra leaf.
 #[inline(never)]
 #[export_name = "nwflash_protection_accept_login_lease"]
-pub fn accept_login_lease(
-    lease: &VerifiedLease,
+pub fn accept_signed_login_lease(
+    envelope: &SignedEnvelope,
+    verifying_key: &VerifyingKey,
     binding: &LeaseBinding,
     now: i64,
-) -> Result<SessionLease, LeaseRejection> {
+) -> Result<SessionLease, LeaseAcceptanceError> {
     begin_login_lease_acceptance();
-    let result = validate_lease(lease.claims(), binding, LeaseKind::Login, now, None);
+    let result = verify_signed_lease(envelope, verifying_key)
+        .map_err(LeaseAcceptanceError::Verification)
+        .and_then(|lease| {
+            validate_lease(lease.claims(), binding, LeaseKind::Login, now, None)
+                .map_err(LeaseAcceptanceError::Rejection)
+        });
     end_marker();
     result
 }
 
-/// Classifies a verified heartbeat lease and fails closed on sequence rollback.
+/// Verifies and classifies a signed heartbeat inside one synchronous leaf.
 #[inline(never)]
 #[export_name = "nwflash_protection_classify_heartbeat_lease"]
-pub fn classify_heartbeat_lease(
-    lease: &VerifiedLease,
+pub fn classify_signed_heartbeat_lease(
+    envelope: &SignedEnvelope,
+    verifying_key: &VerifyingKey,
     binding: &LeaseBinding,
     previous_sequence: u64,
     now: i64,
-) -> HeartbeatDecision {
+) -> Result<HeartbeatDecision, LeaseVerificationError> {
     begin_heartbeat_lease_classification();
-    let decision = match validate_lease(
-        lease.claims(),
-        binding,
-        LeaseKind::Heartbeat,
-        now,
-        Some(previous_sequence),
-    ) {
-        Ok(session) => HeartbeatDecision::Continue(session),
-        Err(reason) => HeartbeatDecision::ExitPending(reason),
+    let decision = match verify_signed_lease(envelope, verifying_key) {
+        Ok(lease) => Ok(match validate_lease(
+            lease.claims(),
+            binding,
+            LeaseKind::Heartbeat,
+            now,
+            Some(previous_sequence),
+        ) {
+            Ok(session) => HeartbeatDecision::Continue(session),
+            Err(reason) => HeartbeatDecision::ExitPending(reason),
+        }),
+        Err(error) => Err(error),
     };
     end_marker();
     decision
