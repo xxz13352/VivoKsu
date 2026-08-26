@@ -16,6 +16,8 @@ const manifestPath = resolve(tauriRoot, 'Cargo.toml');
 const configPath = resolve(tauriRoot, 'tauri.conf.json');
 const e2eConfigPath = resolve(tauriRoot, 'tauri.e2e.conf.json');
 const capabilityRoot = resolve(tauriRoot, 'capabilities');
+const cargoTreeTimeoutMs = 45_000;
+const cargoGraphTestTimeoutMs = (cargoTreeTimeoutMs * 2) + 10_000;
 const normalPermissions = [
   'core:default',
   'dialog:default',
@@ -70,6 +72,7 @@ function resolveCapabilities(config: JsonObject): Capability[] {
 function cargoTree(features?: string): string {
   const args = [
     'tree',
+    '--locked',
     '--manifest-path',
     manifestPath,
     '-p',
@@ -79,7 +82,12 @@ function cargoTree(features?: string): string {
     '--no-default-features',
   ];
   if (features) args.push('--features', features);
-  return execFileSync('cargo', args, { encoding: 'utf8' });
+  return execFileSync('cargo', args, {
+    encoding: 'utf8',
+    maxBuffer: 2 * 1024 * 1024,
+    timeout: cargoTreeTimeoutMs,
+    windowsHide: true,
+  });
 }
 
 describe('desktop window capabilities', () => {
@@ -121,5 +129,5 @@ describe('desktop window capabilities', () => {
     expect(productionTree).not.toMatch(/tauri-plugin-wdio(?:-webdriver)?\s+v/);
     expect(e2eTree).toMatch(/tauri-plugin-wdio\s+v/);
     expect(e2eTree).toMatch(/tauri-plugin-wdio-webdriver\s+v/);
-  });
+  }, cargoGraphTestTimeoutMs);
 });
