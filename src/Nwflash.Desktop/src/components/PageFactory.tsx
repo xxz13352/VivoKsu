@@ -26,7 +26,7 @@ export const PageFactory: FC<{
     case 'Mirror':
       return <MirrorPage />;
     case 'FileManager':
-      return <FileManagerPage />;
+      return <FileManagerPage deviceSnapshot={deviceSnapshot} />;
     case 'LineFlash':
       return <LineFlashPage operationSnapshot={operationSnapshot} />;
     case 'FirmwareExtract':
