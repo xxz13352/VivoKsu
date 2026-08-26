@@ -2730,6 +2730,7 @@ dependencies = [
  "nwflash-application",
  "nwflash-domain",
  "nwflash-infrastructure",
+ "nwflash-protection",
  "nwflash-tauri",
  "nwflash-windows",
  "tauri",

@@ -4,7 +4,12 @@ import type { Options } from '@wdio/types';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const application = process.env.NWFLASH_E2E_BINARY
-  ?? path.resolve(directory, '../src-tauri/target/release/nwflash-desktop.exe');
+  ?? path.resolve(directory, '../src-tauri/target/e2e-native/debug/nwflash-desktop.exe');
+
+if (!application.includes(`${path.sep}target${path.sep}e2e-native${path.sep}`)
+  && process.env.NWFLASH_ALLOW_EXTERNAL_E2E_BINARY !== 'true') {
+  throw new Error('Native E2E requires the dedicated e2e-native build or an explicit external override.');
+}
 
 export const config: Options.Testrunner = {
   runner: 'local',

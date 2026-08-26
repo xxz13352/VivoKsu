@@ -1,11 +1,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ReleaseRoot,
-    [string]$ResourceManifestPath
+    [string]$ResourceManifestPath,
+    [string]$ReleaseVerifiedEvidence,
+    [switch]$DevelopmentUnsigned
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'vmp\protected-release-contract.ps1')
 if ([string]::IsNullOrWhiteSpace($ResourceManifestPath)) {
     $ResourceManifestPath = Join-Path $repo 'packaging\release\tauri-resources.json'
 }
@@ -91,6 +94,19 @@ if ($installers.Count -ne 1) {
 
 $allowed['nwflash-desktop.exe'] = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToUpperInvariant()
 $allowed[$installers[0].Name] = (Get-FileHash -LiteralPath $installers[0].FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+$releaseEvidence = $null
+if (-not $DevelopmentUnsigned) {
+    if ([string]::IsNullOrWhiteSpace($ReleaseVerifiedEvidence)) {
+        throw 'ReleaseVerifiedEvidence is required before generating a protected manifest.'
+    }
+    $releaseEvidencePath = Resolve-FullyQualifiedLeaf $ReleaseVerifiedEvidence
+    $releaseEvidence = Read-ProtectedEvidence -Path $releaseEvidencePath -ExpectedState 'release-verified'
+    if ([bool]$releaseEvidence.manifest_verified) { throw 'Protected manifest must consume pre-manifest release verification.' }
+    if ([string]$releaseEvidence.signed_exe_sha256 -ne $allowed['nwflash-desktop.exe'] -or
+        [string]$releaseEvidence.signed_installer_sha256 -ne $allowed[$installers[0].Name]) {
+        throw 'Release verification evidence does not match the final staged hashes.'
+    }
+}
 $ignored = @('SHA256SUMS.txt', '.nwflash-tauri-release')
 
 foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)) {
@@ -105,5 +121,8 @@ foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)) {
 
 $manifest = Join-Path $root 'SHA256SUMS.txt'
 $lines = @($allowed.Keys | Sort-Object | ForEach-Object { '{0} *{1}' -f $allowed[$_], $_ })
-Set-Content -LiteralPath $manifest -Value $lines -Encoding UTF8
+$temporary = Join-Path $root ('.SHA256SUMS.tmp-' + [Guid]::NewGuid().ToString('N'))
+$content = ($lines -join [Environment]::NewLine) + [Environment]::NewLine
+[IO.File]::WriteAllText($temporary, $content, [Text.UTF8Encoding]::new($false))
+try { [IO.File]::Move($temporary, $manifest) } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary } }
 Write-Host 'Tauri release manifest created.'

@@ -22,8 +22,15 @@ use tokio::time::sleep;
 mod commands;
 mod exit_supervisor;
 mod integrity_reporter;
+mod release_probe;
 #[allow(dead_code)]
 mod session_capabilities;
+
+pub use release_probe::{
+    effective_capabilities_json, evaluate_protected_release_probe, ProtectedReleaseProbeAction,
+    ProtectedReleaseProbeReport, EFFECTIVE_CAPABILITIES_PROBE_ARGUMENT,
+    PROTECTED_RELEASE_PROBE_ARGUMENT,
+};
 
 #[doc(hidden)]
 pub use commands::mirror::{start_plan, MirrorRuntime};

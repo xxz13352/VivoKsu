@@ -7,6 +7,7 @@ autobins = false
 
 [features]
 e2e = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+protected = ["nwflash-protection/vmp-sdk"]
 
 [dependencies]
 nwflash-domain = { path = "../nwflash-domain" }

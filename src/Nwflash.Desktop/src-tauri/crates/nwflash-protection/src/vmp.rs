@@ -49,6 +49,32 @@ pub trait IntegrityProbe {
     fn signals(&self) -> IntegritySignals;
 }
 
+/// Raw VMProtect image oracles used by the desktop release smoke mode.
+/// Unavailable probes use `None` instead of presenting a missing SDK as a
+/// negative result from either VMProtect function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseImageProbe {
+    pub available: bool,
+    pub vmprotect_is_protected: Option<bool>,
+    pub vmprotect_is_valid_image_crc: Option<bool>,
+}
+
+pub fn probe_release_image(probe: &dyn IntegrityProbe) -> ReleaseImageProbe {
+    let signals = probe.signals();
+    match signals.availability {
+        ProbeAvailability::Available => ReleaseImageProbe {
+            available: true,
+            vmprotect_is_protected: Some(signals.image_protected),
+            vmprotect_is_valid_image_crc: Some(signals.image_crc_valid),
+        },
+        ProbeAvailability::Unavailable => ReleaseImageProbe {
+            available: false,
+            vmprotect_is_protected: None,
+            vmprotect_is_valid_image_crc: None,
+        },
+    }
+}
+
 /// Production VMProtect SDK probe. Without `vmp-sdk`, it is explicitly unavailable.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct VmpIntegrityProbe;

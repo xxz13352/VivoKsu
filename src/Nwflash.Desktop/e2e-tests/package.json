@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "pretest": "npm --prefix .. run build:e2e && npm --prefix .. run tauri -- build --features e2e --no-bundle",
+    "pretest": "powershell -NoProfile -ExecutionPolicy Bypass -File ./build-native-e2e.ps1",
     "pretest:native": "npm run pretest",
     "pretest:visual": "npm --prefix .. run build",
     "test": "npm run test:native && npm run test:visual",

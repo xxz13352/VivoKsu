@@ -1,9 +1,9 @@
 use std::process::Command;
 
 use nwflash_protection::{
-    build_identity_matches, marker_backend_available, verify_image_integrity,
+    build_identity_matches, marker_backend_available, probe_release_image, verify_image_integrity,
     ImageIntegrityFailure, ImageIntegrityStatus, IntegrityProbe, IntegritySignals,
-    IntegrityTelemetry, VmpIntegrityProbe,
+    IntegrityTelemetry, ReleaseImageProbe, VmpIntegrityProbe,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +80,36 @@ fn debugger_and_vm_signals_are_classified_as_telemetry_without_vm_denial() {
     assert_eq!(
         both.telemetry,
         IntegrityTelemetry::DebuggerAndVirtualMachinePresent
+    );
+}
+
+#[test]
+fn release_image_probe_preserves_both_vmprotect_oracles() {
+    let report = probe_release_image(&DeterministicProbe(IntegritySignals::available(
+        false, false, true, true,
+    )));
+
+    assert_eq!(
+        report,
+        ReleaseImageProbe {
+            available: true,
+            vmprotect_is_protected: Some(false),
+            vmprotect_is_valid_image_crc: Some(false),
+        }
+    );
+}
+
+#[test]
+fn release_image_probe_reports_unavailable_without_claiming_false_oracles() {
+    let report = probe_release_image(&DeterministicProbe(IntegritySignals::unavailable()));
+
+    assert_eq!(
+        report,
+        ReleaseImageProbe {
+            available: false,
+            vmprotect_is_protected: None,
+            vmprotect_is_valid_image_crc: None,
+        }
     );
 }
 

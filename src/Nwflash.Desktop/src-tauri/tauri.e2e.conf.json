@@ -1,0 +1,24 @@
+{
+  "app": {
+    "security": {
+      "capabilities": [
+        {
+          "identifier": "e2e",
+          "windows": ["main"],
+          "permissions": [
+            "core:default",
+            "dialog:default",
+            "core:window:default",
+            "core:window:allow-close",
+            "core:window:allow-minimize",
+            "core:window:allow-set-resizable",
+            "core:window:allow-set-size",
+            "core:window:allow-toggle-maximize",
+            "wdio:default",
+            "wdio-webdriver:default"
+          ]
+        }
+      ]
+    }
+  }
+}

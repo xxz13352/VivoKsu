@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$SdkRoot = $env:NWFLASH_VMP_SDK_ROOT
+    [string]$SdkRoot = $env:NWFLASH_VMP_SDK_ROOT,
+    [switch]$AsJson
 )
 
 Set-StrictMode -Version Latest
@@ -273,9 +274,26 @@ Assert-Amd64PeImage -Path $dllPath
 $dumpbin = Resolve-X64Dumpbin
 Assert-RequiredDllExports -Dumpbin $dumpbin -DllPath $dllPath
 
-Write-Output "VMProtect SDK root: $resolvedRoot"
-Write-Output "Header: $headerPath"
-Write-Output "Import library: $libraryPath (AMD64 COFF; $ExpectedSdkDll; 8 required symbols)"
-Write-Output "SDK DLL: $dllPath (AMD64 PE)"
-Write-Output "Required DLL exports: verified (8 symbols via $dumpbin)"
-Write-Output 'VMProtect SDK validation passed. No files were copied or modified.'
+$result = [ordered]@{
+    schema = 1
+    verified = $true
+    machine = 'AMD64'
+    sdk_dll_identity = $ExpectedSdkDll
+    required_symbols = @($RequiredSymbols)
+    required_symbol_count = $RequiredSymbols.Count
+    header_sha256 = (Get-FileHash -LiteralPath $headerPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    import_library_sha256 = (Get-FileHash -LiteralPath $libraryPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    sdk_dll_sha256 = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    files_copied = 0
+}
+if ($AsJson) {
+    $result | ConvertTo-Json -Depth 5 -Compress
+}
+else {
+    Write-Output "VMProtect SDK root: $resolvedRoot"
+    Write-Output "Header: $headerPath"
+    Write-Output "Import library: $libraryPath (AMD64 COFF; $ExpectedSdkDll; 8 required symbols)"
+    Write-Output "SDK DLL: $dllPath (AMD64 PE)"
+    Write-Output "Required DLL exports: verified (8 symbols via $dumpbin)"
+    Write-Output 'VMProtect SDK validation passed. No files were copied or modified.'
+}

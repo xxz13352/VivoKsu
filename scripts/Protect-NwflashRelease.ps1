@@ -1,51 +1,69 @@
 [CmdletBinding()]
-param([string]$ReleaseRoot)
+param(
+    [Parameter(Mandatory)][ValidateSet('Console')][string]$Mode,
+    [Parameter(Mandatory)][string]$PreparedManifest,
+    [Parameter(Mandatory)][string]$ConsolePath,
+    [Parameter(Mandatory)][string]$ProjectPath,
+    [Parameter(Mandatory)][string[]]$ConsoleArguments,
+    [Parameter(Mandatory)][string]$MarkerReviewPath
+)
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) { $ReleaseRoot = Join-Path $repo 'artifacts\tauri-release' }
-$root = [IO.Path]::GetFullPath($ReleaseRoot)
-$exe = Join-Path $root 'nwflash-desktop.exe'
-if (-not (Test-Path $exe)) { throw "Release executable is missing: $exe" }
-if ([string]::IsNullOrWhiteSpace($env:NWFLASH_VMP_PATH)) { throw 'NWFLASH_VMP_PATH is required for VMProtect.' }
-if ([string]::IsNullOrWhiteSpace($env:NWFLASH_VMP_PROJECT)) { throw 'NWFLASH_VMP_PROJECT is required for VMProtect.' }
-if ([string]::IsNullOrWhiteSpace($env:NWFLASH_VMP_ARGUMENTS)) { throw 'NWFLASH_VMP_ARGUMENTS must be a JSON argument array containing {project}, {input}, and {output} placeholders.' }
-if (-not (Test-Path $env:NWFLASH_VMP_PATH)) { throw "VMProtect executable is missing: $env:NWFLASH_VMP_PATH" }
+. (Join-Path $PSScriptRoot 'vmp\protected-release-contract.ps1')
 
-$project = [IO.Path]::GetFullPath($env:NWFLASH_VMP_PROJECT)
-if (-not (Test-Path -LiteralPath $project -PathType Leaf)) { throw "VMProtect project is missing: $project" }
-$repoPrefix = $repo.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+$console = Assert-ConsoleExecutable -Path $ConsolePath
+$project = Resolve-FullyQualifiedLeaf $ProjectPath
+$repoPrefix = (Get-NormalizedFullPath $repo).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 if ($project.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'NWFLASH_VMP_PROJECT must reference an externally controlled VMProtect project.'
+    throw 'The VMProtect console project must remain external to the repository.'
 }
-$output = Join-Path $root '.nwflash-desktop.protected.exe'
-if ([IO.Path]::GetFullPath($output).Equals([IO.Path]::GetFullPath($exe), [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'VMProtect output must not overwrite the unprotected input directly.'
-}
-$arguments = ConvertFrom-Json $env:NWFLASH_VMP_ARGUMENTS
-if ($arguments -isnot [Array]) { throw 'NWFLASH_VMP_ARGUMENTS must be a JSON array.' }
-$argumentTexts = @($arguments | ForEach-Object {
-    if ($_ -isnot [string]) { throw 'NWFLASH_VMP_ARGUMENTS must contain only string arguments.' }
-    $_
-})
+
+$preparedPath = Resolve-FullyQualifiedLeaf $PreparedManifest
+$prepared = Read-ProtectedEvidence -Path $preparedPath -ExpectedState 'prepared'
+$input = Resolve-FullyQualifiedLeaf ([string]$prepared.input_exe.path)
+$output = Get-NormalizedFullPath ([string]$prepared.protected_output_path)
+$compilerLog = Get-NormalizedFullPath ([string]$prepared.compiler_log_path)
+if (Test-Path -LiteralPath $output) { throw "Console output already exists and will not be overwritten: $output" }
+if (Test-Path -LiteralPath $compilerLog) { throw "Compiler log already exists and will not be overwritten: $compilerLog" }
+
+$templates = @($ConsoleArguments)
+if ($templates.Count -eq 0) { throw 'ConsoleArguments must be a non-empty argument array.' }
 foreach ($placeholder in @('{project}', '{input}', '{output}')) {
-    if (-not ($argumentTexts | Where-Object { $_.Contains($placeholder) })) {
-        throw "NWFLASH_VMP_ARGUMENTS must contain the $placeholder placeholder."
+    $occurrences = 0
+    foreach ($argument in $templates) { $occurrences += [regex]::Matches($argument, [regex]::Escape($placeholder)).Count }
+    if ($occurrences -ne 1) { throw "ConsoleArguments must contain exactly one $placeholder placeholder." }
+}
+$arguments = @(
+    foreach ($argument in $templates) {
+        $argument.Replace('{project}', $project).Replace('{input}', $input).Replace('{output}', $output)
+    }
+)
+
+$logDirectory = Split-Path -Parent $compilerLog
+if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
+    New-Item -ItemType Directory -Path $logDirectory | Out-Null
+}
+$nonce = [Guid]::NewGuid().ToString('N')
+$stdout = Join-Path $logDirectory ('.vmprotect-console-stdout-' + $nonce + '.tmp')
+$stderr = Join-Path $logDirectory ('.vmprotect-console-stderr-' + $nonce + '.tmp')
+try {
+    $process = Start-Process -FilePath $console -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $project) `
+        -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $combined = @()
+    if (Test-Path -LiteralPath $stdout) { $combined += Get-Content -LiteralPath $stdout }
+    if (Test-Path -LiteralPath $stderr) { $combined += Get-Content -LiteralPath $stderr }
+    [IO.File]::WriteAllLines($compilerLog, [string[]]$combined, [Text.UTF8Encoding]::new($false))
+    if ($process.ExitCode -ne 0) { throw "VMProtect console failed with exit code $($process.ExitCode)." }
+}
+finally {
+    foreach ($temporary in @($stdout, $stderr)) {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary }
     }
 }
-if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Force }
-$inputHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
-$resolvedArguments = @($argumentTexts | ForEach-Object {
-    $_.Replace('{project}', $project).Replace('{input}', $exe).Replace('{output}', $output)
-})
-& $env:NWFLASH_VMP_PATH @resolvedArguments
-if ($LASTEXITCODE -ne 0) { throw "VMProtect failed with exit code $LASTEXITCODE." }
+
 if (-not (Test-Path -LiteralPath $output -PathType Leaf) -or (Get-Item -LiteralPath $output).Length -le 0) {
-    throw 'VMProtect did not produce protected output.'
+    throw 'VMProtect console returned success without producing the exact protected output.'
 }
-$outputHash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash
-if ($outputHash.Equals($inputHash, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'VMProtect did not produce protected output distinct from the input.'
-}
-Copy-Item -LiteralPath $output -Destination $exe -Force
-Remove-Item -LiteralPath $output -Force
+& (Join-Path $PSScriptRoot 'vmp\accept-manual-output.ps1') -PreparedManifest $preparedPath -MarkerReviewPath $MarkerReviewPath

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$SdkRoot
+    [string]$SdkRoot,
+    [switch]$AsJson
 )
 
 Set-StrictMode -Version Latest
@@ -133,6 +134,7 @@ function Assert-MarkerLayout {
         throw "dumpbin failed to disassemble the release probe: $($disassembly -join [Environment]::NewLine)"
     }
 
+    $verified = @()
     foreach ($leaf in $LeafContracts) {
         $mapCount = [regex]::Matches(
             $mapText,
@@ -163,8 +165,9 @@ function Assert-MarkerLayout {
         if ($beginCalls[0].Index -ge $endCalls[0].Index) {
             throw "$($leaf.Symbol) marker End does not physically follow Begin$($leaf.Mode)."
         }
-        Write-Output "Marker region: $($leaf.Symbol) = $($leaf.Mode) + End"
+        $verified += [pscustomobject]@{ symbol = $leaf.Symbol; mode = $leaf.Mode; begin_count = 1; end_count = 1; verified = $true }
     }
+    $verified
 }
 
 if (-not [System.IO.Path]::IsPathFullyQualified($SdkRoot)) {
@@ -179,7 +182,7 @@ $executable = Join-Path $artifactRoot 'vmp_link_probe.exe'
 $pdb = Join-Path $artifactRoot 'vmp_link_probe.pdb'
 $map = Join-Path $artifactRoot 'vmp_link_probe.map'
 
-& (Join-Path $PSScriptRoot 'verify-sdk.ps1') -SdkRoot $resolvedSdkRoot | Write-Output
+$sdkResult = (& (Join-Path $PSScriptRoot 'verify-sdk.ps1') -SdkRoot $resolvedSdkRoot -AsJson | ConvertFrom-Json)
 $env:NWFLASH_VMP_SDK_ROOT = $resolvedSdkRoot
 $cargoArguments = @(
     'rustc',
@@ -196,11 +199,8 @@ $cargoArguments = @(
     '-C', 'link-arg=/MAPINFO:EXPORTS',
     '-C', 'link-arg=/DEBUG:FULL'
 )
-& cargo @cargoArguments
-$cargoSucceeded = $?
-if (-not $cargoSucceeded) {
-    throw 'Full-link VMProtect release probe failed to build.'
-}
+$cargoOutput = (& cargo @cargoArguments 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "Full-link VMProtect release probe failed to build: $cargoOutput" }
 
 foreach ($artifact in @($executable, $pdb, $map)) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf) -or (Get-Item -LiteralPath $artifact).Length -eq 0) {
@@ -210,7 +210,26 @@ foreach ($artifact in @($executable, $pdb, $map)) {
 
 $dumpbin = Resolve-X64Dumpbin
 Assert-FinalPeImports -Dumpbin $dumpbin -Executable $executable
-Write-Output 'Final PE imports: VMProtectSDK64.dll and 8 required symbols verified'
-Assert-MarkerLayout -Dumpbin $dumpbin -Executable $executable -MapPath $map
-Write-Output "Release layout artifacts: EXE, PDB, and MAP verified under $artifactRoot"
-Write-Output 'No VMProtect SDK file was copied. Lite GUI and post-protection CRC verification remain Task 8.'
+$markerResult = @(Assert-MarkerLayout -Dumpbin $dumpbin -Executable $executable -MapPath $map)
+$result = [ordered]@{
+    schema = 1
+    verified = $true
+    machine = 'AMD64'
+    sdk = $sdkResult
+    imported_dll = $ExpectedSdkDll
+    required_imports = @($RequiredImports)
+    markers = $markerResult
+    executable_sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToUpperInvariant()
+    pdb_sha256 = (Get-FileHash -LiteralPath $pdb -Algorithm SHA256).Hash.ToUpperInvariant()
+    map_sha256 = (Get-FileHash -LiteralPath $map -Algorithm SHA256).Hash.ToUpperInvariant()
+    files_copied = 0
+}
+if ($AsJson) {
+    $result | ConvertTo-Json -Depth 8 -Compress
+}
+else {
+    Write-Output 'Final PE imports: VMProtectSDK64.dll and 8 required symbols verified'
+    foreach ($marker in $markerResult) { Write-Output "Marker region: $($marker.symbol) = $($marker.mode) + End" }
+    Write-Output "Release layout artifacts: EXE, PDB, and MAP verified under $artifactRoot"
+    Write-Output 'No VMProtect SDK file was copied. Lite GUI and post-protection CRC verification remain Task 8.'
+}
