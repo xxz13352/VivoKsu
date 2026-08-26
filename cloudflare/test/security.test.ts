@@ -53,6 +53,7 @@ interface StoredSessionLease {
 
 class FakeD1Database {
   readonly users: TestUser[] = [];
+  readonly appVersions: Array<{ version: string; min_version: string; download_url: string }> = [];
   readonly sessions = new Map<string, {
     user_id: number;
     last_seen_at: number;
@@ -467,7 +468,9 @@ class FakeD1PreparedStatement {
 
   async all<T>(): Promise<{ results: T[] }> {
     const sql = normalizedSql(this.query);
-    if (sql.includes("from app_versions")) return { results: [] };
+    if (sql.includes("from app_versions")) {
+      return { results: this.db.appVersions.map((row) => ({ ...row })) as T[] };
+    }
     throw new Error(`Unhandled D1 all(): ${this.query}`);
   }
 
@@ -659,13 +662,14 @@ async function postHeartbeat(
   env: Env,
   token: string,
   overrides: Record<string, unknown> = {},
+  version = "1.4.0",
 ): Promise<Response> {
   return fetchWorker(env, "/api/heartbeat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
-      "X-Nwflash-Version": "1.4.0",
+      "X-Nwflash-Version": version,
     },
     body: JSON.stringify({
       sessionId: "session-abc",
@@ -889,22 +893,37 @@ describe("signed lease routes", () => {
     expect(db.sessionLeases.size).toBe(0);
   });
 
-  it("returns 401 for superseded and revoked bearer tokens on auth and heartbeat", async () => {
+  it("keeps the version gate ahead of old-token auth and heartbeat rejection", async () => {
     const supersededToken = "superseded-active-token";
     const revokedMarker = `revoked:${"ef".repeat(32)}`;
     const { env, db } = await testEnv({ token: supersededToken });
     db.users[0].token = revokedMarker;
+    db.appVersions.push({
+      version: "2.0.0",
+      min_version: "1.4.0",
+      download_url: "https://example.test/nwflash",
+    });
 
     for (const token of [supersededToken, revokedMarker]) {
-      const auth = await fetchWorker(env, "/api/me", {
-        headers: { Authorization: `Bearer ${token}`, "X-Nwflash-Version": "1.4.0" },
-      });
-      const heartbeat = await postHeartbeat(env, token);
+      const responses: Array<[Response, number]> = [
+        [await fetchWorker(env, "/api/me", {
+          headers: { Authorization: `Bearer ${token}`, "X-Nwflash-Version": "1.3.9" },
+        }), 426],
+        [await postHeartbeat(env, token, {}, "1.3.9"), 426],
+        [await fetchWorker(env, "/api/me", {
+          headers: { Authorization: `Bearer ${token}`, "X-Nwflash-Version": "1.4.0" },
+        }), 401],
+        [await postHeartbeat(env, token), 401],
+      ];
 
-      expect(auth.status).toBe(401);
-      expect(heartbeat.status).toBe(401);
-      expect(JSON.stringify(await auth.json())).not.toContain(token);
-      expect(JSON.stringify(await heartbeat.json())).not.toContain(token);
+      for (const [response, expectedStatus] of responses) {
+        const body = await response.json() as Record<string, unknown>;
+        const serialized = JSON.stringify(body);
+        expect(response.status).toBe(expectedStatus);
+        expect(body).not.toHaveProperty("token");
+        expect(serialized).not.toContain(token);
+        expect(serialized).not.toContain("revoked:");
+      }
     }
   });
 

@@ -2,7 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { applyD1Migrations, reset, type D1Migration } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Env as WorkerEnv } from "../src/index";
+import apiWorker, { type Env as WorkerEnv } from "../src/index";
 import adminWorker from "../web/src/index";
 
 declare module "cloudflare:workers" {
@@ -42,10 +42,24 @@ describe("actual Worker route with Workerd D1", () => {
       ),
     ]);
 
-    const responses = await Promise.all([
-      postLogin("workerd-revived-session-a"),
-      postLogin("workerd-revived-session-b"),
+    const readBarrier = createInitialLoginReadBarrier(env.DB, 2);
+    const barrierEnv = withDatabase(env, readBarrier.database);
+    const pendingResponses = Promise.all([
+      postLogin("workerd-revived-session-a", barrierEnv),
+      postLogin("workerd-revived-session-b", barrierEnv),
     ]);
+    let responses: Response[];
+    try {
+      await withTimeout(readBarrier.reached, "both initial login user reads", 5_000);
+      responses = await withTimeout(pendingResponses, "revoked login CAS responses");
+    } catch (error) {
+      throw new Error(
+        `Login read barrier failed after ${readBarrier.readCount()} reads`,
+        { cause: error },
+      );
+    } finally {
+      readBarrier.release();
+    }
     const bodies = await Promise.all(
       responses.map((response) => response.json() as Promise<Record<string, unknown>>),
     );
@@ -54,10 +68,13 @@ describe("actual Worker route with Workerd D1", () => {
     const stored = await env.DB.prepare("SELECT token FROM api_users WHERE id = 7").first<{ token: string }>();
 
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(readBarrier.readCount()).toBe(2);
+    expect(readBarrier.observedTokens()).toEqual([revokedMarker, revokedMarker]);
     expect(new Set(tokens)).toEqual(new Set([activeToken]));
     expect(activeToken).toMatch(/^[0-9a-f]{64}$/);
     expect(stored?.token).toBe(activeToken);
     expect(await scalar("SELECT COUNT(*) AS value FROM token_exchange_audit")).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM session_leases")).toBe(2);
     expect(bodies.every((body) => !JSON.stringify(body).includes("revoked:"))).toBe(true);
     for (const [index, body] of bodies.entries()) {
       expect(decodeLeaseClaims(body)).toMatchObject({
@@ -92,7 +109,7 @@ describe("actual Worker route with Workerd D1", () => {
       token_sha256: await sha256Base64Url(activeToken),
       sequence: 2,
     });
-  });
+  }, 40_000);
 
   it("does not persist a signed login when the credential generation changes before session insert", async () => {
     const originalToken = "workerd-generation-original-token";
@@ -128,6 +145,38 @@ describe("actual Worker route with Workerd D1", () => {
     expect(stored).toEqual({ token: revokedMarker, password: nextPassword, salt: nextSalt });
     expect(await scalar("SELECT COUNT(*) AS value FROM session_leases")).toBe(0);
     expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions")).toBe(0);
+  });
+
+  it("keeps version rejection ahead of old-token auth and heartbeat rejection", async () => {
+    const supersededToken = "workerd-version-superseded-token";
+    const revokedMarker = `revoked:${"bc".repeat(32)}`;
+    await seedUser(supersededToken);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE api_users SET token = ? WHERE id = 7 AND token = ?")
+        .bind(revokedMarker, supersededToken),
+      env.DB.prepare(
+        `INSERT INTO app_versions (version, min_version, download_url, note, enabled)
+         VALUES ('2.0.0', '1.4.0', 'https://example.test/nwflash', 'test gate', 1)`,
+      ),
+    ]);
+
+    for (const token of [supersededToken, revokedMarker]) {
+      const responses: Array<[Response, number]> = [
+        [await getMe(token, "1.3.9"), 426],
+        [await postHeartbeat(token, "workerd-version-gate-session", 1, "1.3.9"), 426],
+        [await getMe(token, "1.4.0"), 401],
+        [await postHeartbeat(token, "workerd-version-gate-session", 1, "1.4.0"), 401],
+      ];
+
+      for (const [response, expectedStatus] of responses) {
+        const body = await response.json() as Record<string, unknown>;
+        const serialized = JSON.stringify(body);
+        expect(response.status).toBe(expectedStatus);
+        expect(body).not.toHaveProperty("token");
+        expect(serialized).not.toContain(token);
+        expect(serialized).not.toContain("revoked:");
+      }
+    }
   });
 
   it("allows only one signed lease for concurrent same-sequence heartbeats", async () => {
@@ -281,8 +330,8 @@ async function establishOnlineSession(token: string, sessionId: string): Promise
   expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions WHERE session_id = ?", sessionId)).toBe(1);
 }
 
-async function postLogin(sessionId: string): Promise<Response> {
-  return exports.default.fetch(new Request("https://api.nwflash.cc.cd/api/login", {
+async function postLogin(sessionId: string, workerEnv?: WorkerEnv): Promise<Response> {
+  const request = new Request("https://api.nwflash.cc.cd/api/login", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Nwflash-Version": "1.4.0" },
     body: JSON.stringify({
@@ -293,15 +342,21 @@ async function postLogin(sessionId: string): Promise<Response> {
       process_nonce: "nonce-workerd",
       session_id: sessionId,
     }),
-  }), env);
+  });
+  return workerEnv ? apiWorker.fetch(request, workerEnv) : exports.default.fetch(request, env);
 }
 
-async function postHeartbeat(token: string, sessionId: string, sequence: number): Promise<Response> {
+async function postHeartbeat(
+  token: string,
+  sessionId: string,
+  sequence: number,
+  version = "1.4.0",
+): Promise<Response> {
   return exports.default.fetch(new Request("https://api.nwflash.cc.cd/api/heartbeat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-Nwflash-Version": "1.4.0",
+      "X-Nwflash-Version": version,
       Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
@@ -315,10 +370,10 @@ async function postHeartbeat(token: string, sessionId: string, sequence: number)
   }), env);
 }
 
-async function getMe(token: string): Promise<Response> {
+async function getMe(token: string, version = "1.4.0"): Promise<Response> {
   return exports.default.fetch(new Request("https://api.nwflash.cc.cd/api/me", {
     headers: {
-      "X-Nwflash-Version": "1.4.0",
+      "X-Nwflash-Version": version,
       Authorization: `Bearer ${token}`,
     },
   }), env);
@@ -373,6 +428,106 @@ function decodeLeaseClaims(body: Record<string, unknown>): Record<string, unknow
   const payload = String(body.lease_payload);
   const padded = payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "=");
   return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), (character) => character.charCodeAt(0)))) as Record<string, unknown>;
+}
+
+function withDatabase(baseEnv: WorkerEnv, database: D1Database): WorkerEnv {
+  const wrapped = Object.create(baseEnv) as WorkerEnv;
+  Object.defineProperty(wrapped, "DB", { value: database, enumerable: true });
+  return wrapped;
+}
+
+function createInitialLoginReadBarrier(
+  database: D1Database,
+  expectedReads: number,
+): {
+  database: D1Database;
+  reached: Promise<void>;
+  release: () => void;
+  readCount: () => number;
+  observedTokens: () => string[];
+} {
+  let readCount = 0;
+  const tokens: string[] = [];
+  let resolveReached!: () => void;
+  let resolveGate!: () => void;
+  let released = false;
+  const reached = new Promise<void>((resolve) => {
+    resolveReached = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resolveGate = resolve;
+  });
+  const release = () => {
+    if (released) return;
+    released = true;
+    resolveGate();
+  };
+
+  const wrapStatement = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, {
+    get(target, property) {
+      if (property === "bind") {
+        return (...values: unknown[]) => wrapStatement(target.bind(...values));
+      }
+      if (property === "first") {
+        return async (columnName?: string) => {
+          const row = columnName === undefined
+            ? await target.first<Record<string, unknown>>()
+            : await target.first<unknown>(columnName);
+          readCount += 1;
+          if (row && typeof row === "object" && "token" in row && typeof row.token === "string") {
+            tokens.push(row.token);
+          }
+          if (readCount === expectedReads) {
+            resolveReached();
+            release();
+          }
+          await gate;
+          return row;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as D1PreparedStatement;
+
+  const wrappedDatabase = new Proxy(database, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          const normalized = query.replace(/\s+/g, " ").trim().toLowerCase();
+          // Only the initial credential snapshot is delayed; CAS and session INSERT use the real D1 binding unchanged.
+          return normalized === "select * from api_users where username = ?"
+            ? wrapStatement(statement)
+            : statement;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as D1Database;
+
+  return {
+    database: wrappedDatabase,
+    reached,
+    release,
+    readCount: () => readCount,
+    observedTokens: () => [...tokens],
+  };
+}
+
+async function withTimeout<T>(promise: Promise<T>, label: string, milliseconds = 30_000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 }
 
 async function passwordHash(password: string, saltHex: string): Promise<string> {
