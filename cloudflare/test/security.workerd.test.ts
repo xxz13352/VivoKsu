@@ -25,6 +25,64 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("actual Worker route with Workerd D1", () => {
+  it("atomically exchanges one revoked token for concurrent signed logins", async () => {
+    const supersededToken = "workerd-superseded-token";
+    const revokedMarker = `revoked:${"ab".repeat(32)}`;
+    await seedUser(supersededToken);
+    await env.DB.prepare("UPDATE api_users SET token = ? WHERE id = 7 AND token = ?")
+      .bind(revokedMarker, supersededToken)
+      .run();
+    await env.DB.batch([
+      env.DB.prepare("CREATE TABLE token_exchange_audit (token TEXT NOT NULL)"),
+      env.DB.prepare(
+        `CREATE TRIGGER audit_token_exchange
+         AFTER UPDATE OF token ON api_users
+         WHEN OLD.token LIKE 'revoked:%'
+         BEGIN INSERT INTO token_exchange_audit (token) VALUES (NEW.token); END`,
+      ),
+    ]);
+
+    const responses = await Promise.all([
+      postLogin("workerd-revived-session-a"),
+      postLogin("workerd-revived-session-b"),
+    ]);
+    const bodies = await Promise.all(
+      responses.map((response) => response.json() as Promise<Record<string, unknown>>),
+    );
+    const tokens = bodies.map((body) => String(body.token));
+    const activeToken = tokens[0];
+    const stored = await env.DB.prepare("SELECT token FROM api_users WHERE id = 7").first<{ token: string }>();
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(new Set(tokens)).toEqual(new Set([activeToken]));
+    expect(activeToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored?.token).toBe(activeToken);
+    expect(await scalar("SELECT COUNT(*) AS value FROM token_exchange_audit")).toBe(1);
+    expect(bodies.every((body) => !JSON.stringify(body).includes("revoked:"))).toBe(true);
+    for (const [index, body] of bodies.entries()) {
+      expect(decodeLeaseClaims(body)).toMatchObject({
+        kind: "login",
+        token_sha256: await sha256Base64Url(activeToken),
+        session_id: index === 0 ? "workerd-revived-session-a" : "workerd-revived-session-b",
+        sequence: 1,
+      });
+    }
+
+    for (const rejectedToken of [supersededToken, revokedMarker]) {
+      expect((await getMe(rejectedToken)).status).toBe(401);
+      expect((await postHeartbeat(rejectedToken, "workerd-revived-session-a", 1)).status).toBe(401);
+    }
+
+    const heartbeat = await postHeartbeat(activeToken, "workerd-revived-session-a", 1);
+    const heartbeatBody = await heartbeat.json() as Record<string, unknown>;
+    expect(heartbeat.status).toBe(200);
+    expect(decodeLeaseClaims(heartbeatBody)).toMatchObject({
+      kind: "heartbeat",
+      token_sha256: await sha256Base64Url(activeToken),
+      sequence: 2,
+    });
+  });
+
   it("allows only one signed lease for concurrent same-sequence heartbeats", async () => {
     const token = "workerd-heartbeat-token";
     await seedUser(token);
@@ -210,6 +268,15 @@ async function postHeartbeat(token: string, sessionId: string, sequence: number)
   }), env);
 }
 
+async function getMe(token: string): Promise<Response> {
+  return exports.default.fetch(new Request("https://api.nwflash.cc.cd/api/me", {
+    headers: {
+      "X-Nwflash-Version": "1.4.0",
+      Authorization: `Bearer ${token}`,
+    },
+  }), env);
+}
+
 async function postAdminKick(sessionId: string, reason: string): Promise<Response> {
   return adminWorker.fetch(new Request("https://web.nwflash.cc.cd/api/online/kick", {
     method: "POST",
@@ -253,6 +320,12 @@ async function sha256Base64Url(value: string): Promise<string> {
   let binary = "";
   for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeLeaseClaims(body: Record<string, unknown>): Record<string, unknown> {
+  const payload = String(body.lease_payload);
+  const padded = payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "=");
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(padded), (character) => character.charCodeAt(0)))) as Record<string, unknown>;
 }
 
 async function passwordHash(password: string, saltHex: string): Promise<string> {

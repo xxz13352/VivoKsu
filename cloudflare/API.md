@@ -144,6 +144,8 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 桌面端登录(商业工具门禁)。保留原账号/密码校验与版本门禁;成功后同时返回 API token 和 120 秒 Ed25519 签名租约。生产签名私钥只从 Worker secret `SESSION_SIGNING_PRIVATE_KEY_PKCS8` 导入;缺失或无效时返回 `503`,不回退到无签名响应。
 
+密码验证成功后,若 D1 中的 `api_users.token` 以 `revoked:` 开头,Worker 会先用单条条件 `UPDATE ... RETURNING` 将该精确 marker compare-and-swap 为新的 32-byte(64 位小写 hex)token。并发登录的 CAS 败者读取胜者已经提交的有效 token;若提交状态仍是 revoked、账号已停用/封禁或行已消失,则明确返回 `409`,不签 lease。revoked marker 永远不会作为 bearer、响应字段、日志或错误内容返回。
+
 **请求体**
 ```json
 {
@@ -170,9 +172,9 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 
 `lease_payload` 解码后的 UTF-8 JSON 字段固定为 snake_case:`version = 1`、`kind = "login"`、`username`、`token_sha256`、`client_version`、`build_id`、`process_nonce`、`session_id`、`sequence = 1`、`issued_at`、`expires_at`。`token_sha256` 是 bearer token 原始 UTF-8 字节 SHA-256 的无填充 base64url。签名输入是响应中**原始、未补 `=` 的 `lease_payload` ASCII 字节**,客户端必须先验签再解码 JSON。
 
-服务端在请求字段、账号、密码、封禁和停用检查通过后先生成签名候选,再用 D1 `session_leases` 原子认领精确的 session ID、用户、client version、build ID、process nonce 和 `sequence = 1`;只有认领成功才返回 token/租约。session ID 已存在返回 `409`,不会返回另一个 token 或租约。缺失/畸形签名 key 返回 `503` 且不创建会话状态;签名服务故障期间既有 `400/401` 登录失败仍保持原语义。
+服务端在请求字段、账号、密码、封禁和停用检查通过并完成上述 token 交换后,才用最终有效 token 计算 `token_sha256` 并生成签名候选;随后用 D1 `session_leases` 原子认领精确的 session ID、用户、client version、build ID、process nonce 和 `sequence = 1`。只有认领成功才返回 token/租约。session ID 已存在返回 `409`,不会返回另一个 token 或租约。缺失/畸形签名 key 返回 `503` 且不创建会话状态;签名服务故障期间既有 `400/401` 登录失败仍保持原语义。
 
-**失败**:`401` —— `用户名或密码错误` / `账号已被封禁,请联系管理员。` / `账号已被停用。`;`400` 缺少或非法字段;`503` 签名服务不可用。
+**失败**:`401` —— `用户名或密码错误` / `账号已被封禁,请联系管理员。` / `账号已被停用。`;`400` 缺少或非法字段;`409` session ID 冲突或 token 交换后状态仍不可用;`503` 签名服务不可用。错误体不包含旧 token、新 token 或 revoked marker。
 
 ---
 
@@ -184,7 +186,7 @@ Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)�
 ```json
 { "loggedIn": true, "name": "演示用户" }
 ```
-或 `{ "loggedIn": false }`(token 无效)。
+不带 bearer 时返回 `200 { "loggedIn": false }`。一旦请求携带无效、停用、已被替换或 `revoked:*` bearer,返回 `401 { "error": "API token 无效或已停用。" }`;不会回显 token。
 
 ---
 
@@ -440,6 +442,7 @@ npm run deploy                            # 先检查远端签名 secret,再部�
 | 2026-08-14 | **在线会话心跳 + 强制下线**:D1 新增 `online_sessions` / `admin_audit_log`;`POST /api/heartbeat`(每 5s,检测强制下线/封禁/426)、`GET /api/online`(客户端视角在线列表,仅显示名/版本/时长,不含 username/IP);管理端「在线状态」可强制下线。服务端:per-token 心跳限速 + 每用户会话数上限 + 60s 写节流 + epoch 秒时间戳 + `last_seen` 索引 + Cron 兜底清理 |
 | 2026-08-14 | **操作许可门禁 + 使用日志**:`POST /api/operation/authorize`(客户端每个用户操作运行前询问,默认放行、封禁/停用拒绝);`POST /api/usage/logs`(使用日志批量上传,按 `operation_kind` 分类存储);D1 新增 `usage_logs` 表;管理端「使用日志」查看/筛选 |
 | 2026-08-23 | **签名租约 + pin 清单 + 完整性遥测**:登录/活动心跳签发绑定 token 摘要、build/process/session/sequence 的 Ed25519 租约;新增签名双 pin `/api/security/pins`;新增 4 KiB 严格遥测 `/api/integrity/report`,D1 event ID 幂等与 hash-IP 60s/20 次限流 |
+| 2026-08-26 | **密码撤销 token 交接**:共享 API 登录在密码校验后以 D1 CAS 将 `revoked:*` marker 交换为新的 32-byte hex token;并发登录共享唯一胜者 token,lease 绑定最终 token 摘要;旧/marker bearer 的认证与心跳均返回 401且绝不回显 marker |
 
 ## 管理后台
 

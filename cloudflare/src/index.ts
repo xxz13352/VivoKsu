@@ -98,7 +98,8 @@ export default {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
         const user = await authenticateUser(env, request);
-        if (user instanceof Response || user === null) return json({ loggedIn: false }, 200);
+        if (user instanceof Response) return user;
+        if (user === null) return json({ loggedIn: false }, 200);
         return json({ loggedIn: true, name: user.name }, 200);
       }
 
@@ -222,6 +223,9 @@ async function authenticateUser(
   const header = request.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) return null;
+  if (token.startsWith(REVOKED_TOKEN_PREFIX)) {
+    return json({ error: "API token 无效或已停用。" }, 401);
+  }
 
   const user = await env.DB
     .prepare("SELECT id, username, name, enabled, banned FROM api_users WHERE token = ?")
@@ -800,6 +804,7 @@ async function checkAppVersion(env: Env, request: Request): Promise<Response | n
 /* ------------------------------------------------------------------ */
 
 const PBKDF2_ITERATIONS = 100_000;
+const REVOKED_TOKEN_PREFIX = "revoked:";
 
 /** POST /api/login —— 密码验证成功后返回 token 与绑定当前进程/会话的短期签名租约。 */
 async function login(env: Env, request: Request): Promise<Response> {
@@ -829,12 +834,41 @@ async function login(env: Env, request: Request): Promise<Response> {
   const hash = await pbkdf2(password, user.salt);
   if (hash !== user.password) return json({ error: "用户名或密码错误。" }, 401);
 
+  let activeToken = user.token;
+  if (activeToken.startsWith(REVOKED_TOKEN_PREFIX)) {
+    const candidate = randomHex(32);
+    const exchanged = await env.DB.prepare(
+      `UPDATE api_users SET token = ?
+       WHERE id = ? AND token = ? AND token LIKE 'revoked:%' AND enabled = 1 AND banned = 0
+       RETURNING token`,
+    )
+      .bind(candidate, user.id, activeToken)
+      .first<{ token: string }>();
+    if (exchanged) {
+      activeToken = exchanged.token;
+    } else {
+      const winner = await env.DB.prepare(
+        "SELECT token FROM api_users WHERE id = ? AND enabled = 1 AND banned = 0",
+      )
+        .bind(user.id)
+        .first<{ token: string }>();
+      if (!winner || !winner.token || winner.token.startsWith(REVOKED_TOKEN_PREFIX)) {
+        return json({ error: "登录状态已变化，请重试。" }, 409);
+      }
+      activeToken = winner.token;
+    }
+  }
+
+  if (!activeToken || activeToken.startsWith(REVOKED_TOKEN_PREFIX)) {
+    return json({ error: "登录状态已变化，请重试。" }, 409);
+  }
+
   const issuedAt = Math.floor(Date.now() / 1000);
   const claims: LeaseClaims = {
     version: 1,
     kind: "login",
     username: user.username,
-    token_sha256: await tokenSha256(user.token),
+    token_sha256: await tokenSha256(activeToken),
     client_version: clientVersion,
     build_id: buildId,
     process_nonce: processNonce,
@@ -855,7 +889,7 @@ async function login(env: Env, request: Request): Promise<Response> {
       .bind(sessionId, user.id, user.username, clientVersion, buildId, processNonce, issuedAt, issuedAt)
       .first<{ sequence: number }>();
     if (!claimed) return json({ error: "session_id 已被占用。" }, 409);
-    return json({ ok: true, token: user.token, username: user.username, name: user.name, ...envelope }, 200);
+    return json({ ok: true, token: activeToken, username: user.username, name: user.name, ...envelope }, 200);
   } catch (error) {
     if (error instanceof SigningConfigurationError) return signingUnavailable();
     throw error;
