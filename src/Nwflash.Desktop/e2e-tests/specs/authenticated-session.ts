@@ -9,6 +9,8 @@ type E2eLoginOptions = {
   operationLogs?: unknown;
 };
 
+export const E2E_SESSION_GENERATION = 'generation-e2e';
+
 export const prepareE2eLogin = async ({ operationLogs }: E2eLoginOptions = {}): Promise<void> => {
   await browser.tauri.restoreAllMocks();
   const navigation = $('aside[aria-label="主导航"]');
@@ -24,7 +26,7 @@ export const prepareE2eLogin = async ({ operationLogs }: E2eLoginOptions = {}): 
   await mockCommand('auth_login', {
     name: '验收用户',
     username: 'acceptance-user',
-    generation: 'generation-e2e',
+    generation: E2E_SESSION_GENERATION,
   });
   await mockCommand('session_start', null);
   await mockCommand('session_stop', null);

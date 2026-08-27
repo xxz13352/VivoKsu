@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VISUAL_STATE_FIXTURES } from '../../src/test/visual-state-fixtures';
-import { authenticateE2eUser, prepareE2eLogin } from './authenticated-session';
+import {
+  authenticateE2eUser,
+  E2E_SESSION_GENERATION,
+  prepareE2eLogin,
+} from './authenticated-session';
 
 const screenshotDirectory = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -29,6 +33,16 @@ const openPage = async (pageId: string) => {
     timeout: 5_000,
     timeoutMsg: `页面未切换到 ${expectedTitles[pageId]}`,
   });
+};
+
+const selectLinePartition = async (partitionName: string) => {
+  const checkbox = $(`.nw-test-line-partition-select-${partitionName}`);
+  await checkbox.waitForExist();
+  const row = $(`//input[contains(@class, "nw-test-line-partition-select-${partitionName}")]/ancestor::li[1]`);
+  await row.waitForExist();
+  await row.click();
+  await browser.keys('Enter');
+  await expect(checkbox).toBeChecked();
 };
 
 const emitTauriEvent = async (eventName: string, eventPayload: unknown) => {
@@ -79,11 +93,11 @@ describe('奶蛙Flash interaction baseline', () => {
     await $('[aria-label="组件状态"]').waitForDisplayed();
     await $('.nw-test-resource-install-open').click();
 
-    const dialog = await $('[role="dialog"]');
+    const dialog = await $('[role="dialog"][aria-label="内置组件检查"]');
     await dialog.waitForDisplayed();
-    assert.match(await dialog.getText(), /组件安装/);
-    assert.match(await dialog.getText(), /scrcpy：待下载/);
-    await expect($('.nw-test-resource-install')).toHaveText('安装所选 (2)');
+    assert.match(await dialog.getText(), /内置组件检查/);
+    assert.match(await dialog.getText(), /scrcpy：内置缺失/);
+    await expect($('.nw-test-resource-install')).toHaveText('校验所选 (2)');
 
     await $('.nw-test-resource-close').click();
     await dialog.waitForDisplayed({ reverse: true });
@@ -158,7 +172,7 @@ describe('奶蛙Flash interaction baseline', () => {
     await openPage('LineFlash');
     await $('[aria-label="分区工作区"]').waitForDisplayed();
     await $('.nw-test-line-partitions-refresh').click();
-    await $('.nw-test-line-partition-select-boot').click();
+    await selectLinePartition('boot');
     await $('.nw-test-line-partitions-prepare-erase').click();
 
     const dialog = await $('[role="dialog"]');
@@ -186,7 +200,7 @@ describe('奶蛙Flash interaction baseline', () => {
     assert.equal(await workspace.getAttribute('aria-label'), '分区工作区');
     await $('.nw-test-line-partitions-refresh').click();
     await $('.nw-test-line-partitions-select-images').click();
-    await $('.nw-test-line-partition-select-boot').click();
+    await selectLinePartition('boot');
     await $('.nw-test-line-partitions-prepare-write').click();
 
     const dialog = await $('[role="dialog"]');
@@ -212,7 +226,7 @@ describe('奶蛙Flash interaction baseline', () => {
     await workspace.waitForDisplayed();
     assert.equal(await workspace.getAttribute('aria-label'), '分区工作区');
     await $('.nw-test-line-partitions-refresh').click();
-    await $('.nw-test-line-partition-select-boot').click();
+    await selectLinePartition('boot');
     await $('.nw-test-line-partitions-backup').click();
 
     await expect($('.nw-line-flash-taskbar strong')).toHaveText('分区备份已完成');
@@ -369,9 +383,9 @@ describe('奶蛙Flash interaction baseline', () => {
     await $('[aria-label="密码"]').setValue('test-password');
     await $('[aria-label="点击登录"]').click();
 
-    const resourceDialog = $('[role="dialog"][aria-label="组件安装"]');
+    const resourceDialog = $('[role="dialog"][aria-label="内置组件检查"]');
     await resourceDialog.waitForDisplayed();
-    assert.match(await resourceDialog.getText(), /scrcpy：待下载/);
+    assert.match(await resourceDialog.getText(), /scrcpy：内置缺失/);
     await $('.nw-test-resource-close').click();
     await resourceDialog.waitForDisplayed({ reverse: true });
 
@@ -420,6 +434,7 @@ describe('奶蛙Flash interaction baseline', () => {
 
   it('blocks login with a no-bypass update dialog and retains the download URL', async () => {
     await emitTauriEvent('session:update-required', {
+      generation: E2E_SESSION_GENERATION,
       message: '检测到新版本要求（最低 2.1.0），请更新后继续使用。',
       latest: '2.1.0',
       minVersion: '2.1.0',
