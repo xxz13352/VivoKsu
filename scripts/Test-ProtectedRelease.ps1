@@ -165,6 +165,7 @@ try {
             files_copied = 0
         }
     }
+    $pdbValidationPairs = [Collections.Generic.List[object]]::new()
     $importValidationPaths = [Collections.Generic.List[string]]::new()
     $markerValidationPaths = [Collections.Generic.List[string]]::new()
     $operations = [pscustomobject]@{
@@ -172,7 +173,13 @@ try {
         GetSignature = { param($Path) $unsignedSignature }
         AssertGitClean = {}
         GetGitCommit = { '0123456789abcdef0123456789abcdef01234567' }
-        AssertMatchingPdb = { param($Exe, $Pdb) }
+        AssertMatchingPdb = {
+            param($Exe, $Pdb)
+            $pdbValidationPairs.Add([pscustomobject]@{
+                exe = [IO.Path]::GetFullPath($Exe)
+                pdb = [IO.Path]::GetFullPath($Pdb)
+            }) | Out-Null
+        }.GetNewClosure()
         AssertMarkerLayout = {
             param($Exe, $Map)
             $markerValidationPaths.Add([IO.Path]::GetFullPath($Exe)) | Out-Null
@@ -375,6 +382,7 @@ try {
     Assert-Condition ($null -eq $prepared.previous_evidence_sha256) 'Prepared state must not invent prior evidence.'
     Assert-Condition ($prepared.input_exe.sha256 -eq (Get-Sha256Hex $prepared.input_exe.path)) 'Prepared EXE hash does not bind the staged snapshot.'
     Assert-Condition ($prepared.input_map.marker_layout_verified) 'Prepared evidence omitted desktop MAP proof.'
+    Assert-Condition ($pdbValidationPairs.Count -eq 1 -and $pdbValidationPairs[0].exe -eq [string]$prepared.input_exe.path -and $pdbValidationPairs[0].pdb -eq [string]$prepared.input_pdb.path) 'PDB identity was not checked exactly once on the staged EXE/PDB pair.'
     Assert-Condition ($importValidationPaths.Count -eq 1 -and $importValidationPaths[0] -eq [string]$prepared.input_exe.path) 'VMProtect imports were not checked exactly once on the staged EXE.'
     Assert-Condition ($markerValidationPaths.Count -eq 1 -and $markerValidationPaths[0] -eq [string]$prepared.input_exe.path) 'Marker layout was not checked exactly once on the staged EXE.'
     Assert-Condition (-not (Get-ChildItem -LiteralPath (Split-Path -Parent $preparedPath) -Recurse -File | Where-Object { $_.Name -like 'VMProtect*' })) 'Prepare copied an SDK artifact.'
