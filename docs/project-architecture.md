@@ -155,7 +155,7 @@ sequenceDiagram
 - **分区备份**：用户通过原生目录对话框选择输出目录后立即执行 `partitions_execute_backup`，不再显示二次确认或把本地路径交给 React 状态。每个分区先重新解析设备路径，输出写入 `.partial` 文件，完成大小校验后原子替换为最终文件；取消或失败会删除 partial 文件。
 - **操作日志**：日志只显示当前会话的实际设备操作，按时间戳从旧到新排列，最新记录固定在底部。常规的连接服务器、请求服务和检测服务器探测不写入面板；历史 OTA 文案在显示边界统一为服务器/固件，避免重复刷屏和暴露内部服务实现名。
 - **在线固件请求**：服务器固件检查和提取仍由 Rust 使用内存会话令牌完成，React 只接收可用状态、显示标签和安全结果，不接收上游 URL。界面文案使用“请求服务器”“在线固件”等通用名称，不把内部 OTA 服务名当作用户操作日志。
-- **HTTP(S) 固件提取**：`FirmwareExtractPage` 支持本地来源和用户粘贴的 HTTP 或 HTTPS 地址，UI 通常通过原生目录对话框选择输出目录；但公开 `firmware_extract_remote` 当前接受 `output_directory: String` 并直接转为提取所用 `PathBuf`，command 边界不能证明该目录来自对话框。Rust 仍校验 URL scheme/host、已检查来源等值、不透明分区 ID 和归档成员；远程 ZIP 只 Range 读取所需成员，先写 `.partial`、核对大小再原子重命名，payload 结果也经受控 partial/发布流程。目录 provenance 是当前架构限制和后续 hardening 边界。
+- **HTTP(S) 固件提取**：`FirmwareExtractPage` 支持本地来源和用户粘贴的 HTTP 或 HTTPS 地址。输出目录统一由 Rust command `firmware_select_output_directory` 调起原生目录对话框，并在进程内保存为 UUID v4 不透明 capability；选择 DTO 只有 ID，本地 VIVO/ZIP、payload 和远程提取 invoke 都只提交 `output_directory_id`。每次打开 picker 与 cleanup 都推进单调 epoch，只有当前 picker 的成功选择可以发布；重新选择会使旧 ID 失效，当前 picker 取消保留上一能力，乱序或跨 logout/session-stop 完成 fail closed。`session_stop`、`auth_logout` 和受保护退出清理都会撤销当前能力。各 firmware extract command 从 Rust runtime 解析真实 `PathBuf`，空、伪造、旧 ID 或原始路径字符串均拒绝；当前有效 ID 可用于向同一用户已选目录重复提取。Rust 同时校验 URL scheme/host、已检查来源等值、不透明分区 ID 和归档成员；远程 ZIP 只 Range 读取所需成员，先写 `.partial`、核对大小再原子重命名，payload 结果也经受控 partial/发布流程。
 - **scrcpy 供应**：页面不提供 scrcpy 文件选择按钮。发布包内置 `resources/scrcpy` 及 `scrcpy-files.sha256`，Rust 在启动前校验完整文件清单；不回退到用户 `PATH`，资源缺失或校验失败时提示重新安装应用。
 
 ## 7. 服务端边界
@@ -218,6 +218,6 @@ cargo test --manifest-path src/Nwflash.Desktop/src-tauri/Cargo.toml --workspace
 - 只支持当前发现的一台设备；发现多台设备时拒绝继续操作。
 - 真机刷写、驱动安装和 ROOT 必须在已备份、可恢复的专用设备或虚拟环境中验收；mock 测试不替代设备验收。
 - 源码阅读、文档/静态检查和 mock 测试不构成原生 WDIO/显示传输、签名/VMProtect、安装器/release、真实网络或 Cloudflare 部署验收；这些项目仍须在对应外部环境按验收矩阵完成。
-- `firmware_extract_remote` 的 `output_directory: String` 当前没有在 command 层证明原生目录对话框 provenance；UI 的正常交互不能替代 IPC 边界保证，该字段仍需后续 hardening。
+- 固件提取输出目录边界已统一改为 Rust 原生对话框签发、进程内保存的不透明 capability；浏览器不再能用任意 `output_directory: String` 指定本地或远程固件写入位置。无头测试验证 capability 的签发、并发 picker epoch、替换、取消、复用、会话撤销和 fail-closed 语义；真实原生目录对话框仍需桌面 E2E 验收。
 - 进程 stdout/stderr 在子进程运行期间由独立 reader 并发排空；正常完成会在构造输出前回收 reader，取消或超时会在终止并回收子进程后回收 reader。大输出与 reader 失败回归测试覆盖该边界。ROOT 镜像/修补工件不再记录或复核运行时 SHA-256/fingerprint；路径、格式、大小、不透明 ID、session epoch 和 staging 所有权检查保留。
 - C# / WPF 文档、截图和项目保留在 [归档目录](../archive/csharp/README.md) 供历史行为对照；当前命令、资源和 IPC 边界以本文件及 `src/Nwflash.Desktop/` 源码为准。

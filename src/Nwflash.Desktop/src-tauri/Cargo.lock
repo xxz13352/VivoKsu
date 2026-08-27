@@ -2821,6 +2821,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "uuid",
  "wiremock",
  "zeroize",
  "zip 4.6.1",
