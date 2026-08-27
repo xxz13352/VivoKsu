@@ -205,20 +205,19 @@ fn direct_zip_extracts_boot_and_vendor_boot() {
     let url = range_server(zip);
     let root = staging();
     let canceled = false;
-    let images = RootOtaService::with_disk_space(Arc::new(FixedDiskSpace(
-        (boot.len() + vb.len()) as u64,
-    )))
-        .extract(
-            RootOtaExtractOptions {
-                url: &url,
-                payload_dumper: None,
-                staging_root: &root,
-            },
-            || canceled,
-            |_| {},
-            |_| {},
-        )
-        .expect("direct zip should extract");
+    let images =
+        RootOtaService::with_disk_space(Arc::new(FixedDiskSpace((boot.len() + vb.len()) as u64)))
+            .extract(
+                RootOtaExtractOptions {
+                    url: &url,
+                    payload_dumper: None,
+                    staging_root: &root,
+                },
+                || canceled,
+                |_| {},
+                |_| {},
+            )
+            .expect("direct zip should extract");
     assert_eq!(images.boot_partition_name, "boot");
     let boot_image = images.boot_image.expect("boot image");
     assert_eq!(boot_image.size_bytes, boot.len() as i64);
@@ -275,9 +274,7 @@ fn direct_zip_cancellation_after_member_listing_precedes_capacity_preflight() {
                 payload_dumper: None,
                 staging_root: &root,
             },
-            move || {
-                cancellation_checks_for_extract.fetch_add(1, Ordering::SeqCst) >= 17
-            },
+            move || cancellation_checks_for_extract.fetch_add(1, Ordering::SeqCst) >= 17,
             |_| {},
             |_| {},
         )

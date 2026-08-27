@@ -493,7 +493,6 @@ impl OperationCoordinator {
     pub fn dispose(&self) {
         self.admission.lock().disposed = true;
     }
-
 }
 
 fn ensure_running(admission: &AdmissionGateState) -> Result<(), OperationCoordinatorError> {

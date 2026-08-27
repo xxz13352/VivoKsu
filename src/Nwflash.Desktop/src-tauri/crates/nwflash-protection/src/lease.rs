@@ -350,16 +350,18 @@ pub fn classify_signed_heartbeat_lease(
 ) -> Result<HeartbeatDecision, LeaseVerificationError> {
     begin_heartbeat_lease_classification();
     let decision = match verify_signed_lease(envelope, verifying_key) {
-        Ok(lease) => Ok(match validate_lease(
-            lease.claims(),
-            binding,
-            LeaseKind::Heartbeat,
-            now,
-            Some(previous_sequence),
-        ) {
-            Ok(session) => HeartbeatDecision::Continue(session),
-            Err(reason) => HeartbeatDecision::ExitPending(reason),
-        }),
+        Ok(lease) => Ok(
+            match validate_lease(
+                lease.claims(),
+                binding,
+                LeaseKind::Heartbeat,
+                now,
+                Some(previous_sequence),
+            ) {
+                Ok(session) => HeartbeatDecision::Continue(session),
+                Err(reason) => HeartbeatDecision::ExitPending(reason),
+            },
+        ),
         Err(error) => Err(error),
     };
     end_marker();

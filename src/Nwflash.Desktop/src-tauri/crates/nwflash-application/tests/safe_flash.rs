@@ -273,7 +273,12 @@ fn execution_rejects_bootloader_fastboot_before_any_flash() {
     };
 
     let error = service
-        .execute(request_for_other_slot(&source, &options, false), || false, |_| {}, |_| {})
+        .execute(
+            request_for_other_slot(&source, &options, false),
+            || false,
+            |_| {},
+            |_| {},
+        )
         .expect_err("bootloader fastboot must not be accepted as fastbootd");
 
     assert!(error.to_string().contains("fastbootd"));
@@ -367,12 +372,20 @@ fn execution_rejects_unreadable_current_slot_before_partition_probing_or_flash()
     };
 
     let error = service
-        .execute(request_for_other_slot(&source, &options, true), || false, |_| {}, |_| {})
+        .execute(
+            request_for_other_slot(&source, &options, true),
+            || false,
+            |_| {},
+            |_| {},
+        )
         .expect_err("an unreadable current slot must stop safe flash");
 
     assert!(error.to_string().contains("current-slot"));
     assert!(!executor.commands().iter().any(|command| {
-        command.args.get(3).is_some_and(|argument| argument.starts_with("partition-type:"))
+        command
+            .args
+            .get(3)
+            .is_some_and(|argument| argument.starts_with("partition-type:"))
             || command.args.get(2) == Some(&"flash".to_string())
     }));
 }
@@ -413,12 +426,20 @@ fn execution_rejects_unreadable_has_slot_before_partition_probing_or_flash() {
     };
 
     let error = service
-        .execute(request_for_other_slot(&source, &options, true), || false, |_| {}, |_| {})
+        .execute(
+            request_for_other_slot(&source, &options, true),
+            || false,
+            |_| {},
+            |_| {},
+        )
         .expect_err("an unreadable has-slot fact must stop safe flash");
 
     assert!(error.to_string().contains("has-slot:boot"));
     assert!(!executor.commands().iter().any(|command| {
-        command.args.get(3).is_some_and(|argument| argument.starts_with("partition-type:"))
+        command
+            .args
+            .get(3)
+            .is_some_and(|argument| argument.starts_with("partition-type:"))
             || command.args.get(2) == Some(&"flash".to_string())
     }));
 }
@@ -455,12 +476,20 @@ fn execution_rejects_unrecognized_has_slot_before_partition_probing_or_flash() {
     };
 
     let error = service
-        .execute(request_for_other_slot(&source, &options, true), || false, |_| {}, |_| {})
+        .execute(
+            request_for_other_slot(&source, &options, true),
+            || false,
+            |_| {},
+            |_| {},
+        )
         .expect_err("an unrecognized has-slot value must stop safe flash");
 
     assert!(error.to_string().contains("未读取到有效 has-slot:boot 值"));
     assert!(!executor.commands().iter().any(|command| {
-        command.args.get(3).is_some_and(|argument| argument.starts_with("partition-type:"))
+        command
+            .args
+            .get(3)
+            .is_some_and(|argument| argument.starts_with("partition-type:"))
             || command.args.get(2) == Some(&"flash".to_string())
     }));
 }

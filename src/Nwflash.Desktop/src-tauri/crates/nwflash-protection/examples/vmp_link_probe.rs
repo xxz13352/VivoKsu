@@ -17,9 +17,8 @@ fn main() {
     let session = accept_signed_login_lease(&login, &verifying_key, &binding(), NOW)
         .expect("probe login must verify and bind");
     let heartbeat = signed_lease(&signing_key, LeaseKind::Heartbeat, 2);
-    let heartbeat =
-        classify_signed_heartbeat_lease(&heartbeat, &verifying_key, &binding(), 1, NOW)
-            .expect("probe heartbeat must verify");
+    let heartbeat = classify_signed_heartbeat_lease(&heartbeat, &verifying_key, &binding(), 1, NOW)
+        .expect("probe heartbeat must verify");
     let admission = admit_local_operation(&session, "layout-build", "layout-nonce", NOW);
     let integrity = verify_image_integrity(&VmpIntegrityProbe);
     let identity = build_identity_matches("layout-build", "layout-build");

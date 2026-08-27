@@ -349,17 +349,11 @@ async fn run_fastboot_probe(
 }
 
 type FastbootProbeFuture = Pin<
-    Box<
-        dyn Future<Output = Result<ProcessOutput, nwflash_domain::DomainError>> + Send + 'static,
-    >,
+    Box<dyn Future<Output = Result<ProcessOutput, nwflash_domain::DomainError>> + Send + 'static>,
 >;
-type FastbootProbe =
-    dyn Fn(ProcessCommand, CancellationToken) -> FastbootProbeFuture + Send + Sync;
-type DeviceDiscoveryFuture = Pin<
-    Box<
-        dyn Future<Output = Result<nwflash_domain::DeviceSnapshot, String>> + Send + 'static,
-    >,
->;
+type FastbootProbe = dyn Fn(ProcessCommand, CancellationToken) -> FastbootProbeFuture + Send + Sync;
+type DeviceDiscoveryFuture =
+    Pin<Box<dyn Future<Output = Result<nwflash_domain::DeviceSnapshot, String>> + Send + 'static>>;
 type DeviceDiscovery = dyn Fn() -> DeviceDiscoveryFuture + Send + Sync;
 
 fn production_fastboot_probe(
@@ -378,13 +372,8 @@ async fn read_fastboot_variable(
     variable: &str,
     cancellation: CancellationToken,
 ) -> Result<String, nwflash_domain::DomainError> {
-    read_fastboot_variable_with_probe(
-        serial,
-        variable,
-        cancellation,
-        &production_fastboot_probe,
-    )
-    .await
+    read_fastboot_variable_with_probe(serial, variable, cancellation, &production_fastboot_probe)
+        .await
 }
 
 async fn read_fastboot_variable_with_probe(
@@ -513,8 +502,7 @@ async fn prepare_batch_preset_execution_plan(
                 "检查 {} 的 A/B 双槽能力",
                 request.partition.partition_name()
             ));
-            let output =
-                read_fastboot_variable(&serial, &variable, cancellation.clone()).await?;
+            let output = read_fastboot_variable(&serial, &variable, cancellation.clone()).await?;
             has_slots.insert(
                 request.partition.partition_name().to_string(),
                 is_true_fastboot_variable(&output, &variable),
@@ -2082,10 +2070,7 @@ mod tests {
             .expect("probe call lock should not be poisoned");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].args, ["devices"]);
-        assert_eq!(
-            calls[1].args,
-            ["-s", "SERIAL-B", "getvar", "is-userspace"]
-        );
+        assert_eq!(calls[1].args, ["-s", "SERIAL-B", "getvar", "is-userspace"]);
     }
 
     #[tokio::test]
@@ -2115,7 +2100,9 @@ mod tests {
                             probe.as_ref(),
                         )
                         .await
-                        .expect_err("multiple live devices must reject before command construction");
+                        .expect_err(
+                            "multiple live devices must reject before command construction",
+                        );
 
                     assert!(matches!(error, DomainError::DeviceUnavailable(_)));
                     Ok(())
@@ -2354,10 +2341,7 @@ mod tests {
             .expect("probe call lock should not be poisoned");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].args, ["devices"]);
-        assert_eq!(
-            calls[1].args,
-            ["-s", "FAST-B", "getvar", "is-userspace"]
-        );
+        assert_eq!(calls[1].args, ["-s", "FAST-B", "getvar", "is-userspace"]);
     }
 
     #[tokio::test]
@@ -2554,10 +2538,7 @@ mod tests {
             .expect("probe call lock should not be poisoned");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].args, ["devices"]);
-        assert_eq!(
-            calls[1].args,
-            ["-s", "FAST-B", "getvar", "is-userspace"]
-        );
+        assert_eq!(calls[1].args, ["-s", "FAST-B", "getvar", "is-userspace"]);
     }
 
     #[test]
@@ -2687,10 +2668,8 @@ mod tests {
             .replace(missing_artifact_id.clone(), automatic_write_plan())
             .expect("current session should publish the prepared firmware plan");
 
-        let execution = quick_flash_execute_firmware_artifact_inner(
-            &state,
-            missing_artifact_id.clone(),
-        );
+        let execution =
+            quick_flash_execute_firmware_artifact_inner(&state, missing_artifact_id.clone());
         let observe_pending_authorization = async {
             entered.notified().await;
             assert!(prepared_firmware_artifact_is_present(
@@ -2742,8 +2721,7 @@ mod tests {
             .replace(artifact_id.clone(), automatic_write_plan())
             .expect("current session should publish the prepared firmware plan");
 
-        let execution =
-            quick_flash_execute_firmware_artifact_inner(&state, artifact_id.clone());
+        let execution = quick_flash_execute_firmware_artifact_inner(&state, artifact_id.clone());
         let observe_pending_authorization = async {
             entered.notified().await;
             assert!(prepared_firmware_artifact_is_present(

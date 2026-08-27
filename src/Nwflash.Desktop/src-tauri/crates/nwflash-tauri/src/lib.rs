@@ -377,7 +377,9 @@ impl ProtectionContext {
         generation: Option<String>,
     ) {
         self.terminal_sink
-            .request(exit_supervisor::ExitRequest::immediate(generation, phase, reason));
+            .request(exit_supervisor::ExitRequest::immediate(
+                generation, phase, reason,
+            ));
     }
 }
 
@@ -818,8 +820,7 @@ impl AppState {
             firmware_extraction: commands::firmware::FirmwareExtractionRuntime::new(),
             payload_inspection: commands::firmware::PayloadInspectionRuntime::new(),
             remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime::new(),
-            firmware_output_directories:
-                commands::firmware::FirmwareOutputDirectoryRuntime::new(),
+            firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime::new(),
             firmware_progress: commands::firmware::FirmwareProgressRuntime::new(),
             prepared_firmware_artifact:
                 commands::quick_flash::PreparedFirmwareArtifactRuntime::with_scope(

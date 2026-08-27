@@ -29,8 +29,7 @@ use crate::AppState;
 
 pub(crate) const FIRMWARE_PROGRESS_EVENT: &str = "firmware:progress";
 const FIRMWARE_PROGRESS_THROTTLE: Duration = Duration::from_millis(100);
-const FIRMWARE_OUTPUT_DIRECTORY_SELECTION_ERROR: &str =
-    "提取输出目录选择已失效，请重新选择。";
+const FIRMWARE_OUTPUT_DIRECTORY_SELECTION_ERROR: &str = "提取输出目录选择已失效，请重新选择。";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2278,11 +2277,7 @@ mod tests {
                 .expect("the Rust-issued capability should resolve"),
             private_directory
         );
-        for forged in [
-            "",
-            "firmware-output-forged",
-            r"C:\private\firmware-output",
-        ] {
+        for forged in ["", "firmware-output-forged", r"C:\private\firmware-output"] {
             let error = runtime
                 .resolve(forged)
                 .expect_err("browser-provided non-capabilities must fail closed");
@@ -2374,7 +2369,10 @@ mod tests {
             .publish_selection(picker, None)
             .expect("the current picker may be canceled")
             .is_none());
-        assert_eq!(runtime.resolve(&current.selection_id).unwrap(), current_path);
+        assert_eq!(
+            runtime.resolve(&current.selection_id).unwrap(),
+            current_path
+        );
     }
 
     #[test]
@@ -2408,16 +2406,18 @@ mod tests {
             .publish_selection(newer, None)
             .expect("the newest picker may be canceled")
             .is_none());
-        let stale = match runtime.publish_selection(
-            older,
-            Some(PathBuf::from(r"C:\private\stale-output")),
-        ) {
+        let stale = match runtime
+            .publish_selection(older, Some(PathBuf::from(r"C:\private\stale-output")))
+        {
             Err(error) => error,
             Ok(_) => panic!("an older picker must not overwrite the current selection"),
         };
 
         assert_eq!(stale, "提取输出目录选择已失效，请重新选择。");
-        assert_eq!(runtime.resolve(&current.selection_id).unwrap(), current_path);
+        assert_eq!(
+            runtime.resolve(&current.selection_id).unwrap(),
+            current_path
+        );
     }
 
     #[test]

@@ -322,13 +322,9 @@ mod tests {
             "process-nonce",
             session_id,
         );
-        let lease = accept_signed_login_lease(
-            &envelope,
-            &signing_key.verifying_key(),
-            &binding,
-            now,
-        )
-        .unwrap();
+        let lease =
+            accept_signed_login_lease(&envelope, &signing_key.verifying_key(), &binding, now)
+                .unwrap();
         AuthSession {
             token: SecretToken::new(token.to_string()),
             username: "user".to_string(),

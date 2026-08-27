@@ -63,7 +63,9 @@ pub async fn resource_install(
 
                 for (index, resource) in selected.into_iter().enumerate() {
                     if cancellation.is_cancelled() {
-                        return Err(DomainError::UserCancelled("用户取消内置组件校验。".to_string()));
+                        return Err(DomainError::UserCancelled(
+                            "用户取消内置组件校验。".to_string(),
+                        ));
                     }
 
                     let label = match resource {

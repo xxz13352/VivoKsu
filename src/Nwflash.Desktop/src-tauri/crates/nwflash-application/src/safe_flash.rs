@@ -171,12 +171,8 @@ impl SafeFlashExecutionService {
         serial = self.wait_for_fastbootd(&transport, &mut is_canceled)?;
 
         let current_slot = if is_slot_based_mode(request.options.slot_mode) {
-            let current_slot = self.read_fastboot_var(
-                &transport,
-                &serial,
-                "current-slot",
-                &mut is_canceled,
-            )?;
+            let current_slot =
+                self.read_fastboot_var(&transport, &serial, "current-slot", &mut is_canceled)?;
             let normalized_slot = normalize_slot_name(&current_slot);
             if request.options.slot_mode == SafeFlashSlotMode::OtherSlot
                 && normalized_slot.is_none()
@@ -204,12 +200,8 @@ impl SafeFlashExecutionService {
 
             let has_slot = if is_slot_based_mode(request.options.slot_mode) {
                 let variable = format!("has-slot:{}", source.partition_name);
-                let has_slot = self.read_fastboot_var(
-                    &transport,
-                    &serial,
-                    &variable,
-                    &mut is_canceled,
-                )?;
+                let has_slot =
+                    self.read_fastboot_var(&transport, &serial, &variable, &mut is_canceled)?;
                 parse_slot_flag(&has_slot).ok_or_else(|| {
                     DomainError::InvalidOperation(format!("未读取到有效 {variable} 值。"))
                 })?
