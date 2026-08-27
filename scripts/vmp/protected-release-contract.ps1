@@ -573,6 +573,18 @@ function New-DefaultProtectionOperations {
     $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).ProviderPath
     [pscustomobject]@{
         GetSignature = { param($Path) Get-AuthenticodeSignature -LiteralPath $Path }
+        AssertGitClean = {
+            $status = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all)
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the Git worktree before handoff.' }
+            if ($status.Count -ne 0) { throw 'Protected handoff requires a clean Git worktree.' }
+        }.GetNewClosure()
+        GetGitCommit = {
+            $commit = (& git -C $repoRoot rev-parse HEAD).Trim().ToLowerInvariant()
+            if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') {
+                throw 'Unable to record the exact Git commit for the handoff.'
+            }
+            $commit
+        }.GetNewClosure()
         AssertMatchingPdb = { param($Exe, $Pdb) Assert-MatchingPdb -Executable $Exe -Pdb $Pdb }
         AssertMarkerLayout = { param($Exe, $Map) Assert-DesktopMarkerLayout -Executable $Exe -MapPath $Map }
         AssertExpectedVmProtectImports = { param($Path) Assert-ExactVmProtectImports -Path $Path }
@@ -658,8 +670,8 @@ function Invoke-PrepareManualHandoffCore {
     & $Operations.AssertMarkerLayout $copiedExe $copiedMap | Out-Null
     foreach ($path in @($copiedExe, $copiedPdb, $copiedMap)) { (Get-Item -LiteralPath $path).IsReadOnly = $true }
 
-    $gitCommit = (& git -C $script:NwflashRepositoryRoot rev-parse HEAD).Trim().ToLowerInvariant()
-    if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-f]{40}$') { throw 'Unable to record the exact Git commit for the handoff.' }
+    & $Operations.AssertGitClean
+    $gitCommit = & $Operations.GetGitCommit
     $prepared = [ordered]@{
         schema = 1
         handoff_id = $handoffId

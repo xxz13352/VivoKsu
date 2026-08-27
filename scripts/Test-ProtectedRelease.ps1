@@ -167,6 +167,8 @@ try {
     }
     $operations = [pscustomobject]@{
         GetSignature = { param($Path) $unsignedSignature }
+        AssertGitClean = {}
+        GetGitCommit = { '0123456789abcdef0123456789abcdef01234567' }
         AssertMatchingPdb = { param($Exe, $Pdb) }
         AssertMarkerLayout = { param($Exe, $Map) [pscustomobject]@{ verified = $true } }
         AssertExpectedVmProtectImports = {

@@ -80,12 +80,12 @@ impl FirmwareFormatDetector {
             .map_err(|error| FirmwareExtractionError::Io(format!("远程固件读取失败：{error}")))?;
         if response.status() != StatusCode::PARTIAL_CONTENT
             || response.content_length() != Some(4)
-            || !response
+            || response
                 .headers()
                 .get(header::CONTENT_RANGE)
                 .and_then(|value| value.to_str().ok())
                 .and_then(valid_payload_magic_content_range)
-                .is_some()
+                .is_none()
         {
             return Err(FirmwareExtractionError::Io(
                 "远程固件 Range 响应无效。".to_string(),

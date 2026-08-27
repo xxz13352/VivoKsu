@@ -54,9 +54,7 @@ fn exact_probe_argument_returns_machine_readable_success() {
     assert_eq!(probe.calls.load(Ordering::Acquire), 1);
     assert_eq!(
         report.to_json_line(),
-        concat!(
-            r#"{"schema":1,"mode":"nwflash-protected-release-probe","probe_available":true,"VMProtectIsProtected":true,"VMProtectIsValidImageCRC":true,"build_id":"debug-build","exit_code":0}"#,
-        )
+        r#"{"schema":1,"mode":"nwflash-protected-release-probe","probe_available":true,"VMProtectIsProtected":true,"VMProtectIsValidImageCRC":true,"build_id":"debug-build","exit_code":0}"#
     );
 }
 
