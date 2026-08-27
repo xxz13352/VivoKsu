@@ -14,6 +14,7 @@ import {
   type LeaseClaims,
 } from "./security";
 import { ingestTraceUploadV2, traceErrorV2 } from "./trace-v2-ingest";
+import { purgeExpiredTraceData } from "./trace-v2-retention";
 
 /**
  * Cloudflare Worker —— Vivo ROM OTA 链接代理 + Nwflash 版本门禁。
@@ -174,6 +175,8 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     await purgeStaleSessions(env, /* force */ true);
     await purgeIntegrityRateLimits(env);
+    const retention = await purgeExpiredTraceData(env.DB, Date.now());
+    console.log("trace-v2-retention", retention);
   },
 };
 

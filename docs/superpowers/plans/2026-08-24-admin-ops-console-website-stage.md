@@ -826,7 +826,7 @@ export interface TraceRetentionResult {
 export async function purgeExpiredTraceData(db: D1Database, nowMs: number): Promise<TraceRetentionResult>;
 ```
 
-At 30 days delete outputs and clear command/paths/URLs/IP/serial; at 90 days delete event metadata; at 180 days delete runs. The D1-only `retention_detail_cleared` marker and partial indexes restrict 30-day candidate seeks to pending rows; clearing operational detail sets the marker, and an open-to-terminal run UPSERT resets it when operational fields are rewritten. This is internal storage state, not a wire field. Every DELETE/UPDATE selects a deterministic ordered batch of at most 100 rows so later cron executions drain backlog without one unbounded transaction. Before deleting each 180-day V2 run batch, delete only the compatibility `usage_logs` rows whose `event_key` belongs to that exact run batch; unrelated V1 rows remain. Existing V2 databases migrate in order base → P0 → one-time retention-stage. The scheduled handler logs only result counts and cutoffs.
+At 30 days delete outputs and clear command/paths/URLs/IP/serial; at 90 days delete event metadata; at 180 days delete runs. The D1-only `retention_detail_cleared` marker and partial indexes restrict 30-day candidate seeks to pending rows; clearing operational detail sets the marker permanently for an open run. Such a run is detail-sealed: finalization, identity/detail mutation, event upload, and chunk retry are item-level `invalid` with a `retention_expired` explanation, the marker is never reset, and no V1 projection is created. This is internal storage state, not a wire field. Every DELETE/UPDATE selects a deterministic ordered batch of at most 100 rows so later cron executions drain backlog without one unbounded transaction. Before deleting each 180-day V2 run batch, delete only the compatibility `usage_logs` rows whose `event_key` belongs to that exact run batch; unrelated V1 rows remain. Existing V2 databases migrate in order base → P0 → one-time retention-stage, and all three migrations must succeed before the API receives upload traffic. The scheduled handler logs only result counts and cutoffs.
 
 - [ ] **Step 4: Run retention and existing cron tests**
 
@@ -1401,6 +1401,8 @@ The handoff must include:
 - credential boundary: Plan C synchronously streaming-redacts the complete logical stream before any spool/HTTP/chunk boundary
 - server defense-in-depth covers known bearer and structured patterns across adjacent chunks in one request; malicious cross-request fragmentation is an explicit V2 non-goal and future encrypted-pending V3 work
 - retry rule: delete only accepted IDs; keep rejected/unacknowledged tail
+- client retention rule: keep Plan C spool data for at most seven days, then discard it and record explicit trace loss
+- server retention seal: a 30-day open run is permanently detail-sealed and cannot be finalized or receive child retries
 - V1 projection and administrator query endpoints
 - explicit prohibition on modifying website contract without a version bump
 ```

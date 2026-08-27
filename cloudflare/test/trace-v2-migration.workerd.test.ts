@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_MIGRATIONS: D1Migration[];
+    TEST_TRACE_V2_MIGRATIONS: D1Migration[];
     TEST_TRACE_V2_UPGRADE_MIGRATIONS: D1Migration[];
   }
 }
@@ -87,6 +88,242 @@ describe("usage trace V2 D1 migration", () => {
 
     await expect(seedDbEvent("event-schema-sequence-limit", "run-schema-sequence-limit", 101, 0, 0))
       .rejects.toThrow(/event sequence/i);
+  });
+
+  it("keeps sequence one hundred legal and rejects a higher update in a fresh schema", async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await seedDbRun("run-schema-sequence-insert");
+    await expect(seedDbEvent(
+      "event-schema-sequence-insert",
+      "run-schema-sequence-insert",
+      100,
+      0,
+      0,
+    )).resolves.toBeDefined();
+    await seedDbRun("run-schema-sequence-update");
+    await seedDbEvent("event-schema-sequence-update", "run-schema-sequence-update", 1, 0, 0);
+
+    await expect(env.DB.prepare(
+      "UPDATE usage_operation_events SET sequence = 100 WHERE event_id = 'event-schema-sequence-update'",
+    ).run()).resolves.toBeDefined();
+    await expect(env.DB.prepare(
+      "UPDATE usage_operation_events SET sequence = 101 WHERE event_id = 'event-schema-sequence-update'",
+    ).run()).rejects.toThrow(/event sequence/i);
+    expect(await scalar(
+      "SELECT sequence AS value FROM usage_operation_events WHERE event_id = 'event-schema-sequence-update'",
+    )).toBe(100);
+  });
+
+  it("preserves legal rows across base twice then P0 twice and rejects a higher update", async () => {
+    const migrations = env.TEST_TRACE_V2_MIGRATIONS ?? [];
+    await applyD1Migrations(env.DB, migrations.slice(0, 2));
+    await seedDbRun("run-upgrade-sequence-update");
+    await seedDbEvent("event-upgrade-sequence-update", "run-upgrade-sequence-update", 100, 0, 0);
+
+    await applyD1Migrations(env.DB, migrations.slice(2));
+
+    expect(await scalar(
+      "SELECT sequence AS value FROM usage_operation_events WHERE event_id = 'event-upgrade-sequence-update'",
+    )).toBe(100);
+    await expect(env.DB.prepare(
+      "UPDATE usage_operation_events SET sequence = 101 WHERE event_id = 'event-upgrade-sequence-update'",
+    ).run()).rejects.toThrow(/event sequence/i);
+    expect(await scalar(
+      "SELECT sequence AS value FROM usage_operation_events WHERE event_id = 'event-upgrade-sequence-update'",
+    )).toBe(100);
+  });
+
+  it("rejects a complete running run insert in a fresh schema and allows a terminal one", async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+
+    await expect(seedDbRunWithState("run-schema-complete-running", "running", 1))
+      .rejects.toThrow(/terminal outcome/i);
+    await expect(seedDbRunWithState("run-schema-complete-terminal", "success", 1))
+      .resolves.toBeDefined();
+  });
+
+  it("preserves a legal run across base twice then P0 twice and rejects a complete running insert", async () => {
+    const migrations = env.TEST_TRACE_V2_MIGRATIONS ?? [];
+    await applyD1Migrations(env.DB, migrations.slice(0, 2));
+    await seedDbRun("run-upgrade-legal-before-p0");
+
+    await applyD1Migrations(env.DB, migrations.slice(2));
+
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_operation_runs WHERE run_id = 'run-upgrade-legal-before-p0'",
+    )).toBe(1);
+    await expect(seedDbRunWithState("run-upgrade-complete-running", "running", 1))
+      .rejects.toThrow(/terminal outcome/i);
+    await expect(seedDbRunWithState("run-upgrade-complete-terminal", "success", 1))
+      .resolves.toBeDefined();
+  });
+
+  it("keeps P0 insert guards marker-free before stage and seals retained trace details afterward", async () => {
+    const migrations = env.TEST_TRACE_V2_UPGRADE_MIGRATIONS ?? [];
+    await applyD1Migrations(env.DB, migrations.slice(0, 2));
+    expect(await triggerSql("trg_trace_events_reject_completed_run"))
+      .not.toMatch(/retention_detail_cleared|retention detail sealed/i);
+    expect(await triggerSql("trg_trace_chunks_reject_completed_run"))
+      .not.toMatch(/retention_detail_cleared|retention detail sealed/i);
+    await seedDbRun("run-upgrade-open-sealed");
+    await seedDbEvent("event-upgrade-open-sealed", "run-upgrade-open-sealed", 1, 1, 1);
+    await expect(seedDbChunk("chunk-upgrade-before-stage", "event-upgrade-open-sealed", "stdout", 0))
+      .resolves.toBeDefined();
+
+    await applyD1Migrations(env.DB, migrations.slice(2));
+
+    await expectSealedTrigger("trg_trace_events_reject_completed_run");
+    await expectSealedTrigger("trg_trace_chunks_reject_completed_run");
+    await expect(seedDbEvent(
+      "event-upgrade-before-seal",
+      "run-upgrade-open-sealed",
+      2,
+      0,
+      0,
+    )).resolves.toBeDefined();
+    await env.DB.prepare(
+      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = 'run-upgrade-open-sealed'",
+    ).run();
+    await env.DB.prepare(
+      "UPDATE usage_operation_events SET retention_detail_cleared = 1 WHERE event_id = 'event-upgrade-open-sealed'",
+    ).run();
+
+    await expect(seedDbEvent(
+      "event-upgrade-after-seal",
+      "run-upgrade-open-sealed",
+      3,
+      0,
+      0,
+    )).rejects.toThrow(/retention detail sealed/i);
+    await expect(seedDbChunk(
+      "chunk-upgrade-after-seal",
+      "event-upgrade-open-sealed",
+      "stderr",
+      0,
+    )).rejects.toThrow(/retention detail sealed/i);
+
+    await seedDbRun("run-upgrade-complete-sealed");
+    await seedDbEvent("event-upgrade-complete-sealed", "run-upgrade-complete-sealed", 1, 0, 0);
+    await env.DB.prepare(
+      `UPDATE usage_operation_runs
+       SET outcome = 'success', final_sequence = 1, trace_complete = 1
+       WHERE run_id = 'run-upgrade-complete-sealed'`,
+    ).run();
+    await env.DB.prepare(
+      `UPDATE usage_operation_runs SET retention_detail_cleared = 1
+       WHERE run_id = 'run-upgrade-complete-sealed'`,
+    ).run();
+    await env.DB.prepare(
+      "UPDATE usage_operation_events SET retention_detail_cleared = 1 WHERE event_id = 'event-upgrade-complete-sealed'",
+    ).run();
+
+    await expect(seedDbEvent(
+      "event-upgrade-complete-after-seal",
+      "run-upgrade-complete-sealed",
+      2,
+      0,
+      0,
+    )).rejects.toThrow(/trace run is complete/i);
+    await expect(seedDbChunk(
+      "chunk-upgrade-complete-after-seal",
+      "event-upgrade-complete-sealed",
+      "stdout",
+      0,
+    )).rejects.toThrow(/trace run is complete/i);
+  });
+
+  it("seals direct event and chunk inserts in the fresh schema", async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await expectSealedTrigger("trg_trace_events_reject_completed_run");
+    await expectSealedTrigger("trg_trace_chunks_reject_completed_run");
+    await seedDbRun("run-schema-open-sealed");
+    await seedDbEvent("event-schema-open-sealed", "run-schema-open-sealed", 1, 1, 0);
+    await env.DB.prepare(
+      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = 'run-schema-open-sealed'",
+    ).run();
+    await env.DB.prepare(
+      "UPDATE usage_operation_events SET retention_detail_cleared = 1 WHERE event_id = 'event-schema-open-sealed'",
+    ).run();
+
+    await expect(seedDbEvent(
+      "event-schema-after-seal",
+      "run-schema-open-sealed",
+      2,
+      0,
+      0,
+    )).rejects.toThrow(/retention detail sealed/i);
+    await expect(seedDbChunk(
+      "chunk-schema-after-seal",
+      "event-schema-open-sealed",
+      "stdout",
+      0,
+    )).rejects.toThrow(/retention detail sealed/i);
+  });
+
+  it("rejects finalizing a sealed upgraded run before terminal and evidence checks", async () => {
+    await migrateTraceV2();
+    await seedDbRunWithCompleteEvidence("run-upgrade-finalize-sealed");
+    await env.DB.prepare(
+      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = 'run-upgrade-finalize-sealed'",
+    ).run();
+
+    await expectCompletionTriggerSealedFirst();
+    await expect(env.DB.prepare(
+      `UPDATE usage_operation_runs
+       SET outcome = 'success', final_sequence = 1, trace_complete = 1
+       WHERE run_id = 'run-upgrade-finalize-sealed'`,
+    ).run()).rejects.toThrow(/retention detail sealed/i);
+    expect(await runCompletionState("run-upgrade-finalize-sealed")).toEqual({
+      final_sequence: null,
+      outcome: "running",
+      trace_complete: 0,
+    });
+  });
+
+  it("rejects finalizing a sealed fresh run before terminal and evidence checks", async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await seedDbRunWithCompleteEvidence("run-schema-finalize-sealed");
+    await env.DB.prepare(
+      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = 'run-schema-finalize-sealed'",
+    ).run();
+
+    await expectCompletionTriggerSealedFirst();
+    await expect(env.DB.prepare(
+      `UPDATE usage_operation_runs
+       SET outcome = 'success', final_sequence = 1, trace_complete = 1
+       WHERE run_id = 'run-schema-finalize-sealed'`,
+    ).run()).rejects.toThrow(/retention detail sealed/i);
+    expect(await runCompletionState("run-schema-finalize-sealed")).toEqual({
+      final_sequence: null,
+      outcome: "running",
+      trace_complete: 0,
+    });
+  });
+
+  it("rejects direct detail changes and marker reset on a sealed upgraded run", async () => {
+    await migrateTraceV2();
+    await assertSealedRunDetailUpdates("run-upgrade-detail-sealed");
+  });
+
+  it("rejects direct detail changes and marker reset on a sealed fresh run", async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await assertSealedRunDetailUpdates("run-schema-detail-sealed");
+  });
+
+  it("rejects direct detail changes and marker reset on a sealed upgraded event", async () => {
+    await migrateTraceV2();
+    await assertSealedEventDetailUpdates(
+      "run-upgrade-event-detail-sealed",
+      "event-upgrade-detail-sealed",
+    );
+  });
+
+  it("rejects direct detail changes and marker reset on a sealed fresh event", async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await assertSealedEventDetailUpdates(
+      "run-schema-event-detail-sealed",
+      "event-schema-detail-sealed",
+    );
   });
 
   it("rejects an event whose run parent does not exist", async () => {
@@ -217,12 +454,20 @@ async function migrateTraceV2(): Promise<void> {
 }
 
 async function seedDbRun(runId: string): Promise<D1Result<unknown>> {
+  return seedDbRunWithState(runId, "running", 0);
+}
+
+async function seedDbRunWithState(
+  runId: string,
+  outcome: "running" | "success",
+  traceComplete: 0 | 1,
+): Promise<D1Result<unknown>> {
   return env.DB.prepare(
     `INSERT INTO usage_operation_runs
        (run_id, api_user_id, api_user_name, schema_version, operation_kind, title, outcome,
         client_version, started_at_ms, trace_complete)
-     VALUES (?, 7, 'User 7', 2, 'test', 'Test run', 'running', '1.4.0', 1, 0)`,
-  ).bind(runId).run();
+     VALUES (?, 7, 'User 7', 2, 'test', 'Test run', ?, '1.4.0', 1, ?)`,
+  ).bind(runId, outcome, traceComplete).run();
 }
 
 async function seedDbEvent(
@@ -258,6 +503,13 @@ async function seedDbChunk(
     chunkIndex,
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   ).run();
+}
+
+async function seedDbRunWithCompleteEvidence(runId: string): Promise<void> {
+  const eventId = `${runId}-event`;
+  await seedDbRun(runId);
+  await seedDbEvent(eventId, runId, 1, 1, 0);
+  await seedDbChunk(`${runId}-chunk`, eventId, "stdout", 0);
 }
 
 async function eventStorageBytes(runId: string): Promise<number> {
@@ -335,6 +587,108 @@ async function indexDefinition(name: string): Promise<{ columns: string; partial
      END)
      WHERE name = ?`,
   ).bind(name, name, name).first<{ columns: string; partial: number }>();
+}
+
+async function triggerSql(name: string): Promise<string> {
+  const row = await env.DB.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+  ).bind(name).first<{ sql: string }>();
+  return row?.sql ?? "";
+}
+
+async function expectSealedTrigger(name: string): Promise<void> {
+  const sql = await triggerSql(name);
+  expect(sql).toMatch(/retention_detail_cleared/i);
+  expect(sql).toMatch(/retention detail sealed/i);
+}
+
+async function expectCompletionTriggerSealedFirst(): Promise<void> {
+  const sql = await triggerSql("trg_trace_runs_validate_completion");
+  const sealed = sql.indexOf("trace retention detail sealed");
+  expect(sealed).toBeGreaterThan(-1);
+  expect(sealed).toBeLessThan(sql.indexOf("trace completion requires terminal outcome"));
+  expect(sealed).toBeLessThan(sql.indexOf("trace run is incomplete"));
+}
+
+async function runCompletionState(runId: string): Promise<{
+  final_sequence: number | null;
+  outcome: string;
+  trace_complete: number;
+} | null> {
+  return env.DB.prepare(
+    `SELECT final_sequence, outcome, trace_complete
+     FROM usage_operation_runs WHERE run_id = ?`,
+  ).bind(runId).first<{
+    final_sequence: number | null;
+    outcome: string;
+    trace_complete: number;
+  }>();
+}
+
+async function assertSealedRunDetailUpdates(runId: string): Promise<void> {
+  await seedDbRun(runId);
+  await env.DB.prepare(
+    "UPDATE usage_operation_runs SET error_message = 'secret' WHERE run_id = ?",
+  ).bind(runId).run();
+  await env.DB.prepare(
+    `UPDATE usage_operation_runs
+     SET error_message = NULL, retention_detail_cleared = 1,
+         updated_at = updated_at + 1
+     WHERE run_id = ?`,
+  ).bind(runId).run();
+
+  for (const assignment of [
+    "api_user_id = 8",
+    "title = 'Changed'",
+    "outcome = 'success'",
+    "ended_at_ms = 2",
+    "duration_ms = 1",
+    "final_sequence = 1",
+    "trace_complete = 1",
+    "error_message = 'revived'",
+    "retention_detail_cleared = 0",
+  ]) {
+    await expect(env.DB.prepare(
+      `UPDATE usage_operation_runs SET ${assignment} WHERE run_id = ?`,
+    ).bind(runId).run()).rejects.toThrow(/retention detail sealed/i);
+  }
+  await expect(env.DB.prepare(
+    "UPDATE usage_operation_runs SET updated_at = updated_at WHERE run_id = ?",
+  ).bind(runId).run()).resolves.toBeDefined();
+  expect(await env.DB.prepare(
+    `SELECT error_message, retention_detail_cleared
+     FROM usage_operation_runs WHERE run_id = ?`,
+  ).bind(runId).first()).toMatchObject({
+    error_message: null,
+    retention_detail_cleared: 1,
+  });
+}
+
+async function assertSealedEventDetailUpdates(runId: string, eventId: string): Promise<void> {
+  await seedDbRun(runId);
+  await seedDbEvent(eventId, runId, 1, 0, 0);
+  await env.DB.prepare(
+    "UPDATE usage_operation_events SET command_line = 'secret' WHERE event_id = ?",
+  ).bind(eventId).run();
+  await expect(env.DB.prepare(
+    `UPDATE usage_operation_events
+     SET command_line = NULL, retention_detail_cleared = 1
+     WHERE event_id = ?`,
+  ).bind(eventId).run()).resolves.toBeDefined();
+
+  await expect(env.DB.prepare(
+    "UPDATE usage_operation_events SET command_line = 'revived' WHERE event_id = ?",
+  ).bind(eventId).run()).rejects.toThrow(/retention detail sealed/i);
+  await expect(env.DB.prepare(
+    "UPDATE usage_operation_events SET retention_detail_cleared = 0 WHERE event_id = ?",
+  ).bind(eventId).run()).rejects.toThrow(/retention detail sealed/i);
+  expect(await env.DB.prepare(
+    `SELECT command_line, retention_detail_cleared
+     FROM usage_operation_events WHERE event_id = ?`,
+  ).bind(eventId).first()).toMatchObject({
+    command_line: null,
+    retention_detail_cleared: 1,
+  });
 }
 
 async function scalar(query: string): Promise<number> {

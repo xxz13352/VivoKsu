@@ -1,6 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { applyD1Migrations, reset, type D1Migration } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import successAckFixture from "../contracts/trace-v2/upload-ack.success.json";
 import chunkOnlyFixture from "../contracts/trace-v2/upload.chunk-only.json";
@@ -8,23 +8,252 @@ import eventOnlyFixture from "../contracts/trace-v2/upload.event-only.json";
 import finalizeOnlyFixture from "../contracts/trace-v2/upload.finalize-only.json";
 import openFixture from "../contracts/trace-v2/upload.open.json";
 import successFixture from "../contracts/trace-v2/upload.success.json";
-import type { Env as WorkerEnv } from "../src/index";
+import worker, { type Env as WorkerEnv } from "../src/index";
 import { encodePersistedRunSnapshotsForGuard, ingestTraceUploadV2 } from "../src/trace-v2-ingest";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv extends WorkerEnv {
     TEST_MIGRATIONS: D1Migration[];
-    TEST_TRACE_V2_MIGRATIONS: D1Migration[];
   }
 }
 
 beforeEach(async () => {
   await reset();
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  await applyD1Migrations(env.DB, env.TEST_TRACE_V2_MIGRATIONS);
 });
 
 describe("POST /api/usage/traces/v2", () => {
+  it("rejects finalization after scheduled retention seals an open run", async () => {
+    const nowMs = Date.UTC(2026, 7, 27, 12, 0, 0);
+    const startedAtMs = nowMs - 31 * 24 * 60 * 60 * 1_000;
+    const sensitive = "sealed-terminal-sensitive-marker";
+    await seedUser("trace-bearer", 7);
+    const canonical = copySuccess();
+    const openRun = {
+      ...canonical.runs[0],
+      outcome: "running",
+      device_serial: sensitive,
+      source_paths: [`C:\\private\\${sensitive}.img`],
+      source_urls: [`https://example.invalid/${sensitive}`],
+      started_at_ms: startedAtMs,
+      ended_at_ms: null,
+      duration_ms: null,
+      error_class: null,
+      error_code: null,
+      error_message: sensitive,
+      final_sequence: null,
+      trace_complete: false,
+    };
+    const persistedEvent = {
+      ...canonical.events[0],
+      event_id: "019d9c40-7b3c-7000-8000-000000004801",
+      run_id: openRun.run_id,
+      started_at_ms: startedAtMs,
+      ended_at_ms: startedAtMs + 1,
+      duration_ms: 1,
+      verification: sensitive,
+    };
+    await seedRunFromPayload(7, openRun, "203.0.113.45");
+    await seedEventFromPayload(persistedEvent);
+    vi.spyOn(Date, "now").mockReturnValue(nowMs);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    await worker.scheduled({} as ScheduledEvent, env, {} as ExecutionContext);
+
+    expect(await scalar(
+      "SELECT retention_detail_cleared AS value FROM usage_operation_runs WHERE run_id = ?",
+      openRun.run_id,
+    )).toBe(1);
+    const terminalRun = {
+      ...openRun,
+      outcome: "failed",
+      device_serial: null,
+      source_paths: [],
+      source_urls: [],
+      ended_at_ms: startedAtMs + 2,
+      duration_ms: 2,
+      error_class: "TerminalError",
+      error_code: "SEALED_ATTEMPT",
+      error_message: sensitive,
+      final_sequence: 1,
+      trace_complete: true,
+    };
+    const response = await postTrace({
+      schema_version: 2,
+      upload_id: "019d9c40-7b3c-7000-8000-000000004802",
+      runs: [terminalRun],
+      events: [],
+      output_chunks: [],
+    }, "trace-bearer", "203.0.113.45");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      accepted: { runs: [] },
+      rejected: [{
+        entity: "run",
+        id: openRun.run_id,
+        code: "invalid",
+        message: expect.stringMatching(/retention_expired.*detail sealed/i),
+      }],
+    });
+    expect(await scalar(
+      "SELECT trace_complete AS value FROM usage_operation_runs WHERE run_id = ?",
+      openRun.run_id,
+    )).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ?", openRun.run_id)).toBe(0);
+    expect(await text(
+      "SELECT error_message AS value FROM usage_operation_runs WHERE run_id = ?",
+      openRun.run_id,
+    )).toBeNull();
+    expect(await text(
+      "SELECT source_paths_json AS value FROM usage_operation_runs WHERE run_id = ?",
+      openRun.run_id,
+    )).toBe("[]");
+  });
+
+  it("rejects fresh and duplicate child items of a sealed open run", async () => {
+    await seedUser("trace-bearer", 7);
+    const canonical = copySuccess();
+    const openRun = {
+      ...canonical.runs[0],
+      outcome: "running",
+      ended_at_ms: null,
+      duration_ms: null,
+      final_sequence: null,
+      trace_complete: false,
+    };
+    const persistedEvent = {
+      ...canonical.events[0],
+      event_id: "019d9c40-7b3c-7000-8000-000000004811",
+      run_id: openRun.run_id,
+      stdout_chunks: 2,
+    };
+    const persistedChunk = {
+      ...canonical.output_chunks[1],
+      chunk_id: "019d9c40-7b3c-7000-8000-000000004812",
+      event_id: persistedEvent.event_id,
+      stream: "stdout",
+      chunk_index: 0,
+    };
+    const freshEvent = {
+      ...canonical.events[2],
+      event_id: "019d9c40-7b3c-7000-8000-000000004813",
+      run_id: openRun.run_id,
+      sequence: 2,
+    };
+    const freshChunk = {
+      ...persistedChunk,
+      chunk_id: "019d9c40-7b3c-7000-8000-000000004814",
+      chunk_index: 1,
+    };
+    await seedRunFromPayload(7, openRun, "203.0.113.45");
+    await seedEventFromPayload(persistedEvent);
+    await seedChunkFromPayload(persistedChunk);
+    await env.DB.prepare(
+      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = ?",
+    ).bind(openRun.run_id).run();
+
+    const requests = [
+      { entity: "event", id: persistedEvent.event_id, events: [persistedEvent], output_chunks: [] },
+      { entity: "event", id: freshEvent.event_id, events: [freshEvent], output_chunks: [] },
+      { entity: "output_chunk", id: persistedChunk.chunk_id, events: [], output_chunks: [persistedChunk] },
+      { entity: "output_chunk", id: freshChunk.chunk_id, events: [], output_chunks: [freshChunk] },
+    ] as const;
+    for (const [index, candidate] of requests.entries()) {
+      const response = await postTrace({
+        schema_version: 2,
+        upload_id: `019d9c40-7b3c-7000-8000-${(4_820 + index).toString().padStart(12, "0")}`,
+        runs: [],
+        events: candidate.events,
+        output_chunks: candidate.output_chunks,
+      }, "trace-bearer", "203.0.113.45");
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        accepted: candidate.entity === "event" ? { events: [] } : { output_chunks: [] },
+        rejected: [{
+          entity: candidate.entity,
+          id: candidate.id,
+          code: "invalid",
+          message: expect.stringMatching(/retention_expired.*detail sealed/i),
+        }],
+      });
+    }
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events WHERE run_id = ?", openRun.run_id)).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks WHERE event_id = ?", persistedEvent.event_id)).toBe(1);
+  });
+
+  it("reclassifies a retention seal race as an item rejection", async () => {
+    await seedUser("trace-bearer", 7);
+    const canonical = copySuccess();
+    const openRun = {
+      ...canonical.runs[0],
+      outcome: "running",
+      ended_at_ms: null,
+      duration_ms: null,
+      final_sequence: null,
+      trace_complete: false,
+    };
+    const freshEvent = {
+      ...canonical.events[0],
+      event_id: "019d9c40-7b3c-7000-8000-000000004831",
+      run_id: openRun.run_id,
+    };
+    await seedRunFromPayload(7, openRun, "203.0.113.45");
+    const db = collisionPerBatchDatabase(async (attempt) => {
+      if (attempt !== 1) return;
+      await env.DB.prepare(
+        "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = ?",
+      ).bind(openRun.run_id).run();
+    });
+
+    const response = await ingestTraceUploadV2(
+      { DB: db },
+      traceRequest({
+        schema_version: 2,
+        upload_id: "019d9c40-7b3c-7000-8000-000000004832",
+        runs: [],
+        events: [freshEvent],
+        output_chunks: [],
+      }, "trace-bearer", "203.0.113.45"),
+      { id: 7, username: "user-7", name: "User 7", bearer_token: "trace-bearer" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      accepted: { events: [] },
+      rejected: [{
+        entity: "event",
+        id: freshEvent.event_id,
+        code: "invalid",
+        message: expect.stringMatching(/retention_expired.*detail sealed/i),
+      }],
+    });
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_operation_events WHERE event_id = ?",
+      freshEvent.event_id,
+    )).toBe(0);
+  });
+
+  it("keeps completed marker-one exact retries idempotent", async () => {
+    await seedUser("trace-bearer", 7);
+    expect((await postTrace(successFixture, "trace-bearer", "203.0.113.45")).status).toBe(200);
+    await env.DB.prepare(
+      "UPDATE usage_operation_events SET retention_detail_cleared = 1 WHERE run_id = ?",
+    ).bind(successFixture.runs[0].run_id).run();
+    await env.DB.prepare(
+      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = ?",
+    ).bind(successFixture.runs[0].run_id).run();
+
+    const retry = await postTrace(successFixture, "trace-bearer", "198.51.100.77");
+
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual(successAckFixture);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_runs")).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(3);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ?", successFixture.runs[0].run_id)).toBe(1);
+  });
+
   it("acks the canonical upload and projects one terminal V1 summary", async () => {
     await seedUser("trace-bearer", 7);
 
@@ -797,7 +1026,7 @@ describe("POST /api/usage/traces/v2", () => {
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(0);
   });
 
-  it("finalizes an existing run and reopens its retention-detail stage", async () => {
+  it("rejects a sealed run before its same-request descendants", async () => {
     await seedUser("trace-bearer", 7);
     const openRun = {
       ...copySuccess().runs[0],
@@ -808,9 +1037,6 @@ describe("POST /api/usage/traces/v2", () => {
       trace_complete: false,
     };
     await seedRunFromPayload(7, openRun, "203.0.113.45");
-    await env.DB.prepare(
-      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = ?",
-    ).bind(openRun.run_id).run();
     await seedEvent(
       successFixture.events[1].event_id,
       successFixture.runs[0].run_id,
@@ -821,6 +1047,9 @@ describe("POST /api/usage/traces/v2", () => {
     for (const chunk of successFixture.output_chunks) {
       await seedChunk(chunk.chunk_id, chunk.event_id, chunk.stream, chunk.chunk_index);
     }
+    await env.DB.prepare(
+      "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = ?",
+    ).bind(openRun.run_id).run();
     const payload = copySuccess();
     payload.events.splice(1, 1);
     payload.output_chunks = [];
@@ -828,20 +1057,32 @@ describe("POST /api/usage/traces/v2", () => {
     const response = await postTrace(payload, "trace-bearer", "203.0.113.45");
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      ok: true,
-      accepted: {
-        runs: [successFixture.runs[0].run_id],
-        events: [successFixture.events[0].event_id, successFixture.events[2].event_id],
-        output_chunks: [],
-      },
-      rejected: [],
+    expect(await response.json()).toMatchObject({
+      accepted: { runs: [], events: [], output_chunks: [] },
+      rejected: [
+        {
+          entity: "run",
+          id: successFixture.runs[0].run_id,
+          code: "invalid",
+          message: expect.stringMatching(/retention_expired.*detail sealed/i),
+        },
+        {
+          entity: "event",
+          id: successFixture.events[0].event_id,
+          code: "missing_parent",
+        },
+        {
+          entity: "event",
+          id: successFixture.events[2].event_id,
+          code: "missing_parent",
+        },
+      ],
     });
-    expect(await scalar("SELECT trace_complete AS value FROM usage_operation_runs WHERE run_id = ?", successFixture.runs[0].run_id)).toBe(1);
-    expect(await scalar("SELECT retention_detail_cleared AS value FROM usage_operation_runs WHERE run_id = ?", successFixture.runs[0].run_id)).toBe(0);
-    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(3);
+    expect(await scalar("SELECT trace_complete AS value FROM usage_operation_runs WHERE run_id = ?", successFixture.runs[0].run_id)).toBe(0);
+    expect(await scalar("SELECT retention_detail_cleared AS value FROM usage_operation_runs WHERE run_id = ?", successFixture.runs[0].run_id)).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_events")).toBe(1);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(2);
-    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ?", successFixture.runs[0].run_id)).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ?", successFixture.runs[0].run_id)).toBe(0);
   });
 
   it("finalizes twenty persisted open runs in one bounded request", async () => {
@@ -2239,6 +2480,10 @@ describe("POST /api/usage/traces/v2", () => {
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks WHERE text LIKE ?", `%${bearer}%`)).toBe(0);
     expect(await scalar("SELECT COUNT(*) AS value FROM usage_output_chunks")).toBe(1);
   });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 function copySuccess(): any {

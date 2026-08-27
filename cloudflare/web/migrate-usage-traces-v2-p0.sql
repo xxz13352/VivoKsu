@@ -1,3 +1,11 @@
+DROP TRIGGER IF EXISTS trg_trace_runs_reject_complete_running_insert;
+CREATE TRIGGER trg_trace_runs_reject_complete_running_insert
+BEFORE INSERT ON usage_operation_runs
+BEGIN
+  SELECT RAISE(ABORT, 'trace completion requires terminal outcome')
+  WHERE NEW.trace_complete = 1 AND NEW.outcome = 'running';
+END;
+
 DROP TRIGGER IF EXISTS trg_trace_events_reject_completed_run;
 CREATE TRIGGER trg_trace_events_reject_completed_run
 BEFORE INSERT ON usage_operation_events
@@ -72,6 +80,14 @@ BEGIN
   + length(CAST(COALESCE(NEW.error_message, '') AS BLOB))
   + length(CAST(COALESCE(NEW.credential_redactions_json, '') AS BLOB))
   > 8388608;
+END;
+
+DROP TRIGGER IF EXISTS trg_trace_events_validate_sequence_update;
+CREATE TRIGGER trg_trace_events_validate_sequence_update
+BEFORE UPDATE OF sequence ON usage_operation_events
+BEGIN
+  SELECT RAISE(ABORT, 'trace event sequence outside run quota')
+  WHERE NEW.sequence < 1 OR NEW.sequence > 100;
 END;
 
 DROP TRIGGER IF EXISTS trg_trace_runs_validate_completion;

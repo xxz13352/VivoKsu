@@ -22,13 +22,14 @@ CREATE TABLE IF NOT EXISTS usage_operation_runs (
   trace_loss_reason TEXT,
   credential_redactions_json TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+  CHECK(trace_complete = 0 OR outcome <> 'running')
 );
 
 CREATE TABLE IF NOT EXISTS usage_operation_events (
   event_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
-  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 100),
   event_kind TEXT NOT NULL CHECK(event_kind IN ('authorization','stage','partition','command','skip','verification','terminal')),
   step_name TEXT NOT NULL,
   partition_name TEXT,
@@ -88,6 +89,13 @@ CREATE TABLE IF NOT EXISTS usage_trace_ingest_guards (
   guard_id TEXT PRIMARY KEY,
   valid INTEGER NOT NULL CHECK(valid = 1)
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_runs_reject_complete_running_insert
+BEFORE INSERT ON usage_operation_runs
+BEGIN
+  SELECT RAISE(ABORT, 'trace completion requires terminal outcome')
+  WHERE NEW.trace_complete = 1 AND NEW.outcome = 'running';
+END;
 
 CREATE TRIGGER IF NOT EXISTS trg_trace_events_reject_completed_run
 BEFORE INSERT ON usage_operation_events
@@ -162,6 +170,13 @@ BEGIN
   + length(CAST(COALESCE(NEW.error_message, '') AS BLOB))
   + length(CAST(COALESCE(NEW.credential_redactions_json, '') AS BLOB))
   > 8388608;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_events_validate_sequence_update
+BEFORE UPDATE OF sequence ON usage_operation_events
+BEGIN
+  SELECT RAISE(ABORT, 'trace event sequence outside run quota')
+  WHERE NEW.sequence < 1 OR NEW.sequence > 100;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_trace_chunks_reject_completed_run

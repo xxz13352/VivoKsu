@@ -34,6 +34,8 @@ An accepted parent item may be deleted from the client spool immediately. Later 
 
 Delete only IDs returned in `accepted`. Keep every rejected or unacknowledged item for explicit retry/remediation. Never infer acceptance from HTTP 200 alone.
 
+Plan C MUST cap local spool retention at seven days. When an item reaches that limit, discard the expired spool data, record an explicit durable loss diagnostic for the affected trace, and stop retrying it; do not attempt to revive an old server trace from discarded evidence.
+
 The exact successful response shape is:
 
 ```json
@@ -101,11 +103,11 @@ The server remains defense-in-depth. A credential wholly inside one raw chunk is
 
 ## D1 and compatibility
 
-- Apply `migrate-usage-traces-v2.sql`, then `migrate-usage-traces-v2-p0.sql`, then the one-time `migrate-usage-traces-v2-retention-stage.sql`. The last migration upgrades existing V2 tables with internal retention markers and partial indexes; these columns are server-only and do not change the V2 wire contract.
+- Apply `migrate-usage-traces-v2.sql`, then `migrate-usage-traces-v2-p0.sql`, then the one-time `migrate-usage-traces-v2-retention-stage.sql`. The last migration upgrades existing V2 tables with internal retention markers and partial indexes; these columns are server-only and do not change the V2 wire contract. All three migrations must complete successfully before the API deployment receives upload traffic.
 - Parent ownership is checked before ingestion and again inside the atomic batch guard. D1 triggers reject missing/completed parents, event count/storage quota violations, and out-of-range indexes.
 - Terminal V2 runs project one V1 `usage_logs` summary with `event_key = run_id` in the same transaction.
 - The V1 projection contains the terminal user/name, operation kind, title, outcome, start/end, and duration summary. Administrator dual-read suppresses that projected V1 row while its V2 run exists; historical V1-only rows remain available with explicit legacy detail degradation.
-- Retention drains backlog progressively with stable ordered batches of at most 100 rows per D1 mutation. Thirty-day detail candidates seek partial indexes containing only rows whose internal `retention_detail_cleared` marker is false; clearing detail atomically sets the marker, so later cron runs do not rescan clean history. A controlled open-to-terminal run update resets the marker if it writes operational detail. When a V2 run crosses 180 days, retention removes only that run's `usage_logs.event_key = run_id` compatibility projection before deleting the run; unrelated historical V1 rows remain intact and cannot reappear as a false V1 duplicate.
+- Retention drains backlog progressively with stable ordered batches of at most 100 rows per D1 mutation. Thirty-day detail candidates seek partial indexes containing only rows whose internal `retention_detail_cleared` marker is false; clearing detail atomically sets the marker, so later cron runs do not rescan clean history. A 30-day open run is permanently detail-sealed: its marker is never reset by an open-to-terminal attempt, and later run finalization, identity/detail mutation, event upload, or chunk retry is rejected as item-level `invalid` with a `retention_expired`/detail-sealed explanation. It remains unfinalized and produces no V1 projection. When a V2 run crosses 180 days, retention removes only that run's `usage_logs.event_key = run_id` compatibility projection before deleting the run; unrelated historical V1 rows remain intact and cannot reappear as a false V1 duplicate.
 
 The seven administrator trace query endpoints, all protected by the administrator session cookie, are:
 

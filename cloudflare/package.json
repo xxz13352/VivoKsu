@@ -10,7 +10,7 @@
     "dev": "wrangler dev",
     "test": "vitest run test/security.test.ts test/trace-v2-contract.test.ts test/trace-v2-redaction.test.ts",
     "test:workerd": "vitest run --config vitest.workerd.config.ts",
-    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/index.ts src/security.ts src/trace-v2-contract.ts src/trace-v2-redaction.ts src/trace-v2-ingest.ts && tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/trace-v2-contract.ts web/src/trace-v2-query.ts && wrangler deploy --dry-run --outdir .wrangler/typecheck-api && wrangler deploy --dry-run --config web/wrangler.toml --outdir .wrangler/typecheck-web"
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/index.ts src/security.ts src/trace-v2-contract.ts src/trace-v2-redaction.ts src/trace-v2-ingest.ts src/trace-v2-retention.ts && tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/trace-v2-contract.ts web/src/trace-v2-query.ts && wrangler deploy --dry-run --outdir .wrangler/typecheck-api && wrangler deploy --dry-run --config web/wrangler.toml --outdir .wrangler/typecheck-web"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.0.0",

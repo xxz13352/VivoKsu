@@ -189,13 +189,14 @@ CREATE TABLE IF NOT EXISTS usage_operation_runs (
   credential_redactions_json TEXT NOT NULL DEFAULT '[]',
   retention_detail_cleared INTEGER NOT NULL DEFAULT 0 CHECK(retention_detail_cleared IN (0,1)),
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+  CHECK(trace_complete = 0 OR outcome <> 'running')
 );
 
 CREATE TABLE IF NOT EXISTS usage_operation_events (
   event_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
-  sequence INTEGER NOT NULL CHECK(sequence >= 1),
+  sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 100),
   event_kind TEXT NOT NULL CHECK(event_kind IN ('authorization','stage','partition','command','skip','verification','terminal')),
   step_name TEXT NOT NULL,
   partition_name TEXT,
@@ -263,6 +264,13 @@ CREATE TABLE IF NOT EXISTS usage_trace_ingest_guards (
   valid INTEGER NOT NULL CHECK(valid = 1)
 );
 
+CREATE TRIGGER IF NOT EXISTS trg_trace_runs_reject_complete_running_insert
+BEFORE INSERT ON usage_operation_runs
+BEGIN
+  SELECT RAISE(ABORT, 'trace completion requires terminal outcome')
+  WHERE NEW.trace_complete = 1 AND NEW.outcome = 'running';
+END;
+
 DROP TRIGGER IF EXISTS trg_trace_events_reject_completed_run;
 CREATE TRIGGER trg_trace_events_reject_completed_run
 BEFORE INSERT ON usage_operation_events
@@ -275,6 +283,11 @@ BEGIN
   WHERE EXISTS (
     SELECT 1 FROM usage_operation_runs
     WHERE run_id = NEW.run_id AND trace_complete = 1
+  );
+  SELECT RAISE(ABORT, 'trace retention detail sealed')
+  WHERE EXISTS (
+    SELECT 1 FROM usage_operation_runs
+    WHERE run_id = NEW.run_id AND retention_detail_cleared = 1
   );
   SELECT RAISE(ABORT, 'trace event sequence exceeds final sequence')
   WHERE EXISTS (
@@ -340,6 +353,13 @@ BEGIN
 
 END;
 
+CREATE TRIGGER IF NOT EXISTS trg_trace_events_validate_sequence_update
+BEFORE UPDATE OF sequence ON usage_operation_events
+BEGIN
+  SELECT RAISE(ABORT, 'trace event sequence outside run quota')
+  WHERE NEW.sequence < 1 OR NEW.sequence > 100;
+END;
+
 DROP TRIGGER IF EXISTS trg_trace_chunks_reject_completed_run;
 CREATE TRIGGER trg_trace_chunks_reject_completed_run
 BEFORE INSERT ON usage_output_chunks
@@ -358,6 +378,14 @@ BEGIN
     JOIN usage_operation_runs AS run ON run.run_id = event.run_id
     WHERE event.event_id = NEW.event_id AND run.trace_complete = 1
   );
+  SELECT RAISE(ABORT, 'trace retention detail sealed')
+  WHERE EXISTS (
+    SELECT 1
+    FROM usage_operation_events AS event
+    JOIN usage_operation_runs AS run ON run.run_id = event.run_id
+    WHERE event.event_id = NEW.event_id
+      AND (run.retention_detail_cleared = 1 OR event.retention_detail_cleared = 1)
+  );
   SELECT RAISE(ABORT, 'trace chunk index exceeds declared total')
   WHERE EXISTS (
     SELECT 1
@@ -370,10 +398,52 @@ BEGIN
   );
 END;
 
+CREATE TRIGGER IF NOT EXISTS trg_trace_events_reject_sealed_detail_update
+BEFORE UPDATE ON usage_operation_events
+WHEN OLD.retention_detail_cleared = 1
+BEGIN
+  SELECT RAISE(ABORT, 'trace retention detail sealed');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_runs_reject_sealed_detail_update
+BEFORE UPDATE ON usage_operation_runs
+WHEN OLD.retention_detail_cleared = 1
+ AND (
+   NEW.run_id IS NOT OLD.run_id
+   OR NEW.api_user_id IS NOT OLD.api_user_id
+   OR NEW.api_user_name IS NOT OLD.api_user_name
+   OR NEW.schema_version IS NOT OLD.schema_version
+   OR NEW.operation_kind IS NOT OLD.operation_kind
+   OR NEW.title IS NOT OLD.title
+   OR NEW.outcome IS NOT OLD.outcome
+   OR NEW.device_serial IS NOT OLD.device_serial
+   OR NEW.source_ip IS NOT OLD.source_ip
+   OR NEW.source_paths_json IS NOT OLD.source_paths_json
+   OR NEW.source_urls_json IS NOT OLD.source_urls_json
+   OR NEW.client_version IS NOT OLD.client_version
+   OR NEW.started_at_ms IS NOT OLD.started_at_ms
+   OR NEW.ended_at_ms IS NOT OLD.ended_at_ms
+   OR NEW.duration_ms IS NOT OLD.duration_ms
+   OR NEW.error_class IS NOT OLD.error_class
+   OR NEW.error_code IS NOT OLD.error_code
+   OR NEW.error_message IS NOT OLD.error_message
+   OR NEW.final_sequence IS NOT OLD.final_sequence
+   OR NEW.trace_complete IS NOT OLD.trace_complete
+   OR NEW.trace_loss_reason IS NOT OLD.trace_loss_reason
+   OR NEW.credential_redactions_json IS NOT OLD.credential_redactions_json
+   OR NEW.retention_detail_cleared IS NOT OLD.retention_detail_cleared
+   OR NEW.created_at IS NOT OLD.created_at
+ )
+BEGIN
+  SELECT RAISE(ABORT, 'trace retention detail sealed');
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_trace_runs_validate_completion
 BEFORE UPDATE OF trace_complete ON usage_operation_runs
 WHEN OLD.trace_complete = 0 AND NEW.trace_complete = 1
 BEGIN
+  SELECT RAISE(ABORT, 'trace retention detail sealed')
+  WHERE OLD.retention_detail_cleared = 1 OR NEW.retention_detail_cleared = 1;
   SELECT RAISE(ABORT, 'trace completion requires terminal outcome')
   WHERE NEW.outcome = 'running';
   SELECT RAISE(ABORT, 'trace run is incomplete')

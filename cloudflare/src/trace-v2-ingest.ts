@@ -55,6 +55,7 @@ interface PersistedEventRow {
   error_code: string | null;
   error_message: string | null;
   credential_redactions_json: string;
+  retention_detail_cleared: number;
 }
 
 interface PersistedRunRow {
@@ -78,6 +79,7 @@ interface PersistedRunRow {
   trace_complete: number;
   trace_loss_reason: string | null;
   credential_redactions_json: string;
+  retention_detail_cleared: number;
 }
 
 interface PersistedChunkRow {
@@ -117,6 +119,7 @@ const TRACE_HEADERS = {
 };
 const TRACE_INGEST_ATTEMPTS = 3;
 const D1_READ_ID_BATCH_SIZE = 90;
+const RETENTION_SEALED_MESSAGE = "retention_expired: detail sealed after 30 days; open trace mutations are no longer accepted.";
 const TRACE_EVENT_STORAGE_SQL = [
   "event_id", "run_id", "event_kind", "step_name", "partition_name", "status",
   "command_program", "command_argv_json", "command_line", "working_directory",
@@ -235,9 +238,20 @@ async function prepareTraceUpload(
   const completedRunIds = new Set(
     persistedRuns.filter((run) => run.trace_complete === 1).map((run) => run.run_id),
   );
+  const sealedRunIds = new Set(
+    persistedRuns
+      .filter((run) => run.trace_complete === 0 && run.retention_detail_cleared === 1)
+      .map((run) => run.run_id),
+  );
   const persistedEventById = new Map(persistedEvents.map((event) => [event.event_id, event]));
   const persistedEventBySequence = new Map(
     persistedEvents.map((event) => [sequenceKey(event.run_id, event.sequence), event]),
+  );
+  const sealedEventIds = new Set(
+    persistedEvents
+      .filter((event) => event.retention_detail_cleared === 1)
+      .filter((event) => persistedRunById.get(event.run_id)?.trace_complete === 0)
+      .map((event) => event.event_id),
   );
 
   const acceptedRuns: string[] = [];
@@ -249,6 +263,15 @@ async function prepareTraceUpload(
     if (!persisted) {
       acceptedRuns.push(run.run_id);
       writableRuns.push(run);
+      continue;
+    }
+    if (sealedRunIds.has(run.run_id)) {
+      rejected.push({
+        entity: "run",
+        id: run.run_id,
+        code: "invalid",
+        message: RETENTION_SEALED_MESSAGE,
+      });
       continue;
     }
     if (persistedRunMatches(run, persisted, sanitized)) {
@@ -272,7 +295,9 @@ async function prepareTraceUpload(
   const payloadRunIdSet = new Set(payloadRunIds);
   const availableRunIds = new Set(acceptedRunIds);
   for (const persisted of persistedRuns) {
-    if (!payloadRunIdSet.has(persisted.run_id)) availableRunIds.add(persisted.run_id);
+    if (!payloadRunIdSet.has(persisted.run_id) && !sealedRunIds.has(persisted.run_id)) {
+      availableRunIds.add(persisted.run_id);
+    }
   }
   const runEvidenceById = new Map<string, PersistedRunRow | TraceUploadRequestV2["runs"][number]>(
     persistedRuns.map((run) => [run.run_id, run]),
@@ -285,6 +310,26 @@ async function prepareTraceUpload(
   const durableEvents: string[] = [];
   const newEvents: TraceEventV2[] = [];
   for (const event of payload.events) {
+    if (payloadRunIdSet.has(event.run_id)
+      && !acceptedRunIds.has(event.run_id)
+      && sealedRunIds.has(event.run_id)) {
+      rejected.push({
+        entity: "event",
+        id: event.event_id,
+        code: "missing_parent",
+        message: "事件缺少已接受的运行父项。",
+      });
+      continue;
+    }
+    if (sealedRunIds.has(event.run_id) || sealedEventIds.has(event.event_id)) {
+      rejected.push({
+        entity: "event",
+        id: event.event_id,
+        code: "invalid",
+        message: RETENTION_SEALED_MESSAGE,
+      });
+      continue;
+    }
     const persisted = persistedEventById.get(event.event_id);
     if (persisted) {
       if (persistedEventMatches(event, persisted, sanitized)) {
@@ -368,7 +413,11 @@ async function prepareTraceUpload(
   const payloadEventIdSet = new Set(payloadEventIds);
   const availableEventIds = new Set(acceptedEventIds);
   for (const persisted of persistedEvents) {
-    if (!payloadEventIdSet.has(persisted.event_id)) availableEventIds.add(persisted.event_id);
+    if (!payloadEventIdSet.has(persisted.event_id)
+      && !sealedRunIds.has(persisted.run_id)
+      && !sealedEventIds.has(persisted.event_id)) {
+      availableEventIds.add(persisted.event_id);
+    }
   }
   const eventEvidenceById = new Map<string, PersistedEventRow | TraceEventV2>(
     persistedEvents.map((event) => [event.event_id, event]),
@@ -393,6 +442,34 @@ async function prepareTraceUpload(
     ...payload.events.map((event) => [event.event_id, event.run_id] as const),
   ]);
   for (const chunk of payload.output_chunks) {
+    const ancestorRunId = eventRunIds.get(chunk.event_id) ?? "";
+    if (payloadEventIdSet.has(chunk.event_id) && !acceptedEventIds.has(chunk.event_id)) {
+      rejected.push({
+        entity: "output_chunk",
+        id: chunk.chunk_id,
+        code: "missing_parent",
+        message: "输出分块缺少已接受的事件父项。",
+      });
+      continue;
+    }
+    if (payloadRunIdSet.has(ancestorRunId) && !acceptedRunIds.has(ancestorRunId)) {
+      rejected.push({
+        entity: "output_chunk",
+        id: chunk.chunk_id,
+        code: "missing_parent",
+        message: "输出分块缺少已接受的运行祖先。",
+      });
+      continue;
+    }
+    if (sealedRunIds.has(ancestorRunId) || sealedEventIds.has(chunk.event_id)) {
+      rejected.push({
+        entity: "output_chunk",
+        id: chunk.chunk_id,
+        code: "invalid",
+        message: RETENTION_SEALED_MESSAGE,
+      });
+      continue;
+    }
     const persisted = persistedChunkById.get(chunk.chunk_id);
     if (persisted) {
       if (persistedChunkMatches(chunk, persisted, sanitized)) {
@@ -417,7 +494,7 @@ async function prepareTraceUpload(
       });
       continue;
     }
-    if (!availableRunIds.has(eventRunIds.get(chunk.event_id) ?? "")) {
+    if (!availableRunIds.has(ancestorRunId)) {
       rejected.push({
         entity: "output_chunk",
         id: chunk.chunk_id,
@@ -426,7 +503,7 @@ async function prepareTraceUpload(
       });
       continue;
     }
-    if (completedRunIds.has(eventRunIds.get(chunk.event_id) ?? "")) {
+    if (completedRunIds.has(ancestorRunId)) {
       rejected.push({
         entity: "output_chunk",
         id: chunk.chunk_id,
@@ -511,7 +588,7 @@ async function readPersistedRuns(db: D1Database, runIds: string[]): Promise<Pers
     `SELECT run_id, api_user_name, operation_kind, title, outcome, device_serial, source_ip,
             source_paths_json, source_urls_json, client_version, started_at_ms, ended_at_ms,
             duration_ms, error_class, error_code, error_message, final_sequence, trace_complete,
-            trace_loss_reason, credential_redactions_json
+            trace_loss_reason, credential_redactions_json, retention_detail_cleared
      FROM usage_operation_runs`,
     "run_id",
     runIds,
@@ -577,6 +654,7 @@ function canAdvanceOpenRun(
   sanitized: RedactedTraceUploadV2,
 ): boolean {
   return persisted.trace_complete === 0
+    && persisted.retention_detail_cleared === 0
     && run.trace_complete
     && run.outcome !== "running"
     && persisted.operation_kind === run.operation_kind
@@ -598,7 +676,8 @@ async function readPersistedEvents(
                             started_at_ms, ended_at_ms, duration_ms, command_program, command_argv_json,
                             command_line, working_directory, paths_json, urls_json, serial, exit_code,
                             stdout_chunks, stderr_chunks, verification, device_state, retry_safe, remedies_json,
-                            error_class, error_code, error_message, credential_redactions_json
+                            error_class, error_code, error_message, credential_redactions_json,
+                            retention_detail_cleared
                      FROM usage_operation_events`;
   const [byId, bySequence] = await Promise.all([
     readRowsByIds<PersistedEventRow>(db, selectSql, "event_id", eventIds),
@@ -874,7 +953,6 @@ function buildTraceStatements(
          trace_complete = excluded.trace_complete,
          trace_loss_reason = excluded.trace_loss_reason,
          credential_redactions_json = excluded.credential_redactions_json,
-         retention_detail_cleared = 0,
          updated_at = strftime('%s','now')
        WHERE usage_operation_runs.api_user_id = excluded.api_user_id
          AND usage_operation_runs.trace_complete = 0`,
@@ -1046,6 +1124,8 @@ function buildIngestGuardStatement(
     payload.output_chunks.map((chunk) => chunk.chunk_id),
     userId,
   );
+  appendSealedOpenRunGuard(checks, bindings, referencedRunIds, userId);
+  appendSealedOpenEventGuard(checks, bindings, referencedEventIds, userId);
   const persistedRunById = new Map(prepared.persistedRuns.map((run) => [run.run_id, run]));
   const newRunIds: string[] = [];
   const persistedRunSnapshots: PersistedRunRow[] = [];
@@ -1085,6 +1165,46 @@ function buildIngestGuardStatement(
   ).bind(...bindings);
 }
 
+function appendSealedOpenRunGuard(
+  checks: string[],
+  bindings: unknown[],
+  runIds: string[],
+  userId: number,
+): void {
+  if (runIds.length === 0) return;
+  checks.push(
+    `EXISTS (
+       SELECT 1 FROM usage_operation_runs AS run
+       WHERE run.run_id IN (SELECT value FROM json_each(?))
+         AND run.api_user_id = ?
+         AND run.trace_complete = 0
+         AND run.retention_detail_cleared = 1
+     )`,
+  );
+  bindings.push(JSON.stringify(runIds), userId);
+}
+
+function appendSealedOpenEventGuard(
+  checks: string[],
+  bindings: unknown[],
+  eventIds: string[],
+  userId: number,
+): void {
+  if (eventIds.length === 0) return;
+  checks.push(
+    `EXISTS (
+       SELECT 1
+       FROM usage_operation_events AS event
+       JOIN usage_operation_runs AS run ON run.run_id = event.run_id
+       WHERE event.event_id IN (SELECT value FROM json_each(?))
+         AND run.api_user_id = ?
+         AND run.trace_complete = 0
+         AND (run.retention_detail_cleared = 1 OR event.retention_detail_cleared = 1)
+     )`,
+  );
+  bindings.push(JSON.stringify(eventIds), userId);
+}
+
 function appendExistingRunParentsPrecondition(
   checks: string[],
   bindings: unknown[],
@@ -1100,6 +1220,7 @@ function appendExistingRunParentsPrecondition(
          WHERE run.run_id = parent.value
            AND run.api_user_id = ?
            AND run.trace_complete = 0
+           AND run.retention_detail_cleared = 0
        )
      )`,
   );
@@ -1123,6 +1244,8 @@ function appendExistingEventParentsPrecondition(
          WHERE event.event_id = parent.value
            AND run.api_user_id = ?
            AND run.trace_complete = 0
+           AND run.retention_detail_cleared = 0
+           AND event.retention_detail_cleared = 0
        )
      )`,
   );
@@ -1179,6 +1302,8 @@ function appendPersistedRunMutationPrecondition(
            AND run.trace_complete IS json_extract(snapshot.value, '$.trace_complete')
            AND run.trace_loss_reason IS json_extract(snapshot.value, '$.trace_loss_reason')
            AND json(run.credential_redactions_json) IS json(json_extract(snapshot.value, '$.credential_redactions_json'))
+           AND run.retention_detail_cleared IS json_extract(snapshot.value, '$.retention_detail_cleared')
+           AND run.retention_detail_cleared = 0
        )
      )`,
   );
