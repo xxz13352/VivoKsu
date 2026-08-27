@@ -16,6 +16,7 @@ const manifestPath = resolve(tauriRoot, 'Cargo.toml');
 const configPath = resolve(tauriRoot, 'tauri.conf.json');
 const e2eConfigPath = resolve(tauriRoot, 'tauri.e2e.conf.json');
 const capabilityRoot = resolve(tauriRoot, 'capabilities');
+const nativeE2eBuildScriptPath = resolve(desktopRoot, 'e2e-tests', 'build-native-e2e.ps1');
 const cargoTreeTimeoutMs = 45_000;
 const cargoGraphTestTimeoutMs = (cargoTreeTimeoutMs * 2) + 10_000;
 const normalPermissions = [
@@ -130,4 +131,45 @@ describe('desktop window capabilities', () => {
     expect(e2eTree).toMatch(/tauri-plugin-wdio\s+v/);
     expect(e2eTree).toMatch(/tauri-plugin-wdio-webdriver\s+v/);
   }, cargoGraphTestTimeoutMs);
+
+  test('native E2E build injects and restores a deterministic test verification key', () => {
+    const script = readFileSync(nativeE2eBuildScriptPath, 'utf8');
+    const keyMatch = script.match(/\$e2eVerificationKeyB64\s*=\s*'([^']+)'/);
+
+    expect(keyMatch).not.toBeNull();
+    expect(Buffer.from(keyMatch?.[1] ?? '', 'base64')).toHaveLength(32);
+    expect(script).toContain('$priorVerificationKey = $env:NWFLASH_SESSION_VERIFY_KEY_B64');
+    expect(script).toContain('$env:NWFLASH_SESSION_VERIFY_KEY_B64 = $e2eVerificationKeyB64');
+    expect(script).toContain('Remove-Item Env:NWFLASH_SESSION_VERIFY_KEY_B64');
+    expect(script).toContain('$env:NWFLASH_SESSION_VERIFY_KEY_B64 = $priorVerificationKey');
+  });
+
+  test('native E2E build restores caller environment when its child build fails', () => {
+    const scriptPath = nativeE2eBuildScriptPath.replaceAll("'", "''");
+    const command = [
+      "$ErrorActionPreference='Stop'",
+      "$env:CARGO_TARGET_DIR='caller-target-sentinel'",
+      "$env:NWFLASH_SESSION_VERIFY_KEY_B64='caller-key-sentinel'",
+      "function global:npm { throw 'forced-e2e-build-failure' }",
+      '$failed = $false',
+      `try { & '${scriptPath}' } catch { $failed = $true }`,
+      "if (-not $failed) { throw 'Expected the injected npm failure.' }",
+      "if ($env:CARGO_TARGET_DIR -ne 'caller-target-sentinel') { throw 'CARGO_TARGET_DIR was not restored.' }",
+      "if ($env:NWFLASH_SESSION_VERIFY_KEY_B64 -ne 'caller-key-sentinel') { throw 'Verification key was not restored.' }",
+      "Write-Output 'RESTORED'",
+    ].join('; ');
+    const output = execFileSync('pwsh', [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      command,
+    ], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      windowsHide: true,
+    });
+
+    expect(output).toContain('RESTORED');
+  });
 });

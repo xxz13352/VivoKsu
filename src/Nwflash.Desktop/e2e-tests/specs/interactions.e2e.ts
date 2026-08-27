@@ -106,8 +106,17 @@ describe('奶蛙Flash interaction baseline', () => {
   it('requires an explicit Chinese confirmation before deleting a device file', async () => {
     await mockCommand('files_list', VISUAL_STATE_FIXTURES.fileEntries);
     await mockCommand('files_delete', null);
+    await emitTauriEvent('device:snapshot', {
+      connection_state: 'AdbConnected',
+      serial: 'E2E-ADB-DEVICE',
+      connection_label: 'ADB 已连接',
+      model: 'VIVO E2E',
+      android_version: '15',
+      battery_level: '88%',
+    });
 
     await openPage('FileManager');
+    await expect($('.nw-file-manager-connection')).toHaveText('ADB 已连接');
     await $('.nw-test-file-refresh').click();
     await $('.nw-test-file-delete').click();
 
