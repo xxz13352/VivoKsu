@@ -15,6 +15,7 @@ pub struct ProtectedReleaseProbeReport {
     pub probe_available: bool,
     pub vmprotect_is_protected: Option<bool>,
     pub vmprotect_is_valid_image_crc: Option<bool>,
+    pub build_id: Option<String>,
     pub exit_code: u8,
 }
 
@@ -24,6 +25,7 @@ impl ProtectedReleaseProbeReport {
             probe_available: false,
             vmprotect_is_protected: None,
             vmprotect_is_valid_image_crc: None,
+            build_id: None,
             exit_code: 44,
         }
     }
@@ -37,14 +39,19 @@ impl ProtectedReleaseProbeReport {
             }
         }
 
+        let build_id = self
+            .build_id
+            .as_ref()
+            .map_or_else(|| "null".to_string(), |value| serde_json::to_string(value).unwrap());
         format!(
             concat!(
                 r#"{{"schema":1,"mode":"nwflash-protected-release-probe","probe_available":{},"#,
-                r#""VMProtectIsProtected":{},"VMProtectIsValidImageCRC":{},"exit_code":{}}}"#
+                r#""VMProtectIsProtected":{},"VMProtectIsValidImageCRC":{},"build_id":{},"exit_code":{}}}"#
             ),
             self.probe_available,
             value(self.vmprotect_is_protected),
             value(self.vmprotect_is_valid_image_crc),
+            build_id,
             self.exit_code,
         )
     }
@@ -66,7 +73,12 @@ pub fn evaluate_protected_release_probe(
     }
 
     let observed = probe_release_image(probe);
-    let exit_code = if !observed.available {
+    let build_id = nwflash_infrastructure::compiled_build_id()
+        .ok()
+        .map(str::to_string);
+    let exit_code = if build_id.is_none() {
+        46
+    } else if !observed.available {
         43
     } else if observed.vmprotect_is_protected != Some(true) {
         41
@@ -80,6 +92,7 @@ pub fn evaluate_protected_release_probe(
         probe_available: observed.available,
         vmprotect_is_protected: observed.vmprotect_is_protected,
         vmprotect_is_valid_image_crc: observed.vmprotect_is_valid_image_crc,
+        build_id,
         exit_code,
     })
 }

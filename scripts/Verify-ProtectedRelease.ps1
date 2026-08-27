@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ReleaseRoot,
@@ -21,13 +24,15 @@ if ([string]::IsNullOrWhiteSpace($ResourceManifestPath)) {
 }
 $root = Get-NormalizedFullPath $ReleaseRoot
 if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw "Release root is missing: $root" }
+Assert-NoReparseAncestors $root
 
-$acceptedPath = Resolve-FullyQualifiedLeaf $AcceptedEvidence
+$acceptedChain = Assert-AcceptedEvidenceChain -AcceptedEvidence $AcceptedEvidence -Operations (New-DefaultProtectionOperations)
+$acceptedPath = [string]$acceptedChain.accepted_path
 $exeEvidencePath = Resolve-FullyQualifiedLeaf $ExeSignedEvidence
 $nsisEvidencePath = Resolve-FullyQualifiedLeaf $NsisBuiltEvidence
 $installerEvidencePath = Resolve-FullyQualifiedLeaf $InstallerSignedEvidence
 $installedEvidencePath = Resolve-FullyQualifiedLeaf $InstalledVerifiedEvidence
-$accepted = Read-ProtectedEvidence -Path $acceptedPath -ExpectedState 'accepted'
+$accepted = $acceptedChain.accepted
 $exeEvidence = Read-ProtectedEvidence -Path $exeEvidencePath -ExpectedState 'exe-signed'
 $nsisEvidence = Read-ProtectedEvidence -Path $nsisEvidencePath -ExpectedState 'nsis-built'
 $installerEvidence = Read-ProtectedEvidence -Path $installerEvidencePath -ExpectedState 'installer-signed'

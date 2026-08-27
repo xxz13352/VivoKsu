@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding()]
 param()
 
@@ -8,6 +11,7 @@ $contractPath = Join-Path $PSScriptRoot 'vmp\protected-release-contract.ps1'
 if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) {
     throw "Protected release contract is missing: $contractPath"
 }
+& (Join-Path $PSScriptRoot 'Test-PowerShellRuntimeBoundary.ps1')
 . $contractPath
 
 function Assert-Condition {
@@ -18,8 +22,12 @@ function Assert-Condition {
 function Assert-ThrowsLike {
     param([scriptblock]$Action, [string]$Pattern, [string]$Message)
     $rejected = $false
-    try { & $Action } catch { $rejected = $_.Exception.Message -like $Pattern }
-    Assert-Condition $rejected $Message
+    $observed = '<no exception>'
+    try { & $Action } catch {
+        $observed = $_.Exception.Message
+        $rejected = $observed -like $Pattern
+    }
+    Assert-Condition $rejected "$Message Observed: $observed"
 }
 
 function New-Amd64PeFixture {
@@ -59,13 +67,15 @@ function New-MarkerReviewFixture {
     param(
         [Parameter(Mandatory)][object]$Prepared,
         [Parameter(Mandatory)][string]$PreparedHash,
-        [Parameter(Mandatory)][string]$CompilerLogHash
+        [Parameter(Mandatory)][string]$CompilerLogHash,
+        [Parameter(Mandatory)][string]$ProtectedOutputHash
     )
     [ordered]@{
         schema = 1
         handoff_id = $Prepared.handoff_id
         prepared_manifest_sha256 = $PreparedHash
         compiler_log_sha256 = $CompilerLogHash
+        protected_output_sha256 = $ProtectedOutputHash
         vmprotect_edition = 'Lite'
         vmprotect_version = 'fixture-1.0'
         compiler_log_reviewed = $true
@@ -121,12 +131,54 @@ try {
         SignerCertificate = $null
         TimeStamperCertificate = $null
     }
+    $sdkFixture = [pscustomobject]@{
+        schema = 1
+        verified = $true
+        machine = 'AMD64'
+        sdk_dll_identity = 'VMProtectSDK64.dll'
+        required_symbols = @(Get-NwflashRequiredSdkImports)
+        required_symbol_count = 8
+        header_sha256 = '2300B7B4BB6BBF9CFA08013EC2D9B2FDCEB3DFD2E603CD1E24A493DE4D165B15'
+        import_library_sha256 = '9997A9C6E179010450385832A66EA36938E180FC9067D91FD6AAE7C9F6BF4D18'
+        sdk_dll_sha256 = 'EC3235136A4DAEE2A6F72C0F2994A8365CA8427C8068D068130B74C9FA64CD02'
+        files_copied = 0
+    }
+    $linkFixture = [pscustomobject]@{
+        schema = 1
+        verified = $true
+        sdk = $sdkFixture
+        link_layout = [pscustomobject]@{
+            schema = 1
+            verified = $true
+            machine = 'AMD64'
+            imported_dll = 'VMProtectSDK64.dll'
+            required_imports = @(Get-NwflashRequiredSdkImports)
+            markers = @(foreach ($marker in Get-NwflashProtectedMarkers) {
+                [pscustomobject]@{
+                    symbol = $marker.symbol
+                    mode = $marker.mode
+                    begin_count = 1
+                    end_count = 1
+                    verified = $true
+                }
+            })
+            files_copied = 0
+        }
+    }
     $operations = [pscustomobject]@{
         GetSignature = { param($Path) $unsignedSignature }
         AssertMatchingPdb = { param($Exe, $Pdb) }
         AssertMarkerLayout = { param($Exe, $Map) [pscustomobject]@{ verified = $true } }
-        VerifySdk = { param($Sdk) [pscustomobject]@{ schema = 1; sdk_root = $Sdk; verified = $true } }
-        VerifyLinkLayout = { param($Sdk) [pscustomobject]@{ schema = 1; sdk_root = $Sdk; verified = $true } }
+        AssertExpectedVmProtectImports = {
+            param($Path)
+            [pscustomobject]@{
+                verified = $true
+                imported_dll = 'VMProtectSDK64.dll'
+                required_imports = @(Get-NwflashRequiredSdkImports)
+            }
+        }
+        VerifySdk = { param($Sdk) $sdkFixture }.GetNewClosure()
+        VerifyLinkLayout = { param($Sdk) $linkFixture }.GetNewClosure()
         AssertNoVmProtectImports = { param($Path) }
         RunProbe = {
             param($Path, $Hash)
@@ -136,6 +188,7 @@ try {
                 VMProtectIsProtected = $true
                 VMProtectIsValidImageCRC = $true
                 observed_sha256 = $Hash
+                build_id = $env:NWFLASH_BUILD_ID
             }
         }
     }
@@ -183,7 +236,8 @@ try {
     [IO.File]::WriteAllText($compilerLog, 'VMProtect compiler fixture: no errors')
     $compilerLogHash = Get-Sha256Hex $compilerLog
     $reviewPath = Join-Path $operatorRoot 'marker-review.json'
-    New-MarkerReviewFixture -Prepared $prepared -PreparedHash $preparedHash -CompilerLogHash $compilerLogHash |
+    New-MarkerReviewFixture -Prepared $prepared -PreparedHash $preparedHash -CompilerLogHash $compilerLogHash `
+        -ProtectedOutputHash (Get-Sha256Hex $protectedOutput) |
         ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
 
     Assert-ThrowsLike {
@@ -191,6 +245,9 @@ try {
     } '*must differ from the unprotected input*' 'Accept allowed unchanged protected bytes.'
 
     New-Amd64PeFixture -Path $protectedOutput -Tail 2
+    New-MarkerReviewFixture -Prepared $prepared -PreparedHash $preparedHash -CompilerLogHash $compilerLogHash `
+        -ProtectedOutputHash (Get-Sha256Hex $protectedOutput) |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
     $acceptedPath = Invoke-AcceptManualOutputCore -PreparedManifest $preparedPath -MarkerReviewPath $reviewPath -Operations $operations
     $accepted = Get-Content -Raw -LiteralPath $acceptedPath | ConvertFrom-Json
     Assert-Condition ((Get-Item -LiteralPath $acceptedPath).IsReadOnly) 'accepted.json must be immutable.'
@@ -198,6 +255,64 @@ try {
     Assert-Condition ($accepted.previous_evidence_sha256 -eq $preparedHash) 'Accepted evidence is not hash-bound to prepared evidence.'
     Assert-Condition ($accepted.protected_output.sha256 -ne $accepted.input_exe_sha256) 'Accepted protected hash equals unprotected hash.'
     Assert-Condition ($accepted.is_protected -and $accepted.image_crc_valid) 'Accepted evidence omitted successful runtime oracles.'
+    $acceptedChain = Assert-AcceptedEvidenceChain -AcceptedEvidence $acceptedPath -Operations $operations
+    Assert-Condition ($acceptedChain.protected_output -eq $protectedOutput) 'Accepted evidence full-chain validation returned the wrong output.'
+
+    $forgedAccepted = Get-Content -Raw -LiteralPath $acceptedPath | ConvertFrom-Json -AsHashtable
+    $forgedAccepted.protected_output.path = [string]$prepared.input_exe.path
+    $forgedAccepted.protected_output.length = [long]$prepared.input_exe.length
+    $forgedAccepted.protected_output.sha256 = [string]$prepared.input_exe.sha256
+    $forgedPath = Write-AtomicEvidence -Path (Join-Path (Split-Path -Parent $acceptedPath) 'forged-accepted.json') -Value $forgedAccepted
+    Assert-ThrowsLike {
+        Assert-AcceptedEvidenceChain -AcceptedEvidence $forgedPath -Operations $operations
+    } '*protected output*' 'A self-consistent forged accepted document authorized the unprotected input.'
+
+    $signingRoot = Join-Path $testRoot 'signing-preflight'
+    $signingEvidenceRoot = Join-Path $signingRoot 'evidence'
+    $signingReleaseRoot = Join-Path $signingRoot 'release'
+    New-Item -ItemType Directory -Path $signingEvidenceRoot,$signingReleaseRoot | Out-Null
+    $packagingExe = Join-Path $signingReleaseRoot 'nwflash-desktop.exe'
+    Copy-Item -LiteralPath $protectedOutput -Destination $packagingExe
+    (Get-Item -LiteralPath $packagingExe).IsReadOnly = $false
+    [IO.File]::WriteAllBytes($packagingExe, [byte[]]((Get-Content -AsByteStream -Raw -LiteralPath $packagingExe) + 7))
+    $exeEvidencePath = Write-AtomicEvidence -Path (Join-Path $signingEvidenceRoot 'exe-signed.json') -Value ([ordered]@{
+        schema = 1
+        handoff_id = [string]$accepted.handoff_id
+        state = 'exe-signed'
+        created_utc = [DateTimeOffset]::UtcNow.ToString('o')
+        previous_evidence_sha256 = Get-Sha256Hex $acceptedPath
+        input_evidence_sha256 = Get-Sha256Hex $acceptedPath
+        input_evidence_path = $acceptedPath
+        target_path = $packagingExe
+        unsigned_sha256 = [string]$accepted.protected_output.sha256
+        signed_sha256 = Get-Sha256Hex $packagingExe
+    })
+    $installer = Join-Path $signingReleaseRoot 'nwflash-setup.exe'
+    [IO.File]::WriteAllBytes($installer, [byte[]](9, 8, 7, 6))
+    $installerHash = Get-Sha256Hex $installer
+    $nsisEvidencePath = Write-AtomicEvidence -Path (Join-Path $signingEvidenceRoot 'nsis-built.json') -Value ([ordered]@{
+        schema = 1
+        handoff_id = [string]$accepted.handoff_id
+        state = 'nsis-built'
+        created_utc = [DateTimeOffset]::UtcNow.ToString('o')
+        previous_evidence_sha256 = Get-Sha256Hex $exeEvidencePath
+        signed_exe_sha256 = Get-Sha256Hex $packagingExe
+        installer_path = $installer
+        installer_unsigned_sha256 = $installerHash
+    })
+    $installerChain = Assert-InstallerSigningTarget -Target $installer -ExpectedUnsignedSha256 $installerHash `
+        -NsisEvidence $nsisEvidencePath -Operations $operations
+    Assert-Condition ($installerChain.installer -eq $installer) 'Installer signing preflight returned the wrong target.'
+    $otherInstaller = Join-Path $signingReleaseRoot 'other-setup.exe'
+    [IO.File]::WriteAllBytes($otherInstaller, [byte[]](1, 1, 1, 1))
+    Assert-ThrowsLike {
+        Assert-InstallerSigningTarget -Target $otherInstaller -ExpectedUnsignedSha256 (Get-Sha256Hex $otherInstaller) `
+            -NsisEvidence $nsisEvidencePath -Operations $operations
+    } '*target path*' 'Installer signing accepted a target outside nsis-built evidence.'
+    Assert-ThrowsLike {
+        Assert-InstallerSigningTarget -Target $installer -ExpectedUnsignedSha256 ('0' * 64) `
+            -NsisEvidence $nsisEvidencePath -Operations $operations
+    } '*hash*' 'Installer signing accepted a hash outside nsis-built evidence.'
 
     foreach ($exitCode in 41, 42, 43, 44) {
         Assert-ThrowsLike {
@@ -207,9 +322,20 @@ try {
                 VMProtectIsProtected = ($exitCode -notin 41, 43, 44)
                 VMProtectIsValidImageCRC = ($exitCode -notin 42, 43, 44)
                 observed_sha256 = $accepted.protected_output.sha256
+                build_id = $env:NWFLASH_BUILD_ID
             }) -ExpectedSha256 $accepted.protected_output.sha256
         } "*exit code $exitCode*" "Probe exit code $exitCode was accepted."
     }
+    Assert-ThrowsLike {
+        Assert-ProtectedProbeResult -Result ([pscustomobject]@{
+            exit_code = 0
+            probe_available = $true
+            VMProtectIsProtected = $true
+            VMProtectIsValidImageCRC = $true
+            observed_sha256 = $accepted.protected_output.sha256
+            build_id = 'different-build'
+        }) -ExpectedSha256 $accepted.protected_output.sha256 -ExpectedBuildId $env:NWFLASH_BUILD_ID
+    } '*build identity*' 'Protected probe accepted an output from a different build.'
 
     $validSignature = New-ValidSignatureFixture
     $identity = Assert-AuthenticodeIdentity -Signature $validSignature -ExpectedThumbprint $env:NWFLASH_CERT_THUMBPRINT
@@ -226,7 +352,7 @@ try {
         Assert-AuthenticodeIdentity -Signature $missingTimestamp -ExpectedThumbprint $env:NWFLASH_CERT_THUMBPRINT
     } '*RFC3161 timestamp*' 'Missing timestamp evidence was accepted.'
 
-    Assert-ThrowsLike { Assert-ConsoleExecutable -Path (Join-Path $testRoot 'VMProtect.exe') } '*VMProtect_Con.exe*' 'Lite GUI was accepted as a console.'
+    Assert-ThrowsLike { Assert-ConsoleExecutable -Path (Join-Path $testRoot 'VMProtect_Con.exe') } '*disabled*' 'Automated VMProtect console execution was enabled.'
 
     $releaseRoot = Join-Path $testRoot 'release-fixture'
     New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'resources') | Out-Null
@@ -241,6 +367,43 @@ try {
         [IO.File]::WriteAllText($forbiddenPath, 'forbidden')
         Assert-ThrowsLike { Assert-ExactFileSet -Root $releaseRoot -AllowedRelativePaths $allowedRelease } '*Unexpected file*' "Release allowlist accepted $forbidden."
         Remove-Item -LiteralPath $forbiddenPath
+    }
+
+    if ($IsWindows) {
+        $reparseRoot = Join-Path $testRoot 'reparse-allowlist'
+        $reparseTarget = Join-Path $testRoot 'reparse-target'
+        New-Item -ItemType Directory -Path $reparseRoot | Out-Null
+        New-Item -ItemType Directory -Path $reparseTarget | Out-Null
+        [IO.File]::WriteAllText((Join-Path $reparseRoot 'marker.txt'), 'marker')
+        [IO.File]::WriteAllText((Join-Path $reparseTarget 'external.dll'), 'external')
+        $junction = Join-Path $reparseRoot 'resources'
+        New-Item -ItemType Junction -Path $junction -Target $reparseTarget | Out-Null
+        try {
+            Assert-ThrowsLike {
+                Assert-ExactFileSet -Root $reparseRoot -AllowedRelativePaths @('marker.txt')
+            } '*Reparse points*' 'Release allowlist traversed a junction.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }
+        }
+
+        $cleanupTarget = Join-Path $testRoot 'cleanup-target'
+        New-Item -ItemType Directory -Path $cleanupTarget | Out-Null
+        [IO.File]::WriteAllText((Join-Path $cleanupTarget 'must-survive.txt'), 'survive')
+        $cleanupJunction = Join-Path ([IO.Path]::GetTempPath()) ('nwflash-cleanup-guard-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Junction -Path $cleanupJunction -Target $cleanupTarget | Out-Null
+        try {
+            Assert-ThrowsLike {
+                Initialize-VerifiedInstallRoot -Path $cleanupJunction
+            } '*Reparse*' 'Installer preflight accepted a junction install root.'
+            Assert-ThrowsLike {
+                Remove-ValidatedTemporaryRoot -Root $cleanupJunction -Prefix 'nwflash-cleanup-guard-'
+            } '*reparse*' 'Validated cleanup accepted a junction root.'
+            Assert-Condition (Test-Path -LiteralPath (Join-Path $cleanupTarget 'must-survive.txt')) 'Junction cleanup touched the external target.'
+        }
+        finally {
+            if (Test-Path -LiteralPath $cleanupJunction) { Remove-Item -LiteralPath $cleanupJunction -Force }
+        }
     }
 
     $installRoot = Join-Path $testRoot 'installed-fixture'

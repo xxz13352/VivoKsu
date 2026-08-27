@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Path,
@@ -13,8 +16,21 @@ $ErrorActionPreference = 'Stop'
 
 $target = Resolve-FullyQualifiedLeaf $Path
 $evidencePath = Resolve-FullyQualifiedLeaf $InputEvidence
-$expectedInputState = if ($State -eq 'exe-signed') { 'accepted' } else { 'nsis-built' }
-$inputDocument = Read-ProtectedEvidence -Path $evidencePath -ExpectedState $expectedInputState
+if ($State -eq 'exe-signed') {
+    $acceptedChain = Assert-AcceptedEvidenceChain -AcceptedEvidence $evidencePath -Operations (New-DefaultProtectionOperations)
+    $inputDocument = $acceptedChain.accepted
+    if ($target.Equals([string]$acceptedChain.protected_output, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Signing must operate on a distinct packaging copy, never the immutable accepted output.'
+    }
+    if ($ExpectedUnsignedSha256.ToUpperInvariant() -ne [string]$inputDocument.protected_output.sha256) {
+        throw 'EXE signing hash is not bound to the accepted protected output.'
+    }
+}
+else {
+    $nsisChain = Assert-InstallerSigningTarget -Target $target -ExpectedUnsignedSha256 $ExpectedUnsignedSha256 `
+        -NsisEvidence $evidencePath -Operations (New-DefaultProtectionOperations)
+    $inputDocument = $nsisChain.nsis
+}
 $inputEvidenceHash = Get-Sha256Hex $evidencePath
 $unsignedHash = Get-Sha256Hex $target
 if ($unsignedHash -ne $ExpectedUnsignedSha256.ToUpperInvariant()) {
@@ -62,6 +78,7 @@ $document = [ordered]@{
     created_utc = [DateTimeOffset]::UtcNow.ToString('o')
     previous_evidence_sha256 = $inputEvidenceHash
     input_evidence_sha256 = $inputEvidenceHash
+    input_evidence_path = $evidencePath
     target_path = $target
     unsigned_sha256 = $unsignedHash
     signed_sha256 = $signedHash

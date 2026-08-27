@@ -74,7 +74,7 @@ pub use root_resources::{
     VivoRootToolResource,
 };
 pub use scrcpy_provisioner::{ScrcpyProvisionError, ScrcpyProvisioner};
-pub use session_security::{ProcessIdentity, SecretToken};
+pub use session_security::{compiled_build_id, ProcessIdentity, SecretToken};
 pub use vendor_boot::resolve_vendor_boot_module_directories;
 pub use version_client::{VersionCheckResult, VersionClient};
 pub use vivo_firmware::{

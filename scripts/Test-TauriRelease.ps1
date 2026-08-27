@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding()]
 param()
 
@@ -16,8 +19,12 @@ function Assert-Condition {
 function Assert-ThrowsLike {
     param([scriptblock]$Action, [string]$Pattern, [string]$Message)
     $rejected = $false
-    try { & $Action } catch { $rejected = $_.Exception.Message -like $Pattern }
-    Assert-Condition $rejected $Message
+    $observed = '<no exception>'
+    try { & $Action } catch {
+        $observed = $_.Exception.Message
+        $rejected = $observed -like $Pattern
+    }
+    Assert-Condition $rejected "$Message Observed: $observed"
 }
 
 $config = Get-Content -Raw -LiteralPath (Join-Path $tauri 'tauri.conf.json') | ConvertFrom-Json

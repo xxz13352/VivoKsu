@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$InstallerPath,
@@ -28,12 +31,13 @@ $generatedRoot = [string]::IsNullOrWhiteSpace($InstallRoot)
 if ($generatedRoot) {
     $InstallRoot = Join-Path ([IO.Path]::GetTempPath()) ('nwflash-tauri-installer-' + [Guid]::NewGuid().ToString('N'))
 }
-$installRootPath = Get-NormalizedFullPath $InstallRoot
-if (Test-Path -LiteralPath $installRootPath) {
-    if (Get-ChildItem -LiteralPath $installRootPath -Force | Select-Object -First 1) { throw "Install root must be fresh and empty: $installRootPath" }
-}
+$installRootPath = Initialize-VerifiedInstallRoot -Path $InstallRoot
 
 try {
+    Assert-NoReparseAncestors $installRootPath
+    if (@(Get-ReparseSafeTreeEntries -Root $installRootPath).Count -ne 0) {
+        throw "Install root changed before NSIS launch: $installRootPath"
+    }
     $installation = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installRootPath") -WindowStyle Hidden -Wait -PassThru
     if ($installation.ExitCode -ne 0) { throw "NSIS installation failed with exit code $($installation.ExitCode)." }
 

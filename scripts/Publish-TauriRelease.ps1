@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding(DefaultParameterSetName = 'PrepareManual')]
 param(
     [Parameter(Mandatory, ParameterSetName = 'PrepareManual')][switch]$PrepareManual,
@@ -22,8 +25,10 @@ $resourceManifestPath = Join-Path $repo 'packaging\release\tauri-resources.json'
 
 function Invoke-CheckedExternalCommand {
     param([Parameter(Mandatory)][string]$Description, [Parameter(Mandatory)][scriptblock]$Command)
+    $global:LASTEXITCODE = 0
     & $Command
-    if ($LASTEXITCODE -ne 0) { throw "$Description failed with exit code $LASTEXITCODE." }
+    $exitCode = $global:LASTEXITCODE
+    if ($exitCode -ne 0) { throw "$Description failed with exit code $exitCode." }
 }
 
 function Get-ResourceEntries {
@@ -87,9 +92,22 @@ function Resolve-CargoTargetRoot {
 }
 
 $resourceEntries = @(Get-ResourceEntries)
+Invoke-CheckedExternalCommand -Description 'PowerShell 7 runtime boundary' -Command {
+    & (Join-Path $PSScriptRoot 'Test-PowerShellRuntimeBoundary.ps1')
+}
 
 if ($PSCmdlet.ParameterSetName -eq 'PrepareManual') {
-    Assert-ProtectedBuildEnvironment | Out-Null
+    $protectedEnvironment = Assert-ProtectedBuildEnvironment
+    Invoke-CheckedExternalCommand -Description 'Pinned VMProtect SDK identity' -Command {
+        $sdkIdentity = & (Join-Path $PSScriptRoot 'vmp\verify-sdk.ps1') -SdkRoot $protectedEnvironment.sdk_root -AsJson | ConvertFrom-Json
+        if (-not [bool]$sdkIdentity.verified -or [int]$sdkIdentity.files_copied -ne 0) {
+            throw 'Pinned VMProtect SDK identity preflight failed.'
+        }
+    }
+    Invoke-CheckedExternalCommand -Description 'VMProtect link and marker contracts' -Command {
+        $layout = & (Join-Path $PSScriptRoot 'vmp\test-contracts.ps1') -SdkRoot $protectedEnvironment.sdk_root -AsJson | ConvertFrom-Json
+        if (-not [bool]$layout.verified) { throw 'VMProtect link/marker preflight failed.' }
+    }
     Invoke-CheckedExternalCommand -Description 'Frontend capability and Cargo graph tests' -Command {
         npm --prefix $desktop test -- --run src/windowPermissions.test.ts
     }
@@ -135,8 +153,9 @@ if ($PSCmdlet.ParameterSetName -eq 'Development') {
     return
 }
 
-$acceptedPath = Resolve-FullyQualifiedLeaf $AcceptedEvidence
-$accepted = Read-ProtectedEvidence -Path $acceptedPath -ExpectedState 'accepted'
+$acceptedChain = Assert-AcceptedEvidenceChain -AcceptedEvidence $AcceptedEvidence -Operations (New-DefaultProtectionOperations)
+$acceptedPath = [string]$acceptedChain.accepted_path
+$accepted = $acceptedChain.accepted
 if ([string]::IsNullOrWhiteSpace($env:NWFLASH_CERT_THUMBPRINT)) {
     throw 'NWFLASH_CERT_THUMBPRINT is required only when protected Finalize signing begins.'
 }

@@ -9,6 +9,18 @@ use crate::pinned_tls::IntegrityFailure;
 
 const RANDOM_ID_BYTES: usize = 24;
 
+pub fn compiled_build_id() -> Result<&'static str, IntegrityFailure> {
+    #[cfg(debug_assertions)]
+    let build_id = option_env!("NWFLASH_BUILD_ID").unwrap_or("debug-build");
+    #[cfg(not(debug_assertions))]
+    let build_id = option_env!("NWFLASH_BUILD_ID").ok_or(IntegrityFailure::MissingBuildIdentity)?;
+
+    if !valid_bound_identifier(build_id, 128) {
+        return Err(IntegrityFailure::InvalidProcessIdentity);
+    }
+    Ok(build_id)
+}
+
 /// A bearer token whose owned storage is zeroized on replacement and drop.
 pub struct SecretToken(Zeroizing<String>);
 
@@ -63,13 +75,7 @@ pub struct ProcessIdentity {
 
 impl ProcessIdentity {
     pub fn generate() -> Result<Self, IntegrityFailure> {
-        #[cfg(debug_assertions)]
-        let build_id = option_env!("NWFLASH_BUILD_ID").unwrap_or("debug-build");
-        #[cfg(not(debug_assertions))]
-        let build_id =
-            option_env!("NWFLASH_BUILD_ID").ok_or(IntegrityFailure::MissingBuildIdentity)?;
-
-        Self::new(build_id, random_identifier("")?)
+        Self::new(compiled_build_id()?, random_identifier("")?)
     }
 
     #[cfg(debug_assertions)]

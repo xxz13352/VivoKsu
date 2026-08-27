@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding()]
 param(
     [switch]$DryRun,
@@ -7,13 +10,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'vmp\protected-release-contract.ps1')
 if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) {
     $ReleaseRoot = Join-Path $repo 'artifacts\tauri-release'
 }
 if ([string]::IsNullOrWhiteSpace($ResourceManifestPath)) {
     $ResourceManifestPath = Join-Path $repo 'packaging\release\tauri-resources.json'
 }
-$root = [IO.Path]::GetFullPath($ReleaseRoot)
+$root = Get-NormalizedFullPath $ReleaseRoot
 
 if ($DryRun) {
     Write-Host "Dry-run release root: $root"
@@ -36,10 +40,8 @@ function Get-SafeRelativePath {
 }
 
 function Get-ResourceEntries {
-    if (-not (Test-Path -LiteralPath $ResourceManifestPath -PathType Leaf)) {
-        throw "Resource allowlist is missing: $ResourceManifestPath"
-    }
-    $document = Get-Content -Raw -LiteralPath $ResourceManifestPath | ConvertFrom-Json
+    $manifestFile = Resolve-FullyQualifiedLeaf $ResourceManifestPath
+    $document = Get-Content -Raw -LiteralPath $manifestFile | ConvertFrom-Json
     $entries = @($document.resources)
     if ($entries.Count -eq 0) {
         throw 'Resource allowlist cannot be empty.'
@@ -50,9 +52,7 @@ function Get-ResourceEntries {
 function Get-ReleaseManifest {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw 'Release SHA-256 manifest is missing.'
-    }
+    $Path = Resolve-FullyQualifiedLeaf $Path
 
     $entries = @{}
     foreach ($line in Get-Content -LiteralPath $Path) {
@@ -87,17 +87,18 @@ function Get-ReleaseRelativePath {
 if (-not (Test-Path -LiteralPath $root -PathType Container)) {
     throw "Release root is missing: $root"
 }
-$executable = Join-Path $root 'nwflash-desktop.exe'
-if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-    throw 'Release executable is missing.'
-}
-$installers = @(Get-ChildItem -LiteralPath $root -File -Filter '*-setup.exe' -ErrorAction SilentlyContinue)
+Assert-NoReparseAncestors $root
+$releaseEntries = @(Get-ReparseSafeTreeEntries -Root $root)
+$executable = Resolve-FullyQualifiedLeaf (Join-Path $root 'nwflash-desktop.exe')
+$installers = @($releaseEntries | Where-Object {
+    -not $_.PSIsContainer -and $_.DirectoryName -eq $root -and $_.Name -like '*-setup.exe'
+})
 if ($installers.Count -ne 1) {
     throw 'Release NSIS installer is missing or ambiguous.'
 }
 
 foreach ($dotnetArtifact in @('*.runtimeconfig.json', '*.deps.json', 'hostfxr.dll', 'hostpolicy.dll', 'coreclr.dll')) {
-    if (Get-ChildItem -LiteralPath $root -Recurse -File -Filter $dotnetArtifact) {
+    if ($releaseEntries | Where-Object { -not $_.PSIsContainer -and $_.Name -like $dotnetArtifact }) {
         throw "Release contains a .NET runtime artifact: $dotnetArtifact"
     }
 }
@@ -131,9 +132,7 @@ foreach ($relative in $expectedPaths.Keys) {
         throw "Release resource hash is not the approved hash: $relative"
     }
     $path = Join-Path $root $relative.Replace('/', '\')
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Release file is missing: $relative"
-    }
+    $path = Resolve-FullyQualifiedLeaf $path
     $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
     if ($actual -ne $manifest[$relative]) {
         throw "Release SHA-256 mismatch: $relative"
@@ -141,7 +140,7 @@ foreach ($relative in $expectedPaths.Keys) {
 }
 
 $ignored = @('SHA256SUMS.txt', '.nwflash-tauri-release')
-foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)) {
+foreach ($file in @($releaseEntries | Where-Object { -not $_.PSIsContainer })) {
     $relative = Get-ReleaseRelativePath -Path $file.FullName
     if ($ignored -contains $relative) {
         continue

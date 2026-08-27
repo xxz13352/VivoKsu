@@ -1,3 +1,6 @@
+#requires -Version 7.4
+#requires -PSEdition Core
+
 [CmdletBinding()]
 param(
     [Parameter()]
@@ -10,6 +13,9 @@ $ErrorActionPreference = 'Stop'
 
 $Amd64Machine = 0x8664
 $ExpectedSdkDll = 'VMProtectSDK64.dll'
+$ExpectedHeaderSha256 = '2300B7B4BB6BBF9CFA08013EC2D9B2FDCEB3DFD2E603CD1E24A493DE4D165B15'
+$ExpectedImportLibrarySha256 = '9997A9C6E179010450385832A66EA36938E180FC9067D91FD6AAE7C9F6BF4D18'
+$ExpectedSdkDllSha256 = 'EC3235136A4DAEE2A6F72C0F2994A8365CA8427C8068D068130B74C9FA64CD02'
 $RequiredSymbols = @(
     'VMProtectBeginVirtualization',
     'VMProtectBeginMutation',
@@ -42,7 +48,27 @@ function Resolve-RequiredLeaf {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "$Description is missing at the required path: $Path"
     }
-    return (Resolve-Path -LiteralPath $Path).ProviderPath
+    $resolved = (Resolve-Path -LiteralPath $Path).ProviderPath
+    Assert-NoReparseAncestors -Path $resolved
+    return $resolved
+}
+
+function Assert-NoReparseAncestors {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $cursor = [IO.Path]::GetFullPath($Path)
+    while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [string]$item.LinkType -in @('SymbolicLink', 'Junction')) {
+                throw "VMProtect SDK paths may not traverse a reparse point: $cursor"
+            }
+        }
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) { break }
+        $cursor = $parent
+    }
 }
 
 function Get-UInt16LittleEndian {
@@ -258,9 +284,18 @@ if (-not (Test-Path -LiteralPath $SdkRoot -PathType Container)) {
 }
 
 $resolvedRoot = (Resolve-Path -LiteralPath $SdkRoot).ProviderPath
+Assert-NoReparseAncestors -Path $resolvedRoot
 $headerPath = Resolve-RequiredLeaf -Path (Join-Path $resolvedRoot 'Include\C\VMProtectSDK.h') -Description 'VMProtect C header'
 $libraryPath = Resolve-RequiredLeaf -Path (Join-Path $resolvedRoot 'Lib\Windows\VMProtectSDK64.lib') -Description 'VMProtect x64 import library'
 $dllPath = Resolve-RequiredLeaf -Path (Join-Path $resolvedRoot 'Lib\Windows\VMProtectSDK64.dll') -Description 'VMProtect x64 SDK DLL'
+
+$headerHash = (Get-FileHash -LiteralPath $headerPath -Algorithm SHA256).Hash.ToUpperInvariant()
+$libraryHash = (Get-FileHash -LiteralPath $libraryPath -Algorithm SHA256).Hash.ToUpperInvariant()
+$dllHash = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash.ToUpperInvariant()
+if ($headerHash -ne $ExpectedHeaderSha256 -or $libraryHash -ne $ExpectedImportLibrarySha256 -or
+    $dllHash -ne $ExpectedSdkDllSha256) {
+    throw 'VMProtect SDK identity hash mismatch; expected Lite v3.10.4 Build 2668 x64 SDK files.'
+}
 
 $normalizedHeader = ((Get-Content -LiteralPath $headerPath -Raw) -replace '\s+', ' ').Trim()
 foreach ($declaration in $RequiredDeclarations) {
@@ -281,9 +316,9 @@ $result = [ordered]@{
     sdk_dll_identity = $ExpectedSdkDll
     required_symbols = @($RequiredSymbols)
     required_symbol_count = $RequiredSymbols.Count
-    header_sha256 = (Get-FileHash -LiteralPath $headerPath -Algorithm SHA256).Hash.ToUpperInvariant()
-    import_library_sha256 = (Get-FileHash -LiteralPath $libraryPath -Algorithm SHA256).Hash.ToUpperInvariant()
-    sdk_dll_sha256 = (Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    header_sha256 = $headerHash
+    import_library_sha256 = $libraryHash
+    sdk_dll_sha256 = $dllHash
     files_copied = 0
 }
 if ($AsJson) {
