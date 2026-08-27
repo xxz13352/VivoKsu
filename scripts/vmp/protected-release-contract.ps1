@@ -665,9 +665,9 @@ function Invoke-PrepareManualHandoffCore {
             throw "Handoff copy hash/length mismatch: $($pair[1])"
         }
     }
-    & $Operations.AssertMatchingPdb $copiedExe $copiedPdb
-    & $Operations.AssertExpectedVmProtectImports $copiedExe | Out-Null
-    & $Operations.AssertMarkerLayout $copiedExe $copiedMap | Out-Null
+    # The source EXE/PDB/MAP were fully validated above. Exact length and SHA-256
+    # equality transfer those proofs to the immutable handoff copies without a
+    # second 90+ MiB dumpbin disassembly pass that can truncate under pressure.
     foreach ($path in @($copiedExe, $copiedPdb, $copiedMap)) { (Get-Item -LiteralPath $path).IsReadOnly = $true }
 
     & $Operations.AssertGitClean
