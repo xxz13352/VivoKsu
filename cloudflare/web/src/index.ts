@@ -10,6 +10,18 @@
  */
 
 import adminHtml from "./admin.html";
+import {
+  exportTracesV2,
+  getAppVersionsSummaryV2,
+  getTraceEventV2,
+  getTraceOutputV2,
+  getTraceOverviewV2,
+  getTraceRunV2,
+  listRomLogsV2,
+  listTraceRunsV2,
+  listTraceUsersV2,
+  traceQueryErrorResponse,
+} from "./trace-v2-query";
 
 export interface Env {
   /** D1 绑定(nwflash-db) */
@@ -63,6 +75,9 @@ export default {
       return json({ error: "Not found" }, 404);
     } catch (e) {
       console.error("unhandled", e);
+      if (isFrozenAdminApiPath(url.pathname)) {
+        return traceQueryErrorResponse(request, 500, "TRACE_INTERNAL", "内部错误。");
+      }
       return json({ error: "内部错误。" }, 500);
     }
   },
@@ -84,17 +99,29 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   // CSRF 兜底:所有状态变更请求必须带 X-Requested-With(与 admin.html 的 fetch 配套)。
   // 登录除外(跨站表单无法自定义该头,此处覆盖登录后的全部写操作)。
   if (method !== "GET" && request.headers.get("X-Requested-With") !== "XMLHttpRequest") {
+    if (isFrozenAdminApiPath(path)) {
+      return traceQueryErrorResponse(request, 403, "TRACE_FORBIDDEN", "请求缺少必要请求头。");
+    }
     return json({ error: "请求缺少必要请求头。" }, 403);
   }
 
   // 以下全部需要管理员会话
   const admin = await requireAdmin(request, env);
-  if (admin instanceof Response) return admin; // 401
+  if (admin instanceof Response) {
+    if (isFrozenAdminApiPath(path)) {
+      return traceQueryErrorResponse(request, 401, "TRACE_UNAUTHORIZED", "未登录或会话已过期。");
+    }
+    return admin; // 401
+  }
 
   if (path === "/api/change-password" && method === "POST")
     return changePassword(request, admin, env);
 
   // Nwflash 版本控制(强制更新)
+  if (path === "/api/app-versions/summary") {
+    if (method === "GET") return getAppVersionsSummaryV2(request, env);
+    return traceQueryErrorResponse(request, 405, "TRACE_INVALID", "该接口只支持 GET。");
+  }
   if (path === "/api/app-versions" && method === "GET") return listAppVersions(env);
   if (path === "/api/app-versions" && method === "POST") return addAppVersion(request, env);
   if (path.startsWith("/api/app-versions/") && method === "PUT") return updateAppVersion(request, path, env);
@@ -116,10 +143,59 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   if (path === "/api/online/kick" && method === "POST") return kickOnline(request, admin, env);
 
   // 使用日志(管理端)
+  if (path === "/api/usage-logs/v2/users" && method === "GET")
+    return listTraceUsersV2(request, url, env);
+  if (path === "/api/usage-logs/v2/runs" && method === "GET")
+    return listTraceRunsV2(request, url, env);
+  if (path === "/api/usage-logs/v2/overview" && method === "GET")
+    return getTraceOverviewV2(request, url, env);
+  if (path === "/api/usage-logs/v2/export" && method === "GET")
+    return exportTracesV2(request, url, admin, env);
+
+  const outputMatch = path.match(/^\/api\/usage-logs\/v2\/runs\/([^/]+)\/events\/([^/]+)\/output$/);
+  if (outputMatch && method === "GET") {
+    const segments = decodeTraceRouteSegments(request, outputMatch[1], outputMatch[2]);
+    if (segments instanceof Response) return segments;
+    return getTraceOutputV2(request, segments[0], segments[1], url, admin, env);
+  }
+  const eventMatch = path.match(/^\/api\/usage-logs\/v2\/runs\/([^/]+)\/events\/([^/]+)$/);
+  if (eventMatch && method === "GET") {
+    const segments = decodeTraceRouteSegments(request, eventMatch[1], eventMatch[2]);
+    if (segments instanceof Response) return segments;
+    return getTraceEventV2(request, segments[0], segments[1], env);
+  }
+  const runMatch = path.match(/^\/api\/usage-logs\/v2\/runs\/([^/]+)$/);
+  if (runMatch && method === "GET") {
+    const segments = decodeTraceRouteSegments(request, runMatch[1]);
+    if (segments instanceof Response) return segments;
+    return getTraceRunV2(request, segments[0], env);
+  }
+
+  if (path === "/api/rom-logs/v2" && method === "GET")
+    return listRomLogsV2(request, url, env);
+
   if (path === "/api/usage-logs/kinds" && method === "GET") return usageLogKinds(env);
   if (path === "/api/usage-logs" && method === "GET") return listUsageLogs(url, env);
 
+  if (isFrozenAdminApiPath(path)) {
+    return traceQueryErrorResponse(request, 404, "TRACE_INVALID", "接口不存在。");
+  }
   return json({ error: "Not found" }, 404);
+}
+
+function isFrozenAdminApiPath(path: string): boolean {
+  return path === "/api/usage-logs/v2"
+    || path.startsWith("/api/usage-logs/v2/")
+    || path === "/api/app-versions/summary"
+    || path === "/api/rom-logs/v2";
+}
+
+function decodeTraceRouteSegments(request: Request, ...encoded: string[]): string[] | Response {
+  try {
+    return encoded.map((segment) => decodeURIComponent(segment));
+  } catch {
+    return traceQueryErrorResponse(request, 400, "TRACE_INVALID", "路径参数编码无效。");
+  }
 }
 
 /* ------------------------------------------------------------------ */
