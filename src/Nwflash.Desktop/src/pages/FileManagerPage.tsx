@@ -2,6 +2,7 @@ import { errorMessage } from '../app/error';
 import { FC, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import type { DeviceSnapshotPayload } from '../app/ipc-events';
 import { ModalLayer } from '../components/ModalLayer';
 
 type DeviceFileEntry = {
@@ -24,7 +25,9 @@ const parentDirectory = (path: string) => {
   return index <= 0 ? '/' : trimmed.slice(0, index);
 };
 
-export const FileManagerPage: FC = () => {
+export const FileManagerPage: FC<{
+  deviceSnapshot?: DeviceSnapshotPayload | null;
+}> = ({ deviceSnapshot }) => {
   const [currentRemotePath, setCurrentRemotePath] = useState('/sdcard');
   const [remoteEntries, setRemoteEntries] = useState<readonly DeviceFileEntry[]>([]);
   const [selectedRemote, setSelectedRemote] = useState<DeviceFileEntry | null>(null);
@@ -32,8 +35,15 @@ export const FileManagerPage: FC = () => {
   const [pendingDelete, setPendingDelete] = useState<DeviceFileEntry | null>(null);
   const [operationStatus, setOperationStatus] = useState('');
   const [errorText, setErrorText] = useState('');
+  const hasAdbConnection = deviceSnapshot?.connection_state === 'AdbConnected';
+  const connectionLabel = hasAdbConnection
+    ? deviceSnapshot?.connection_label || '设备已连接'
+    : deviceSnapshot?.connection_state === 'FastbootConnected'
+      ? 'Fastboot 模式，文件管理不可用'
+      : '等待连接';
 
   const refreshRemote = async (path = currentRemotePath) => {
+    if (!hasAdbConnection) return;
     setErrorText('');
     setIsRefreshingRemote(true);
     try {
@@ -48,6 +58,7 @@ export const FileManagerPage: FC = () => {
   };
 
   const downloadEntry = async (entry: DeviceFileEntry) => {
+    if (!hasAdbConnection) return;
     const destinationPath = await save({ defaultPath: entry.name });
     if (typeof destinationPath !== 'string') return;
     setErrorText('');
@@ -64,6 +75,7 @@ export const FileManagerPage: FC = () => {
   };
 
   const uploadFile = async () => {
+    if (!hasAdbConnection) return;
     const sourcePath = await open({ multiple: false, directory: false });
     if (typeof sourcePath !== 'string') return;
     setErrorText('');
@@ -78,6 +90,7 @@ export const FileManagerPage: FC = () => {
   };
 
   const installApk = async () => {
+    if (!hasAdbConnection) return;
     const apkPath = await open({
       multiple: false,
       directory: false,
@@ -95,7 +108,7 @@ export const FileManagerPage: FC = () => {
   };
 
   const confirmDelete = async () => {
-    if (!pendingDelete) return;
+    if (!hasAdbConnection || !pendingDelete) return;
     const target = pendingDelete;
     setErrorText('');
     setOperationStatus('');
@@ -118,7 +131,7 @@ export const FileManagerPage: FC = () => {
           <h1>文件管理</h1>
           <p>以设备目录为中心的可视化传输工作台</p>
         </div>
-        <p className="nw-file-manager-connection"><span aria-hidden="true" />等待连接</p>
+        <p className="nw-file-manager-connection"><span aria-hidden="true" />{connectionLabel}</p>
       </header>
 
       <section className="nw-file-manager-workbench" aria-label="设备文件">
@@ -126,25 +139,30 @@ export const FileManagerPage: FC = () => {
           <button
             type="button"
             className="nw-test-file-refresh nw-file-manager-primary-action"
-            disabled={isRefreshingRemote}
+            disabled={!hasAdbConnection || isRefreshingRemote}
             onClick={() => void refreshRemote()}
           >
             加载目录
           </button>
-          <button type="button" className="nw-test-file-upload" onClick={() => void uploadFile()}>
+          <button
+            type="button"
+            className="nw-test-file-upload"
+            disabled={!hasAdbConnection}
+            onClick={() => void uploadFile()}
+          >
             传入文件到手机
           </button>
           <button
             type="button"
             className="nw-test-file-toolbar-download"
-            disabled={!selectedRemote || selectedRemote.is_directory || isRefreshingRemote}
+            disabled={!hasAdbConnection || !selectedRemote || selectedRemote.is_directory || isRefreshingRemote}
             onClick={() => selectedRemote && void downloadEntry(selectedRemote)}
           >
             传出文件到电脑
           </button>
           <button
             type="button"
-            disabled={isRefreshingRemote}
+            disabled={!hasAdbConnection || isRefreshingRemote}
             onClick={() => void refreshRemote()}
           >
             刷新目录
@@ -152,18 +170,23 @@ export const FileManagerPage: FC = () => {
           <button
             type="button"
             className="nw-test-file-remote-up"
-            disabled={currentRemotePath === '/' || isRefreshingRemote}
+            disabled={!hasAdbConnection || currentRemotePath === '/' || isRefreshingRemote}
             onClick={() => void refreshRemote(parentDirectory(currentRemotePath))}
           >
             返回上级
           </button>
-          <button type="button" className="nw-test-file-install-apk" onClick={() => void installApk()}>
+          <button
+            type="button"
+            className="nw-test-file-install-apk"
+            disabled={!hasAdbConnection}
+            onClick={() => void installApk()}
+          >
             安装 APK
           </button>
           <button
             type="button"
             className="nw-test-file-toolbar-delete"
-            disabled={!selectedRemote || isRefreshingRemote}
+            disabled={!hasAdbConnection || !selectedRemote || isRefreshingRemote}
             onClick={() => selectedRemote && setPendingDelete(selectedRemote)}
           >
             删除
@@ -181,7 +204,7 @@ export const FileManagerPage: FC = () => {
                 type="button"
                 className="nw-test-file-entry"
                 aria-pressed={!entry.is_directory && selectedRemote?.full_path === entry.full_path}
-                disabled={isRefreshingRemote}
+                disabled={!hasAdbConnection || isRefreshingRemote}
                 onClick={() => {
                   if (entry.is_directory) {
                     void refreshRemote(entry.full_path);
@@ -200,7 +223,7 @@ export const FileManagerPage: FC = () => {
                 <button
                   type="button"
                   className="nw-test-file-download"
-                  disabled={entry.is_directory || isRefreshingRemote}
+                  disabled={!hasAdbConnection || entry.is_directory || isRefreshingRemote}
                   onClick={() => void downloadEntry(entry)}
                 >
                   下载
@@ -208,7 +231,7 @@ export const FileManagerPage: FC = () => {
                 <button
                   type="button"
                   className="nw-test-file-delete"
-                  disabled={isRefreshingRemote}
+                  disabled={!hasAdbConnection || isRefreshingRemote}
                   onClick={() => setPendingDelete(entry)}
                 >
                   删除
@@ -224,7 +247,7 @@ export const FileManagerPage: FC = () => {
           {errorText ? <p className="nw-error-text">{errorText}</p> : null}
         </section>
         <footer>
-          <span>等待连接</span>
+          <span>{connectionLabel}</span>
           <span>ADB 文件传输</span>
         </footer>
       </section>
@@ -239,7 +262,12 @@ export const FileManagerPage: FC = () => {
           <button type="button" onClick={() => setPendingDelete(null)}>
             取消
           </button>
-          <button type="button" className="nw-test-file-delete-confirm" onClick={() => void confirmDelete()}>
+          <button
+            type="button"
+            className="nw-test-file-delete-confirm"
+            disabled={!hasAdbConnection}
+            onClick={() => void confirmDelete()}
+          >
             删除
           </button>
         </div>

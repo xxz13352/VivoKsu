@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import type { DeviceSnapshotPayload } from '../app/ipc-events';
 import { FileManagerPage } from './FileManagerPage';
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -19,6 +20,14 @@ type Unmount = ReturnType<typeof createRoot>;
 
 let host: HTMLDivElement;
 let root: Unmount;
+const adbSnapshot: DeviceSnapshotPayload = {
+  connection_state: 'AdbConnected',
+  serial: 'RF8T123',
+  connection_label: 'ADB 已连接',
+  model: 'V2318A',
+  android_version: '15',
+  battery_level: '78%',
+};
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
 const waitUntil = async (predicate: () => boolean, timeoutMs = 1000) => {
   const start = Date.now();
@@ -33,7 +42,7 @@ const waitUntil = async (predicate: () => boolean, timeoutMs = 1000) => {
 
 const renderFileManager = () => {
   flushSync(() => {
-    root.render(<FileManagerPage />);
+    root.render(<FileManagerPage deviceSnapshot={adbSnapshot} />);
   });
 };
 
