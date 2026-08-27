@@ -124,7 +124,9 @@ if ($PSCmdlet.ParameterSetName -eq 'PrepareManual') {
     $targetRoot = Resolve-CargoTargetRoot
     $releaseDirectory = Join-Path $targetRoot 'release'
     $exe = Resolve-FullyQualifiedLeaf (Join-Path $releaseDirectory 'nwflash-desktop.exe')
-    $pdbCandidates = @('nwflash-desktop.pdb', 'nwflash_desktop.pdb') | ForEach-Object { Join-Path $releaseDirectory $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    $pdbCandidates = @(@('nwflash-desktop.pdb', 'nwflash_desktop.pdb') |
+        ForEach-Object { Join-Path $releaseDirectory $_ } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     if ($pdbCandidates.Count -ne 1) { throw "Expected exactly one protected desktop PDB under $releaseDirectory." }
     $map = Resolve-FullyQualifiedLeaf (Join-Path $releaseDirectory 'nwflash-desktop.map')
     & (Join-Path $PSScriptRoot 'vmp\prepare-manual-handoff.ps1') -InputExe $exe -InputPdb $pdbCandidates[0] -InputMap $map `
