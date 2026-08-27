@@ -9,7 +9,9 @@
     "build": "vite build",
     "build:e2e": "set VITE_NWFLASH_WDIO_E2E=true&& vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "npm run test:ui && npm run test:capabilities",
+    "test:ui": "vitest run --exclude src/windowPermissions.test.ts",
+    "test:capabilities": "vitest run src/windowPermissions.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -109,7 +109,7 @@ if ($PSCmdlet.ParameterSetName -eq 'PrepareManual') {
         if (-not [bool]$layout.verified) { throw 'VMProtect link/marker preflight failed.' }
     }
     Invoke-CheckedExternalCommand -Description 'Frontend capability and Cargo graph tests' -Command {
-        npm --prefix $desktop test -- --run src/windowPermissions.test.ts
+        npm --prefix $desktop run test:capabilities
     }
     Invoke-CheckedExternalCommand -Description 'Rust protection probe tests' -Command {
         cargo test --manifest-path (Join-Path $tauri 'Cargo.toml') -p nwflash-protection --test vmp_probe
