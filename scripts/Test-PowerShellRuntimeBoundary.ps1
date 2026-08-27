@@ -22,6 +22,7 @@ $entrypoints = @(
     'scripts\Verify-ProtectedRelease.ps1'
     'scripts\Verify-TauriRelease.ps1'
     'scripts\vmp\accept-manual-output.ps1'
+    'scripts\vmp\cleanup-generated-preflight.ps1'
     'scripts\vmp\prepare-manual-handoff.ps1'
     'scripts\vmp\protected-release-contract.ps1'
     'scripts\vmp\test-contracts.ps1'
