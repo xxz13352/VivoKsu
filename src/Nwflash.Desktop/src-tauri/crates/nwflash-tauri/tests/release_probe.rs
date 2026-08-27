@@ -52,10 +52,17 @@ fn exact_probe_argument_returns_machine_readable_success() {
 
     assert_eq!(report.exit_code, 0);
     assert_eq!(probe.calls.load(Ordering::Acquire), 1);
+    let json: serde_json::Value = serde_json::from_str(&report.to_json_line()).unwrap();
+    assert_eq!(json["schema"], 1);
+    assert_eq!(json["mode"], "nwflash-protected-release-probe");
+    assert_eq!(json["probe_available"], true);
+    assert_eq!(json["VMProtectIsProtected"], true);
+    assert_eq!(json["VMProtectIsValidImageCRC"], true);
     assert_eq!(
-        report.to_json_line(),
-        r#"{"schema":1,"mode":"nwflash-protected-release-probe","probe_available":true,"VMProtectIsProtected":true,"VMProtectIsValidImageCRC":true,"build_id":"debug-build","exit_code":0}"#
+        json["build_id"],
+        nwflash_infrastructure::compiled_build_id().unwrap()
     );
+    assert_eq!(json["exit_code"], 0);
 }
 
 #[test]
