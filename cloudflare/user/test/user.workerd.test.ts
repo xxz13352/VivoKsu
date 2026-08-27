@@ -2,6 +2,8 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations, reset, type D1Migration } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import apiWorker, { type Env as ApiWorkerEnv } from "../../src/index";
+import { tokenSha256 } from "../../src/security";
 import userWorker, { type Env as WorkerEnv } from "../src/index";
 
 declare module "cloudflare:workers" {
@@ -148,6 +150,81 @@ describe("personal ops Worker with real Workerd D1", () => {
     expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
     expect(await storedString("SELECT token AS value FROM api_users WHERE id = 7")).toMatch(/^revoked:[0-9a-f]{64}$/);
   });
+
+  it("hands a password revocation from the user Worker to a signed shared API session", async () => {
+    const oldToken = await seedUserAndSessions();
+    await env.DB.prepare(
+      `INSERT INTO app_versions (version, min_version, download_url, note, enabled)
+       VALUES ('2.0.0', '1.4.0', 'https://example.test/nwflash', 'handoff gate', 1)`,
+    ).run();
+    const signing = await ephemeralSigningFixture();
+    const apiEnv: ApiWorkerEnv = {
+      DB: env.DB,
+      VOTA_API_TOKEN: "unused-in-handoff-test",
+      SESSION_SIGNING_PRIVATE_KEY_PKCS8: signing.secret,
+    };
+
+    const changed = await changePassword(cookie(oldToken), PASSWORD, NEW_PASSWORD);
+    const revokedMarker = await storedToken();
+
+    expect(changed.status).toBe(200);
+    expect(revokedMarker).toMatch(/^revoked:[0-9a-f]{64}$/);
+    expect(await scalar("SELECT COUNT(*) AS value FROM session_leases WHERE user_id = 7")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions WHERE user_id = 7")).toBe(0);
+
+    for (const rejectedToken of [oldToken, revokedMarker]) {
+      const responses: Array<[Response, number]> = [
+        [await sharedMe(apiEnv, rejectedToken, "1.3.9"), 426],
+        [await sharedHeartbeat(apiEnv, rejectedToken, "handoff-session", 1, "1.3.9"), 426],
+        [await sharedMe(apiEnv, rejectedToken, "1.4.0"), 401],
+        [await sharedHeartbeat(apiEnv, rejectedToken, "handoff-session", 1, "1.4.0"), 401],
+      ];
+      for (const [response, expectedStatus] of responses) {
+        const body = await response.json() as Record<string, unknown>;
+        const serialized = JSON.stringify(body);
+        expect(response.status).toBe(expectedStatus);
+        expect(body).not.toHaveProperty("token");
+        expect(serialized).not.toContain(rejectedToken);
+        expect(serialized).not.toContain("revoked:");
+      }
+    }
+
+    const login = await sharedLogin(apiEnv, NEW_PASSWORD, "handoff-session");
+    const loginBody = await login.json() as Record<string, unknown>;
+    const activeToken = String(loginBody.token);
+    const loginClaims = decodeLeaseClaims(loginBody);
+
+    expect(login.status).toBe(200);
+    expect(activeToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(activeToken).not.toBe(oldToken);
+    expect(activeToken).not.toBe(revokedMarker);
+    expect(await storedToken()).toBe(activeToken);
+    expect(JSON.stringify(loginBody)).not.toContain("revoked:");
+    expect(await verifyEnvelope(signing.publicKey, loginBody)).toBe(true);
+    expect(loginClaims).toMatchObject({
+      kind: "login",
+      username: "alice",
+      token_sha256: await tokenSha256(activeToken),
+      session_id: "handoff-session",
+      sequence: 1,
+    });
+    expect(await scalar("SELECT COUNT(*) AS value FROM session_leases WHERE user_id = 7")).toBe(1);
+    expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions WHERE user_id = 7")).toBe(0);
+
+    const heartbeat = await sharedHeartbeat(apiEnv, activeToken, "handoff-session", 1, "1.4.0");
+    const heartbeatBody = await heartbeat.json() as Record<string, unknown>;
+
+    expect(heartbeat.status).toBe(200);
+    expect(await verifyEnvelope(signing.publicKey, heartbeatBody)).toBe(true);
+    expect(decodeLeaseClaims(heartbeatBody)).toMatchObject({
+      kind: "heartbeat",
+      token_sha256: await tokenSha256(activeToken),
+      session_id: "handoff-session",
+      sequence: 2,
+    });
+    expect(await scalar("SELECT sequence AS value FROM session_leases WHERE session_id = 'handoff-session'")).toBe(2);
+    expect(await scalar("SELECT COUNT(*) AS value FROM online_sessions WHERE session_id = 'handoff-session'")).toBe(1);
+  }, 30_000);
 
   it("issues a fresh token only after reauthentication of a revoked account", async () => {
     const oldToken = await seedRevokedUser();
@@ -579,6 +656,52 @@ function request(path: string, init: RequestInit = {}): Promise<Response> {
   return userWorker.fetch(new Request(`https://user.nwflash.cc.cd${path}`, init), env);
 }
 
+function sharedLogin(apiEnv: ApiWorkerEnv, password: string, sessionId: string): Promise<Response> {
+  return apiWorker.fetch(new Request("https://api.nwflash.cc.cd/api/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Nwflash-Version": "1.4.0" },
+    body: JSON.stringify({
+      username: "alice",
+      password,
+      client_version: "1.4.0",
+      build_id: "build-user-handoff",
+      process_nonce: "nonce-user-handoff",
+      session_id: sessionId,
+    }),
+  }), apiEnv);
+}
+
+function sharedMe(apiEnv: ApiWorkerEnv, token: string, version: string): Promise<Response> {
+  return apiWorker.fetch(new Request("https://api.nwflash.cc.cd/api/me", {
+    headers: { Authorization: `Bearer ${token}`, "X-Nwflash-Version": version },
+  }), apiEnv);
+}
+
+function sharedHeartbeat(
+  apiEnv: ApiWorkerEnv,
+  token: string,
+  sessionId: string,
+  sequence: number,
+  version: string,
+): Promise<Response> {
+  return apiWorker.fetch(new Request("https://api.nwflash.cc.cd/api/heartbeat", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Nwflash-Version": version,
+    },
+    body: JSON.stringify({
+      sessionId,
+      clientVersion: "1.4.0",
+      active: true,
+      build_id: "build-user-handoff",
+      process_nonce: "nonce-user-handoff",
+      sequence,
+    }),
+  }), apiEnv);
+}
+
 function cookie(token: string): string {
   return `__Host-nwflash_user=${token}`;
 }
@@ -610,6 +733,38 @@ async function passwordHash(password: string, saltHex: string): Promise<string> 
     256,
   );
   return [...new Uint8Array(bits)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function ephemeralSigningFixture(): Promise<{ secret: string; publicKey: CryptoKey }> {
+  const generated = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  const pkcs8 = await crypto.subtle.exportKey("pkcs8", generated.privateKey);
+  const spki = await crypto.subtle.exportKey("spki", generated.publicKey);
+  const publicKey = await crypto.subtle.importKey("spki", spki, { name: "Ed25519" }, false, ["verify"]);
+  return { secret: base64Url(pkcs8), publicKey };
+}
+
+function decodeLeaseClaims(body: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(new TextDecoder().decode(decodeBase64Url(String(body.lease_payload)))) as Record<string, unknown>;
+}
+
+function verifyEnvelope(publicKey: CryptoKey, body: Record<string, unknown>): Promise<boolean> {
+  return crypto.subtle.verify(
+    { name: "Ed25519" },
+    publicKey,
+    decodeBase64Url(String(body.lease_signature)),
+    new TextEncoder().encode(String(body.lease_payload)),
+  );
+}
+
+function base64Url(value: ArrayBuffer): string {
+  let binary = "";
+  for (const byte of new Uint8Array(value)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function decodeBase64Url(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
 }
 
 function interceptNextPbkdf2(action: () => Promise<void>): void {

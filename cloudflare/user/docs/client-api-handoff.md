@@ -136,13 +136,15 @@ Success (200; expires the cookie):
 {"ok":true}
 ```
 
-## Future shared API Worker handoff
+## Implemented shared API Worker handoff
 
-No client integration starts until the coordinating task implements and contract-tests this server behavior:
+The coordinating shared API work is implemented and contract-tested. Client integration may consume this frozen behavior; deployment remains a separate release action.
 
-1. After password verification, if `api_users.token` starts with `revoked:`, compare-and-swap it to a fresh 32-byte hex token before creating a signed lease.
-2. Never return a revoked marker.
-3. Old-token heartbeat/auth returns 401 and the desktop exits.
-4. No client integration starts until this server behavior is implemented and contract-tested by the coordinating task.
+1. After password verification, a login is linearized to the exact user ID, password hash, salt, token, enabled, and banned generation. If `api_users.token` starts with `revoked:`, the shared API compare-and-swaps it to a fresh 32-byte hex token before creating a signed lease.
+2. Concurrent revoked-token logins first read the same marker in the deterministic Workerd contract test, then converge through the real D1 CAS on one winning active token. Both successful leases bind the winner's token digest.
+3. A revoked marker is never returned. Requests below the minimum client version receive 426 before bearer authentication; after passing the version gate, old or revoked bearer auth and heartbeat return 401 without echoing either credential.
+4. The user Worker password-change batch deletes the old `session_leases` and `online_sessions`. A real cross-Worker Workerd test then reauthenticates through the shared API, exchanges the marker, verifies the signed login/heartbeat leases, and confirms only the new session is recreated.
 
-For future sanitized steps, a handoff migration may add an ownership-indexed table containing only generic phase, sequence, status, duration, retry count, exit code, safe error category, and remediation. It must not store user-visible partition, command, raw output, serial, path, token, or signed URL fields. This task does not edit the shared schema.
+The canonical shared API contract is [`../../API.md`](../../API.md). Node and deterministic real-D1 coverage live in [`../../test/security.test.ts`](../../test/security.test.ts) and [`../../test/security.workerd.test.ts`](../../test/security.workerd.test.ts); the user-to-shared-API integration is in [`../test/user.workerd.test.ts`](../test/user.workerd.test.ts).
+
+For future sanitized steps, a handoff migration may add an ownership-indexed table containing only generic phase, sequence, status, duration, retry count, exit code, safe error category, and remediation. It must not store user-visible partition, command, raw output, serial, path, token, or signed URL fields. This handoff did not edit the shared schema.
