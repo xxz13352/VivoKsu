@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  TRACE_RUN_MAX_EVENTS,
+  TRACE_RUN_MAX_EVENT_STORAGE_BYTES,
   decodeTraceCursorV2,
   encodeTraceCursorV2,
   readTraceUploadV2,
@@ -13,6 +15,22 @@ const valid = JSON.parse(readFileSync(
 ));
 const failed = JSON.parse(readFileSync(
   new URL("../contracts/trace-v2/upload.failed.json", import.meta.url),
+  "utf8",
+));
+const openUpload = JSON.parse(readFileSync(
+  new URL("../contracts/trace-v2/upload.open.json", import.meta.url),
+  "utf8",
+));
+const eventOnlyUpload = JSON.parse(readFileSync(
+  new URL("../contracts/trace-v2/upload.event-only.json", import.meta.url),
+  "utf8",
+));
+const chunkOnlyUpload = JSON.parse(readFileSync(
+  new URL("../contracts/trace-v2/upload.chunk-only.json", import.meta.url),
+  "utf8",
+));
+const finalizeOnlyUpload = JSON.parse(readFileSync(
+  new URL("../contracts/trace-v2/upload.finalize-only.json", import.meta.url),
   "utf8",
 ));
 const adminFailed = JSON.parse(readFileSync(
@@ -91,13 +109,48 @@ describe("trace v2 contract", () => {
     expect(() => validateTraceUploadV2(zero)).toThrow(/sequence/);
   });
 
-  it("rejects a persisted event whose sequence exceeds its declared final sequence", () => {
-    const beyondFinal = copy();
-    beyondFinal.events[2].sequence = 4;
-    expect(() => validateTraceUploadV2(beyondFinal)).toThrow(/final_sequence/);
+  it("freezes logical run event count and metadata storage limits", () => {
+    expect(TRACE_RUN_MAX_EVENTS).toBe(100);
+    expect(TRACE_RUN_MAX_EVENT_STORAGE_BYTES).toBe(8_388_608);
+    const eventBoundary = copy();
+    eventBoundary.events[0].sequence = 100;
+    eventBoundary.runs[0].final_sequence = 100;
+    expect(validateTraceUploadV2(eventBoundary)).toEqual(eventBoundary);
+    const eventOverflow = copy();
+    eventOverflow.events[0].sequence = 101;
+    expect(() => validateTraceUploadV2(eventOverflow)).toThrow(/events\[0\]\.sequence/);
+    const finalOverflow = copy();
+    finalOverflow.runs[0].final_sequence = 101;
+    expect(() => validateTraceUploadV2(finalOverflow)).toThrow(/runs\[0\]\.final_sequence/);
   });
 
-  it("rejects duplicate identities and parent relationships that do not exist", () => {
+  it("rejects trace_complete while the run outcome is still running", () => {
+    const invalidTerminal = copy();
+    invalidTerminal.runs[0].outcome = "running";
+
+    expect(() => validateTraceUploadV2(invalidTerminal)).toThrow(/complete.*running/i);
+  });
+
+  it("defers final-sequence completeness to persisted evidence at ingestion", () => {
+    const beyondFinal = copy();
+    beyondFinal.events[2].sequence = 4;
+    expect(validateTraceUploadV2(beyondFinal)).toEqual(beyondFinal);
+  });
+
+  it("freezes the multi-request parent-reference fixture chain", () => {
+    for (const fixture of [openUpload, eventOnlyUpload, chunkOnlyUpload, finalizeOnlyUpload]) {
+      expect(validateTraceUploadV2(fixture)).toEqual(fixture);
+    }
+    expect(openUpload).toMatchObject({ events: [], output_chunks: [] });
+    expect(eventOnlyUpload).toMatchObject({ runs: [], output_chunks: [] });
+    expect(chunkOnlyUpload).toMatchObject({ runs: [], events: [] });
+    expect(finalizeOnlyUpload).toMatchObject({ events: [], output_chunks: [] });
+    expect(eventOnlyUpload.events[0].run_id).toBe(openUpload.runs[0].run_id);
+    expect(chunkOnlyUpload.output_chunks[0].event_id).toBe(eventOnlyUpload.events[0].event_id);
+    expect(finalizeOnlyUpload.runs[0].run_id).toBe(openUpload.runs[0].run_id);
+  });
+
+  it("rejects duplicate identities and natural keys within one request", () => {
     const duplicateRun = copy();
     duplicateRun.runs.push({ ...duplicateRun.runs[0] });
     expect(() => validateTraceUploadV2(duplicateRun)).toThrow(/duplicate run_id/);
@@ -105,10 +158,33 @@ describe("trace v2 contract", () => {
     const duplicateSequence = copy();
     duplicateSequence.events.push({ ...duplicateSequence.events[0], event_id: "019d9c40-7b3c-7000-8000-000000000099" });
     expect(() => validateTraceUploadV2(duplicateSequence)).toThrow(/duplicate \(run_id, sequence\)/);
+  });
 
-    const missingParent = copy();
-    missingParent.events[0].run_id = "019d9c40-7b3c-7000-8000-000000000088";
-    expect(() => validateTraceUploadV2(missingParent)).toThrow(/unknown run_id/);
+  it("accepts event-only and chunk-only requests whose parents are resolved during ingestion", () => {
+    const eventOnly = copy();
+    eventOnly.runs = [];
+    eventOnly.events = [eventOnly.events[0]];
+    eventOnly.output_chunks = [];
+    expect(validateTraceUploadV2(eventOnly)).toEqual(eventOnly);
+
+    const chunkOnly = copy();
+    chunkOnly.runs = [];
+    chunkOnly.events = [];
+    chunkOnly.output_chunks = [chunkOnly.output_chunks[0]];
+    expect(validateTraceUploadV2(chunkOnly)).toEqual(chunkOnly);
+  });
+
+  it("accepts a partial chunk batch below the event's declared logical total", () => {
+    const partial = copy();
+    partial.runs[0].outcome = "running";
+    partial.runs[0].ended_at_ms = null;
+    partial.runs[0].duration_ms = null;
+    partial.runs[0].final_sequence = null;
+    partial.runs[0].trace_complete = false;
+    partial.events = [{ ...partial.events[1], stdout_chunks: 40, stderr_chunks: 0 }];
+    partial.output_chunks = [partial.output_chunks[0]];
+
+    expect(validateTraceUploadV2(partial)).toEqual(partial);
   });
 
   it("rejects duplicate output chunk tuples independently of chunk IDs", () => {
@@ -152,5 +228,14 @@ describe("trace v2 contract", () => {
     const multibyte = copy();
     multibyte.events[0].step_name = "你".repeat(342);
     expect(() => validateTraceUploadV2(multibyte)).toThrow(/UTF-8 byte limit of 1024/);
+  });
+
+  it("documents persisted parent references and logical chunk totals in the frozen schema", () => {
+    expect(schema.properties.events.description).toMatch(/persisted run_id/i);
+    expect(schema.properties.output_chunks.description).toMatch(/persisted event_id/i);
+    expect(schema.$defs.event.properties.stdout_chunks.description).toMatch(/logical total/i);
+    expect(schema.$defs.event.properties.stderr_chunks.description).toMatch(/logical total/i);
+    expect(schema.$defs.run.properties.final_sequence.description).toMatch(/finalize-only/i);
+    expect(schema.$defs.outputChunk.properties.chunk_index.description).toMatch(/declared total/i);
   });
 });

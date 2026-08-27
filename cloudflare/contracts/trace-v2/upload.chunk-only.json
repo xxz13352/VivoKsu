@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "upload_id": "019d9c40-7b3c-7000-8000-000000003005",
+  "runs": [],
+  "events": [],
+  "output_chunks": [{
+    "chunk_id": "019d9c40-7b3c-7000-8000-000000003006",
+    "event_id": "019d9c40-7b3c-7000-8000-000000003004",
+    "stream": "stdout",
+    "chunk_index": 0,
+    "text": "Sending boot_a\nOKAY\n",
+    "byte_count": 20,
+    "sha256": "71977b278c69313b52f81c96e75d91ce5df771ffc3d24e4d24ef8c0c8cae4b6f"
+  }]
+}

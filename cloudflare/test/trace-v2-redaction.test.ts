@@ -162,15 +162,45 @@ describe("trace v2 credential boundary", () => {
     replaceChunkText(source, 1, "exact-424242 token=late-sentinel-387298 OKAY\n");
 
     const result = redactTraceUploadV2(source, ["token-part-exact-424242"]);
-    const storedText = result.payload.output_chunks
-      .sort((left, right) => left.chunk_index - right.chunk_index)
-      .map((chunk) => chunk.text)
-      .join("");
 
-    expect(storedText).not.toContain("token-part-exact-424242");
-    expect(result.chunk_redactions.get(source.output_chunks[0].chunk_id)).toEqual([{ kind: "exact", count: 1 }]);
-    expect(result.chunk_redactions.get(source.output_chunks[1].chunk_id)).toEqual([{ kind: "token", count: 1 }]);
+    expect(result.credential_rejected_chunks).toEqual(new Set(
+      source.output_chunks.map((chunk) => chunk.chunk_id),
+    ));
+    expect(result.payload.output_chunks.map((chunk) => chunk.text)).toEqual([
+      "progress token-part-",
+      "exact-424242 token=[REDACTED] OKAY\n",
+    ]);
     expect(validateTraceUploadV2(result.payload)).toEqual(result.payload);
+  });
+
+  it("does not join non-contiguous chunk indexes when scanning boundaries", () => {
+    const source = copyCanonical();
+    source.events[1].stdout_chunks = 3;
+    source.events[1].stderr_chunks = 0;
+    source.output_chunks[1] = {
+      ...source.output_chunks[1],
+      stream: "stdout",
+      chunk_index: 2,
+    };
+    replaceChunkText(source, 0, "progress token=");
+    replaceChunkText(source, 1, "not-a-credential-fragment\n");
+
+    const result = redactTraceUploadV2(source, []);
+
+    expect(result.credential_rejected_chunks).toEqual(new Set());
+    expect(result.payload.output_chunks.map((chunk) => chunk.text)).toEqual(
+      source.output_chunks.map((chunk) => chunk.text),
+    );
+  });
+
+  it("does not reject an operational chunk exactly equal to a known-secret prefix", () => {
+    const source = copyCanonical();
+    replaceChunkText(source, 0, "token-part-");
+
+    const result = redactTraceUploadV2(source, ["token-part-exact-424242"]);
+
+    expect(result.credential_rejected_chunks.has(source.output_chunks[0].chunk_id)).toBe(false);
+    expect(result.payload.output_chunks[0].text).toBe(source.output_chunks[0].text);
   });
 
   it("recognizes prefixed secret names without consuming a following option as a value", () => {
@@ -238,6 +268,24 @@ describe("trace v2 credential boundary", () => {
     ]);
   });
 
+  it("does not consume a following credential flag as the previous flag's value", () => {
+    const source = copyCanonical();
+    source.events[1].command!.argv = ["--token", "--api-key", "--secret", "real-secret"];
+    source.events[1].command!.display_command = "tool --token --api-key --secret real-secret";
+
+    const result = redactTraceUploadV2(source, []);
+
+    expect(result.payload.events[1].command!.argv).toEqual([
+      "--token",
+      "--api-key",
+      "--secret",
+      "[REDACTED]",
+    ]);
+    expect(result.payload.events[1].command!.display_command).toBe(
+      "tool --token --api-key --secret [REDACTED]",
+    );
+  });
+
   it("redacts an exact registered secret before treating it as an option boundary", () => {
     const source = copyCanonical();
     source.events[1].command!.argv = ["--token", "--label"];
@@ -248,6 +296,45 @@ describe("trace v2 credential boundary", () => {
       "*******",
     ]);
     expect(result.event_redactions.get(source.events[1].event_id)).toEqual([{ kind: "exact", count: 1 }]);
+  });
+
+  it("does not let mixed redaction markers suppress trailing credentials", () => {
+    const source = copyCanonical();
+    source.events[0].verification = [
+      "Authorization: Basic [REDACTED]basic-sentinel",
+      "Cookie: a=[REDACTED]; b=cookie-sentinel",
+      "password=[REDACTED]password-sentinel",
+      "token=[CREDENTIAL_REMOVED:TOKEN]token-sentinel",
+    ].join("\n");
+
+    const result = redactTraceUploadV2(source, []);
+    const verification = result.payload.events[0].verification!;
+
+    for (const sentinel of ["basic-sentinel", "cookie-sentinel", "password-sentinel", "token-sentinel"]) {
+      expect(verification).not.toContain(sentinel);
+    }
+    expect(verification).toBe([
+      "Authorization: Basic [REDACTED]",
+      "Cookie: a=[REDACTED]; b=[REDACTED]",
+      "password=[REDACTED]",
+      "token=[REDACTED]",
+    ].join("\n"));
+  });
+
+  it("keeps complete redaction marker values idempotent", () => {
+    const source = copyCanonical();
+    const verification = [
+      "Authorization: Basic [REDACTED]",
+      "Cookie: a=[REDACTED]",
+      "password=[CREDENTIAL_REMOVED:TOKEN]",
+      "token=******",
+    ].join("\n");
+    source.events[0].verification = verification;
+
+    const result = redactTraceUploadV2(source, []);
+
+    expect(result.payload.events[0].verification).toBe(verification);
+    expect(result.event_redactions.has(source.events[0].event_id)).toBe(false);
   });
 
   it("keeps merged counts and high-risk field replacement within the frozen contract", () => {
@@ -261,9 +348,13 @@ describe("trace v2 credential boundary", () => {
     source.runs[0].error_message = `${"a".repeat(16_384 - begin.length)}${begin}`;
 
     const result = redactTraceUploadV2(source, []);
+    const finalCounts = result.payload.events[1].credential_redactions;
 
-    expect(result.payload.events[1].credential_redactions).toHaveLength(100);
-    expect(result.payload.events[1].credential_redactions[0]).toEqual({ kind: "token", count: Number.MAX_SAFE_INTEGER });
+    expect(finalCounts).toHaveLength(100);
+    expect(finalCounts[0]).toEqual({ kind: "password", count: 1 });
+    expect(finalCounts).toContainEqual({ kind: "token", count: Number.MAX_SAFE_INTEGER });
+    expect(finalCounts).not.toContainEqual({ kind: "client-98", count: 1 });
+    expect(result.event_redactions.get(source.events[1].event_id)).toEqual(finalCounts);
     expect(result.payload.runs[0].error_message).toBe("[CREDENTIAL_REMOVED:HIGH_RISK]");
     expect(validateTraceUploadV2(result.payload)).toEqual(result.payload);
   });

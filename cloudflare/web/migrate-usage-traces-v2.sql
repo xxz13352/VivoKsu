@@ -91,13 +91,77 @@ CREATE TABLE IF NOT EXISTS usage_trace_ingest_guards (
 
 CREATE TRIGGER IF NOT EXISTS trg_trace_events_reject_completed_run
 BEFORE INSERT ON usage_operation_events
-WHEN EXISTS (
-  SELECT 1
-  FROM usage_operation_runs
-  WHERE run_id = NEW.run_id AND trace_complete = 1
-)
 BEGIN
-  SELECT RAISE(ABORT, 'trace run is complete');
+  SELECT RAISE(ABORT, 'trace event parent missing')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM usage_operation_runs WHERE run_id = NEW.run_id
+  );
+  SELECT RAISE(ABORT, 'trace run is complete')
+  WHERE EXISTS (
+    SELECT 1 FROM usage_operation_runs
+    WHERE run_id = NEW.run_id AND trace_complete = 1
+  );
+  SELECT RAISE(ABORT, 'trace event sequence exceeds final sequence')
+  WHERE EXISTS (
+    SELECT 1 FROM usage_operation_runs
+    WHERE run_id = NEW.run_id
+      AND final_sequence IS NOT NULL
+      AND NEW.sequence > final_sequence
+  );
+  SELECT RAISE(ABORT, 'trace event quota exceeded')
+  WHERE (
+    SELECT COUNT(*) FROM usage_operation_events WHERE run_id = NEW.run_id
+  ) >= 100;
+  SELECT RAISE(ABORT, 'trace event sequence exceeds run quota')
+  WHERE NEW.sequence > 100;
+  SELECT RAISE(ABORT, 'trace event storage exceeded')
+  WHERE COALESCE((
+    SELECT SUM(
+      length(CAST(COALESCE(event_id, '') AS BLOB))
+      + length(CAST(COALESCE(run_id, '') AS BLOB))
+      + length(CAST(COALESCE(event_kind, '') AS BLOB))
+      + length(CAST(COALESCE(step_name, '') AS BLOB))
+      + length(CAST(COALESCE(partition_name, '') AS BLOB))
+      + length(CAST(COALESCE(status, '') AS BLOB))
+      + length(CAST(COALESCE(command_program, '') AS BLOB))
+      + length(CAST(COALESCE(command_argv_json, '') AS BLOB))
+      + length(CAST(COALESCE(command_line, '') AS BLOB))
+      + length(CAST(COALESCE(working_directory, '') AS BLOB))
+      + length(CAST(COALESCE(paths_json, '') AS BLOB))
+      + length(CAST(COALESCE(urls_json, '') AS BLOB))
+      + length(CAST(COALESCE(serial, '') AS BLOB))
+      + length(CAST(COALESCE(verification, '') AS BLOB))
+      + length(CAST(COALESCE(device_state, '') AS BLOB))
+      + length(CAST(COALESCE(remedies_json, '') AS BLOB))
+      + length(CAST(COALESCE(error_class, '') AS BLOB))
+      + length(CAST(COALESCE(error_code, '') AS BLOB))
+      + length(CAST(COALESCE(error_message, '') AS BLOB))
+      + length(CAST(COALESCE(credential_redactions_json, '') AS BLOB))
+    )
+    FROM usage_operation_events
+    WHERE run_id = NEW.run_id
+  ), 0)
+  + length(CAST(COALESCE(NEW.event_id, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.run_id, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.event_kind, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.step_name, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.partition_name, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.status, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.command_program, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.command_argv_json, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.command_line, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.working_directory, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.paths_json, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.urls_json, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.serial, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.verification, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.device_state, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.remedies_json, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.error_class, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.error_code, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.error_message, '') AS BLOB))
+  + length(CAST(COALESCE(NEW.credential_redactions_json, '') AS BLOB))
+  > 8388608;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_trace_chunks_reject_completed_run
@@ -116,6 +180,8 @@ CREATE TRIGGER IF NOT EXISTS trg_trace_runs_validate_completion
 BEFORE UPDATE OF trace_complete ON usage_operation_runs
 WHEN OLD.trace_complete = 0 AND NEW.trace_complete = 1
 BEGIN
+  SELECT RAISE(ABORT, 'trace completion requires terminal outcome')
+  WHERE NEW.outcome = 'running';
   SELECT RAISE(ABORT, 'trace run is incomplete')
   WHERE NEW.final_sequence IS NULL
      OR (

@@ -12,6 +12,7 @@ export interface RedactedTraceUploadV2 {
   run_redactions: ReadonlyMap<string, CredentialRedactionCountV2[]>;
   event_redactions: ReadonlyMap<string, CredentialRedactionCountV2[]>;
   chunk_redactions: ReadonlyMap<string, CredentialRedactionCountV2[]>;
+  credential_rejected_chunks: ReadonlySet<string>;
 }
 
 type RedactionCounts = Map<string, number>;
@@ -30,7 +31,8 @@ export function redactTraceUploadV2(
   payload: TraceUploadRequestV2,
   exactSecrets: readonly string[],
 ): RedactedTraceUploadV2 {
-  const matcher = buildCredentialMatcher(exactSecrets.filter((value) => value.length >= 6));
+  const secrets = [...new Set(exactSecrets.filter((value) => value.length >= 6))];
+  const matcher = buildCredentialMatcher(secrets);
   return mapTraceTextFields(payload, matcher);
 }
 
@@ -74,9 +76,9 @@ function redactAuthorization(text: string, counts: RedactionCounts): string {
   output = output.replace(
     /\b(Authorization\s*:\s*)([^\r\n]+)/gi,
     (match, prefix: string, value: string) => {
-          if (isRedacted(value)) return match;
-      const scheme = /^(Basic|Digest)\s+/i.exec(value)?.[0] ?? "";
+      const scheme = /^(Basic|Digest|Bearer)\s+/i.exec(value)?.[0] ?? "";
       const credential = value.slice(scheme.length);
+      if (credential.length === 0 || isRedacted(credential)) return match;
       addCount(counts, "authorization");
       return `${prefix}${scheme}${safeCredentialMarker(credential)}`;
     },
@@ -95,6 +97,7 @@ function redactCookies(text: string, counts: RedactionCounts): string {
       if (/^Set-Cookie/i.test(prefix)) {
         const pair = /^([^=;\s]+)(\s*=\s*)([^;]*)([\s\S]*)$/.exec(value);
         if (pair !== null) {
+          if (isRedacted(pair[3])) return match;
           addCount(counts, "cookie");
           return `${prefix}${pair[1]}${pair[2]}${safeCredentialMarker(pair[3])}${pair[4]}`;
         }
@@ -105,7 +108,7 @@ function redactCookies(text: string, counts: RedactionCounts): string {
       let parsedPairs = 0;
       const redacted = value.replace(/(^|;\s*)([^=;\s]+)(\s*=\s*)([^;]*)/g, (_pair, delimiter: string, name: string, equals: string, cookieValue: string) => {
         parsedPairs += 1;
-        if (cookieValue.length === 0) return `${delimiter}${name}${equals}`;
+        if (cookieValue.length === 0 || isRedacted(cookieValue)) return `${delimiter}${name}${equals}${cookieValue}`;
         addCount(counts, "cookie");
         return `${delimiter}${name}${equals}${safeCredentialMarker(cookieValue)}`;
       });
@@ -118,7 +121,7 @@ function redactCookies(text: string, counts: RedactionCounts): string {
 
 function redactCliAssignments(text: string, counts: RedactionCounts): string {
   const pattern = new RegExp(
-    `(\\-\\-${CREDENTIAL_KEY})(\\s*=\\s*|\\s+)(?:"([^"]*)"|'([^']*)'|([^\\s,;&]+))`,
+    `(\\-\\-${CREDENTIAL_KEY})(\\s*=\\s*|\\s+)(?:"([^"]*)"|'([^']*)'|(?!--${CREDENTIAL_KEY}(?:\\s|=|$))([^\\s,;&]+))`,
     "gi",
   );
   return text.replace(pattern, (match, flag: string, separator: string, doubleQuoted?: string, singleQuoted?: string, bare?: string) => {
@@ -144,7 +147,10 @@ function redactAssignments(text: string, counts: RedactionCounts): string {
   });
 }
 
-function mapTraceTextFields(payload: TraceUploadRequestV2, matcher: CredentialMatcher): RedactedTraceUploadV2 {
+function mapTraceTextFields(
+  payload: TraceUploadRequestV2,
+  matcher: CredentialMatcher,
+): RedactedTraceUploadV2 {
   const runRedactions = new Map<string, CredentialRedactionCountV2[]>();
   const eventRedactions = new Map<string, CredentialRedactionCountV2[]>();
   const chunkRedactions = new Map<string, CredentialRedactionCountV2[]>();
@@ -175,13 +181,14 @@ function mapTraceTextFields(payload: TraceUploadRequestV2, matcher: CredentialMa
       error_message: mapNullable(event.error_message, redact),
       credential_redactions: [] as CredentialRedactionCountV2[],
     };
-    const mergedCounts = mergeSummaries(clientCounts, summarizeCounts(counts));
-    redacted.credential_redactions = mergedCounts.slice(0, 100);
-    if (mergedCounts.length > 0) eventRedactions.set(event.event_id, mergedCounts);
+    const finalCounts = mergeSummaries(summarizeCounts(counts), clientCounts).slice(0, 100);
+    redacted.credential_redactions = finalCounts;
+    if (finalCounts.length > 0) eventRedactions.set(event.event_id, finalCounts);
     return redacted;
   });
 
   const output_chunks = payload.output_chunks.map((chunk) => ({ ...chunk }));
+  const credentialRejectedChunks = new Set<string>();
   const streamGroups = new Map<string, number[]>();
   payload.output_chunks.forEach((chunk, index) => {
     const key = `${chunk.event_id}\u0000${chunk.stream}`;
@@ -191,41 +198,38 @@ function mapTraceTextFields(payload: TraceUploadRequestV2, matcher: CredentialMa
   });
   for (const indexes of streamGroups.values()) {
     indexes.sort((left, right) => payload.output_chunks[left].chunk_index - payload.output_chunks[right].chunk_index);
-    const originalChunks = indexes.map((index) => payload.output_chunks[index]);
-    const originalText = originalChunks.map((chunk) => chunk.text).join("");
-    const result = matcher.replace(originalText, "chunk");
-    if (result.text === originalText) continue;
-
-    let redactedText = result.text;
-    const counts = new Map(result.counts);
-    if (utf8Length(redactedText) > originalChunks.length * TRACE_OUTPUT_MAX_BYTES) {
-      redactedText = marker("high-risk");
-      addCount(counts, "high-risk");
-    }
-    const parts = repartitionText(redactedText, originalChunks.map((chunk) => chunk.byte_count));
-    indexes.forEach((payloadIndex, partIndex) => {
-      const bytes = new TextEncoder().encode(parts[partIndex]);
-      output_chunks[payloadIndex] = {
-        ...output_chunks[payloadIndex],
-        text: parts[partIndex],
-        byte_count: bytes.byteLength,
-        sha256: sha256HexV2(bytes),
-      };
-    });
-    const remainingCounts = new Map(counts);
-    originalChunks.forEach((chunk) => {
-      const localCounts = matcher.replace(chunk.text, "chunk").counts;
-      const attributed: RedactionCounts = new Map();
-      for (const [kind, localCount] of localCounts) {
-        const available = remainingCounts.get(kind) ?? 0;
-        const count = Math.min(localCount, available);
-        if (count === 0) continue;
-        addCount(attributed, kind, count);
-        remainingCounts.set(kind, available - count);
+    for (const contiguous of contiguousIndexGroups(indexes, payload)) {
+      const originalChunks = contiguous.map((index) => payload.output_chunks[index]);
+      const independent = originalChunks.map((chunk) => matcher.replace(chunk.text, "chunk"));
+      const grouped = matcher.replace(originalChunks.map((chunk) => chunk.text).join(""), "chunk");
+      const independentText = independent.map((result) => result.text).join("");
+      const independentCounts = combineRedactionCounts(independent.map((result) => result.counts));
+      const crossesRawBoundary = originalChunks.length > 1
+        && (grouped.text !== independentText || !redactionCountsEqual(grouped.counts, independentCounts));
+      if (crossesRawBoundary) {
+        for (const chunk of originalChunks) credentialRejectedChunks.add(chunk.chunk_id);
       }
-      appendChunkCounts(chunkRedactions, chunk.chunk_id, attributed);
-    });
-    appendChunkCounts(chunkRedactions, originalChunks[0].chunk_id, remainingCounts);
+
+      contiguous.forEach((payloadIndex, groupIndex) => {
+        const originalChunk = originalChunks[groupIndex];
+        const result = independent[groupIndex];
+        if (result.text === originalChunk.text) return;
+        let redactedText = result.text;
+        const counts = new Map(result.counts);
+        if (utf8Length(redactedText) > TRACE_OUTPUT_MAX_BYTES) {
+          redactedText = marker("high-risk");
+          addCount(counts, "high-risk");
+        }
+        const bytes = new TextEncoder().encode(redactedText);
+        output_chunks[payloadIndex] = {
+          ...output_chunks[payloadIndex],
+          text: redactedText,
+          byte_count: bytes.byteLength,
+          sha256: sha256HexV2(bytes),
+        };
+        appendChunkCounts(chunkRedactions, originalChunk.chunk_id, counts);
+      });
+    }
   }
 
   return {
@@ -233,7 +237,43 @@ function mapTraceTextFields(payload: TraceUploadRequestV2, matcher: CredentialMa
     run_redactions: runRedactions,
     event_redactions: eventRedactions,
     chunk_redactions: chunkRedactions,
+    credential_rejected_chunks: credentialRejectedChunks,
   };
+}
+
+function contiguousIndexGroups(indexes: number[], payload: TraceUploadRequestV2): number[][] {
+  const groups: number[][] = [];
+  for (const payloadIndex of indexes) {
+    const current = groups.at(-1);
+    if (!current) {
+      groups.push([payloadIndex]);
+      continue;
+    }
+    const previousPayloadIndex = current[current.length - 1];
+    if (payload.output_chunks[payloadIndex].chunk_index
+      === payload.output_chunks[previousPayloadIndex].chunk_index + 1) {
+      current.push(payloadIndex);
+    } else {
+      groups.push([payloadIndex]);
+    }
+  }
+  return groups;
+}
+
+function combineRedactionCounts(counts: readonly ReadonlyMap<string, number>[]): RedactionCounts {
+  const combined: RedactionCounts = new Map();
+  for (const group of counts) {
+    for (const [kind, count] of group) addCount(combined, kind, count);
+  }
+  return combined;
+}
+
+function redactionCountsEqual(left: ReadonlyMap<string, number>, right: ReadonlyMap<string, number>): boolean {
+  if (left.size !== right.size) return false;
+  for (const [kind, count] of left) {
+    if (right.get(kind) !== count) return false;
+  }
+  return true;
 }
 
 function mapRun(run: TraceRunV2, redact: (text: string) => string): TraceRunV2 {
@@ -260,6 +300,11 @@ function mapCommand(command: TraceCommandV2, redact: (text: string) => string, c
       if (matched !== argument) {
         pendingSecretKind = null;
         return matched;
+      }
+      const nextSecretKind = cliFlagKind(argument);
+      if (nextSecretKind !== null) {
+        pendingSecretKind = nextSecretKind;
+        return argument;
       }
       if (isCredentialLikeDashValue(argument)) {
         const kind = pendingSecretKind;
@@ -392,7 +437,10 @@ function safeCredentialMarker(originalValue: string): string {
 }
 
 function isRedacted(value: string): boolean {
-  return value.includes("[CREDENTIAL_REMOVED:") || value.includes("[REDACTED]") || /^\*+$/.test(value);
+  const trimmed = value.trim();
+  return trimmed === "[REDACTED]"
+    || /^\[CREDENTIAL_REMOVED:[A-Z0-9_]+\]$/.test(trimmed)
+    || /^\*+$/.test(trimmed);
 }
 
 function utf8Length(value: string): number {

@@ -13,7 +13,7 @@ import {
   tokenSha256,
   type LeaseClaims,
 } from "./security";
-import { ingestTraceUploadV2 } from "./trace-v2-ingest";
+import { ingestTraceUploadV2, traceErrorV2 } from "./trace-v2-ingest";
 
 /**
  * Cloudflare Worker —— Vivo ROM OTA 链接代理 + Nwflash 版本门禁。
@@ -133,11 +133,13 @@ export default {
 
       if (url.pathname === "/api/usage/traces/v2" && request.method === "POST") {
         const gate = await checkAppVersion(env, request);
-        if (gate) return gate;
+        if (gate) return withNoStore(gate);
         const auth = await authenticateUser(env, request);
-        if (auth instanceof Response) return auth;
-        if (auth === null) return json({ error: "请先登录。" }, 401);
-        if (auth.banned) return json({ error: "账号已被封禁。" }, 403);
+        if (auth instanceof Response) {
+          return traceErrorV2(401, "TRACE_UNAUTHORIZED", "API token 无效或已停用。");
+        }
+        if (auth === null) return traceErrorV2(401, "TRACE_UNAUTHORIZED", "请先登录。");
+        if (auth.banned) return traceErrorV2(403, "TRACE_FORBIDDEN", "账号已被封禁。");
         const bearerToken = request.headers.get("Authorization")?.slice(7).trim() ?? "";
         return ingestTraceUploadV2(env, request, { ...auth, bearer_token: bearerToken });
       }
@@ -158,6 +160,9 @@ export default {
 
       return json({ error: "Not found" }, 404);
     } catch {
+      if (url.pathname === "/api/usage/traces/v2" && request.method === "POST") {
+        return traceErrorV2(500, "TRACE_INTERNAL", "日志写入失败。");
+      }
       return json({ error: "内部错误。" }, 500);
     }
   },
@@ -909,5 +914,15 @@ function json(obj: unknown, status: number): Response {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { "Content-Type": "application/json", ...CORS },
+  });
+}
+
+function withNoStore(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
 }

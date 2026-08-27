@@ -4,6 +4,8 @@ export const TRACE_UPLOAD_MAX_RUNS = 20;
 export const TRACE_UPLOAD_MAX_EVENTS = 100;
 export const TRACE_UPLOAD_MAX_OUTPUT_CHUNKS = 200;
 export const TRACE_OUTPUT_MAX_BYTES = 32_768;
+export const TRACE_RUN_MAX_EVENTS = 100;
+export const TRACE_RUN_MAX_EVENT_STORAGE_BYTES = 8_388_608;
 
 const MAX_TEXT_BYTES = 16_384;
 const MAX_SHORT_TEXT_BYTES = 1_024;
@@ -140,7 +142,7 @@ export function validateTraceUploadV2(value: unknown): TraceUploadRequestV2 {
   const runs = requireArray(root.runs, TRACE_UPLOAD_MAX_RUNS, parseRunV2, "runs");
   const events = requireArray(root.events, TRACE_UPLOAD_MAX_EVENTS, parseEventV2, "events");
   const output_chunks = requireArray(root.output_chunks, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS, parseChunkV2, "output_chunks");
-  validateParentRelationships(runs, events, output_chunks);
+  validateRequestIdentities(runs, events, output_chunks);
   return { schema_version: 2, upload_id, runs, events, output_chunks };
 }
 
@@ -169,10 +171,12 @@ function parseRunV2(value: unknown, field: string): TraceRunV2 {
   const duration_ms = requireNullableInteger(root.duration_ms, 0, Number.MAX_SAFE_INTEGER, `${field}.duration_ms`);
   requireTimestampPair(started_at_ms, ended_at_ms, duration_ms, field);
   const trace_complete = requireBoolean(root.trace_complete, `${field}.trace_complete`);
+  const outcome = requireEnum(root.outcome, ["running", "success", "failed", "canceled", "denied", "aborted", "unknown"], `${field}.outcome`);
   const trace_loss_reason = requireNullableText(root.trace_loss_reason, MAX_TEXT_BYTES, `${field}.trace_loss_reason`);
   if (trace_complete && trace_loss_reason !== null) throw invalid(`${field}.trace_loss_reason must be null for complete traces`);
+  if (trace_complete && outcome === "running") throw invalid(`${field}.trace_complete cannot be true while outcome is running`);
   return {
-    run_id: requireUuidV7(root.run_id, `${field}.run_id`), operation_kind: requireText(root.operation_kind, MAX_SHORT_TEXT_BYTES, `${field}.operation_kind`), title: requireText(root.title, MAX_TEXT_BYTES, `${field}.title`), outcome: requireEnum(root.outcome, ["running", "success", "failed", "canceled", "denied", "aborted", "unknown"], `${field}.outcome`), device_serial: requireNullableText(root.device_serial, MAX_SHORT_TEXT_BYTES, `${field}.device_serial`), source_paths: requireStringArray(root.source_paths, MAX_TEXT_ITEMS, MAX_TEXT_BYTES, `${field}.source_paths`), source_urls: requireStringArray(root.source_urls, MAX_TEXT_ITEMS, MAX_TEXT_BYTES, `${field}.source_urls`), client_version: requireText(root.client_version, MAX_SHORT_TEXT_BYTES, `${field}.client_version`), started_at_ms, ended_at_ms, duration_ms, error_class: requireNullableText(root.error_class, MAX_SHORT_TEXT_BYTES, `${field}.error_class`), error_code: requireNullableText(root.error_code, MAX_SHORT_TEXT_BYTES, `${field}.error_code`), error_message: requireNullableText(root.error_message, MAX_TEXT_BYTES, `${field}.error_message`), final_sequence: requireNullableInteger(root.final_sequence, 1, Number.MAX_SAFE_INTEGER, `${field}.final_sequence`), trace_complete, trace_loss_reason,
+    run_id: requireUuidV7(root.run_id, `${field}.run_id`), operation_kind: requireText(root.operation_kind, MAX_SHORT_TEXT_BYTES, `${field}.operation_kind`), title: requireText(root.title, MAX_TEXT_BYTES, `${field}.title`), outcome, device_serial: requireNullableText(root.device_serial, MAX_SHORT_TEXT_BYTES, `${field}.device_serial`), source_paths: requireStringArray(root.source_paths, MAX_TEXT_ITEMS, MAX_TEXT_BYTES, `${field}.source_paths`), source_urls: requireStringArray(root.source_urls, MAX_TEXT_ITEMS, MAX_TEXT_BYTES, `${field}.source_urls`), client_version: requireText(root.client_version, MAX_SHORT_TEXT_BYTES, `${field}.client_version`), started_at_ms, ended_at_ms, duration_ms, error_class: requireNullableText(root.error_class, MAX_SHORT_TEXT_BYTES, `${field}.error_class`), error_code: requireNullableText(root.error_code, MAX_SHORT_TEXT_BYTES, `${field}.error_code`), error_message: requireNullableText(root.error_message, MAX_TEXT_BYTES, `${field}.error_message`), final_sequence: requireNullableInteger(root.final_sequence, 1, TRACE_RUN_MAX_EVENTS, `${field}.final_sequence`), trace_complete, trace_loss_reason,
   };
 }
 
@@ -183,7 +187,7 @@ function parseEventV2(value: unknown, field: string): TraceEventV2 {
   const duration_ms = requireNullableInteger(root.duration_ms, 0, Number.MAX_SAFE_INTEGER, `${field}.duration_ms`);
   requireTimestampPair(started_at_ms, ended_at_ms, duration_ms, field);
   return {
-    event_id: requireUuidV7(root.event_id, `${field}.event_id`), run_id: requireUuidV7(root.run_id, `${field}.run_id`), sequence: requireSafeInteger(root.sequence, 1, Number.MAX_SAFE_INTEGER, `${field}.sequence`), kind: requireEnum(root.kind, ["authorization", "stage", "partition", "command", "skip", "verification", "terminal"], `${field}.kind`), step_name: requireText(root.step_name, MAX_SHORT_TEXT_BYTES, `${field}.step_name`), partition_name: requireNullableText(root.partition_name, MAX_SHORT_TEXT_BYTES, `${field}.partition_name`), status: requireEnum(root.status, ["started", "success", "failed", "canceled", "skipped", "unknown"], `${field}.status`), started_at_ms, ended_at_ms, duration_ms, command: root.command === null ? null : parseCommandV2(root.command, `${field}.command`), exit_code: requireNullableInteger(root.exit_code, -2_147_483_648, 2_147_483_647, `${field}.exit_code`), stdout_chunks: requireSafeInteger(root.stdout_chunks, 0, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS, `${field}.stdout_chunks`), stderr_chunks: requireSafeInteger(root.stderr_chunks, 0, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS, `${field}.stderr_chunks`), verification: requireNullableText(root.verification, MAX_TEXT_BYTES, `${field}.verification`), device_state: requireNullableText(root.device_state, MAX_SHORT_TEXT_BYTES, `${field}.device_state`), retry_safe: requireNullableBoolean(root.retry_safe, `${field}.retry_safe`), remedies: requireStringArray(root.remedies, MAX_TEXT_ITEMS, MAX_TEXT_BYTES, `${field}.remedies`), error_class: requireNullableText(root.error_class, MAX_SHORT_TEXT_BYTES, `${field}.error_class`), error_code: requireNullableText(root.error_code, MAX_SHORT_TEXT_BYTES, `${field}.error_code`), error_message: requireNullableText(root.error_message, MAX_TEXT_BYTES, `${field}.error_message`), credential_redactions: requireArray(root.credential_redactions, MAX_TEXT_ITEMS, parseRedaction, `${field}.credential_redactions`),
+    event_id: requireUuidV7(root.event_id, `${field}.event_id`), run_id: requireUuidV7(root.run_id, `${field}.run_id`), sequence: requireSafeInteger(root.sequence, 1, TRACE_RUN_MAX_EVENTS, `${field}.sequence`), kind: requireEnum(root.kind, ["authorization", "stage", "partition", "command", "skip", "verification", "terminal"], `${field}.kind`), step_name: requireText(root.step_name, MAX_SHORT_TEXT_BYTES, `${field}.step_name`), partition_name: requireNullableText(root.partition_name, MAX_SHORT_TEXT_BYTES, `${field}.partition_name`), status: requireEnum(root.status, ["started", "success", "failed", "canceled", "skipped", "unknown"], `${field}.status`), started_at_ms, ended_at_ms, duration_ms, command: root.command === null ? null : parseCommandV2(root.command, `${field}.command`), exit_code: requireNullableInteger(root.exit_code, -2_147_483_648, 2_147_483_647, `${field}.exit_code`), stdout_chunks: requireSafeInteger(root.stdout_chunks, 0, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS, `${field}.stdout_chunks`), stderr_chunks: requireSafeInteger(root.stderr_chunks, 0, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS, `${field}.stderr_chunks`), verification: requireNullableText(root.verification, MAX_TEXT_BYTES, `${field}.verification`), device_state: requireNullableText(root.device_state, MAX_SHORT_TEXT_BYTES, `${field}.device_state`), retry_safe: requireNullableBoolean(root.retry_safe, `${field}.retry_safe`), remedies: requireStringArray(root.remedies, MAX_TEXT_ITEMS, MAX_TEXT_BYTES, `${field}.remedies`), error_class: requireNullableText(root.error_class, MAX_SHORT_TEXT_BYTES, `${field}.error_class`), error_code: requireNullableText(root.error_code, MAX_SHORT_TEXT_BYTES, `${field}.error_code`), error_message: requireNullableText(root.error_message, MAX_TEXT_BYTES, `${field}.error_message`), credential_redactions: requireArray(root.credential_redactions, MAX_TEXT_ITEMS, parseRedaction, `${field}.credential_redactions`),
   };
 }
 
@@ -209,13 +213,12 @@ function parseChunkV2(value: unknown, field: string): TraceOutputChunkV2 {
   return { chunk_id: requireUuidV7(root.chunk_id, `${field}.chunk_id`), event_id: requireUuidV7(root.event_id, `${field}.event_id`), stream: requireEnum(root.stream, ["stdout", "stderr"], `${field}.stream`), chunk_index: requireSafeInteger(root.chunk_index, 0, Number.MAX_SAFE_INTEGER, `${field}.chunk_index`), text, byte_count, sha256 };
 }
 
-function validateParentRelationships(runs: TraceRunV2[], events: TraceEventV2[], chunks: TraceOutputChunkV2[]): void {
+function validateRequestIdentities(runs: TraceRunV2[], events: TraceEventV2[], chunks: TraceOutputChunkV2[]): void {
   const runIds = new Set<string>();
   for (const run of runs) { if (runIds.has(run.run_id)) throw invalid("duplicate run_id"); runIds.add(run.run_id); }
   const eventIds = new Set<string>();
   const sequences = new Set<string>();
   for (const event of events) {
-    if (!runIds.has(event.run_id)) throw invalid(`event ${event.event_id} has unknown run_id`);
     if (eventIds.has(event.event_id)) throw invalid("duplicate event_id");
     eventIds.add(event.event_id);
     const key = `${event.run_id}\u0000${event.sequence}`;
@@ -224,27 +227,14 @@ function validateParentRelationships(runs: TraceRunV2[], events: TraceEventV2[],
   }
   const chunkIds = new Set<string>();
   const outputKeys = new Set<string>();
-  const counts = new Map<string, { stdout: number; stderr: number }>();
   for (const chunk of chunks) {
-    if (!eventIds.has(chunk.event_id)) throw invalid(`output chunk ${chunk.chunk_id} has unknown event_id`);
     if (chunkIds.has(chunk.chunk_id)) throw invalid("duplicate chunk_id");
     chunkIds.add(chunk.chunk_id);
     const key = `${chunk.event_id}\u0000${chunk.stream}\u0000${chunk.chunk_index}`;
     if (outputKeys.has(key)) throw invalid("duplicate (event_id, stream, chunk_index)");
     outputKeys.add(key);
-    const count = counts.get(chunk.event_id) ?? { stdout: 0, stderr: 0 };
-    count[chunk.stream] += 1;
-    counts.set(chunk.event_id, count);
-  }
-  for (const event of events) {
-    const count = counts.get(event.event_id) ?? { stdout: 0, stderr: 0 };
-    if (count.stdout !== event.stdout_chunks || count.stderr !== event.stderr_chunks) throw invalid(`event ${event.event_id} chunk counts do not match stored chunks`);
   }
   for (const run of runs) {
-    const runEvents = events.filter((event) => event.run_id === run.run_id);
-    const finalSequence = run.final_sequence;
-    if (finalSequence !== null && !runEvents.some((event) => event.sequence === finalSequence)) throw invalid(`run ${run.run_id} final_sequence does not exist`);
-    if (finalSequence !== null && runEvents.some((event) => event.sequence > finalSequence)) throw invalid(`run ${run.run_id} event sequence exceeds final_sequence`);
     if (run.trace_complete && run.final_sequence === null) throw invalid(`run ${run.run_id} trace_complete requires final_sequence`);
   }
 }
