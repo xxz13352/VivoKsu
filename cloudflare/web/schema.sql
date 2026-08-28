@@ -115,12 +115,17 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   started_at INTEGER NOT NULL,            -- epoch 秒
   ended_at INTEGER,
   duration_ms INTEGER,
+  source_schema INTEGER NOT NULL DEFAULT 1 CHECK(source_schema IN (1,2)),
+  trace_run_id TEXT,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(api_user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_kind ON usage_logs(operation_kind);
 CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_logs(created_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_event ON usage_logs(event_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_event_v1
+  ON usage_logs(event_key) WHERE source_schema = 1;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_projection_v2
+  ON usage_logs(trace_run_id) WHERE source_schema = 2;
 
 -- 登录限流(用户门户 /api/login;窗口滑动计数,防止枚举轰炸)
 CREATE TABLE IF NOT EXISTS login_attempts (
@@ -263,6 +268,42 @@ CREATE TABLE IF NOT EXISTS usage_trace_ingest_guards (
   guard_id TEXT PRIMARY KEY,
   valid INTEGER NOT NULL CHECK(valid = 1)
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_usage_logs_validate_projection_insert
+BEFORE INSERT ON usage_logs
+BEGIN
+  SELECT RAISE(ABORT, 'usage log projection provenance invalid')
+  WHERE (NEW.source_schema = 1 AND NEW.trace_run_id IS NOT NULL)
+     OR (NEW.source_schema = 2 AND (
+       NEW.trace_run_id IS NULL
+       OR NEW.event_key IS NOT NEW.trace_run_id
+       OR NEW.api_user_id IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM usage_operation_runs AS run
+         WHERE run.run_id = NEW.trace_run_id
+           AND run.api_user_id = NEW.api_user_id
+           AND run.trace_complete = 1
+       )
+     ));
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_usage_logs_validate_projection_update
+BEFORE UPDATE OF source_schema, trace_run_id, event_key, api_user_id ON usage_logs
+BEGIN
+  SELECT RAISE(ABORT, 'usage log projection provenance invalid')
+  WHERE (NEW.source_schema = 1 AND NEW.trace_run_id IS NOT NULL)
+     OR (NEW.source_schema = 2 AND (
+       NEW.trace_run_id IS NULL
+       OR NEW.event_key IS NOT NEW.trace_run_id
+       OR NEW.api_user_id IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM usage_operation_runs AS run
+         WHERE run.run_id = NEW.trace_run_id
+           AND run.api_user_id = NEW.api_user_id
+           AND run.trace_complete = 1
+       )
+     ));
+END;
 
 CREATE TRIGGER IF NOT EXISTS trg_trace_runs_reject_complete_running_insert
 BEFORE INSERT ON usage_operation_runs

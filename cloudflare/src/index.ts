@@ -718,7 +718,7 @@ async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
   const statement = env.DB.prepare(
     `INSERT INTO usage_logs (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at, ended_at, duration_ms)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(event_key) DO NOTHING`,
+     ON CONFLICT(event_key) WHERE source_schema = 1 DO NOTHING`,
   );
   const batch = logs.map((log) =>
     statement.bind(

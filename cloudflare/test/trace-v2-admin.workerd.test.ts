@@ -172,9 +172,10 @@ describe("administrator trace V2 API", () => {
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO usage_logs
-           (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at)
-         VALUES (41, 7, 'Alice Zhang', 'fastboot_flash', 'Projected copy', 'success', ?, ?)`,
-      ).bind(SUCCESS_RUN_ID, Math.floor(SAME_STARTED_AT_MS / 1000)),
+           (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at,
+            source_schema, trace_run_id)
+         VALUES (41, 7, 'Alice Zhang', 'fastboot_flash', 'Projected copy', 'success', ?, ?, 2, ?)`,
+      ).bind(SUCCESS_RUN_ID, Math.floor(SAME_STARTED_AT_MS / 1000), SUCCESS_RUN_ID),
       env.DB.prepare(
         `INSERT INTO usage_logs
            (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at)
@@ -200,16 +201,53 @@ describe("administrator trace V2 API", () => {
     });
   });
 
-  it("does not resurrect an expired V2 projection as V1 after retention", async () => {
-    const expiredRunId = "019d9c40-7b3c-7000-8000-000000000099";
-    const expiredStartedAtMs = FIXED_NOW_MS - 181 * 24 * 60 * 60 * 1_000;
-    await seedSimpleRun(expiredRunId, "success", expiredStartedAtMs);
+  it("keeps a colliding V1 row visible beside its separately tagged V2 run", async () => {
+    const runId = "019d9c40-7b3c-7000-8000-000000000088";
+    await env.DB.prepare(
+      `INSERT INTO usage_operation_runs
+         (run_id, api_user_id, api_user_name, schema_version, operation_kind, title, outcome,
+          client_version, started_at_ms, trace_complete)
+       VALUES (?, 7, 'Alice Zhang', 2, 'simple', 'Simple run', 'success', '1.4.0', ?, 1)`,
+    ).bind(runId, SAME_STARTED_AT_MS).run();
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO usage_logs
-           (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at)
-         VALUES (71, 7, 'Alice Zhang', 'simple', 'Projected V2 copy', 'success', ?, ?)`,
-      ).bind(expiredRunId, Math.floor(expiredStartedAtMs / 1_000)),
+           (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at,
+            source_schema, trace_run_id)
+         VALUES (81, 8, 'Legacy user', 'legacy', 'Colliding V1 history', 'failed', ?, ?, 1, NULL)`,
+      ).bind(runId, Math.floor((SAME_STARTED_AT_MS - 1_000) / 1_000)),
+      env.DB.prepare(
+        `INSERT INTO usage_logs
+           (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at,
+            source_schema, trace_run_id)
+         VALUES (82, 7, 'Alice Zhang', 'simple', 'Projected V2 copy', 'success', ?, ?, 2, ?)`,
+      ).bind(runId, Math.floor(SAME_STARTED_AT_MS / 1_000), runId),
+    ]);
+
+    const runs = await readPage<TraceRunSummaryV2>("/api/usage-logs/v2/runs?limit=10");
+
+    expect(runs.items.map((item) => item.trace_ref).sort()).toEqual([
+      "v1:81",
+      `v2:${runId}`,
+    ]);
+    expect(runs.items.find((item) => item.trace_ref === "v1:81")).toMatchObject({
+      user_id: 8,
+      title: "Colliding V1 history",
+      source_schema: 1,
+    });
+  });
+
+  it("does not resurrect an expired V2 projection as V1 after retention", async () => {
+    const expiredRunId = "019d9c40-7b3c-7000-8000-000000000099";
+    const expiredStartedAtMs = FIXED_NOW_MS - 181 * 24 * 60 * 60 * 1_000;
+    await seedSimpleRun(expiredRunId, "success", expiredStartedAtMs, null, 1);
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO usage_logs
+           (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at,
+            source_schema, trace_run_id)
+         VALUES (71, 7, 'Alice Zhang', 'simple', 'Projected V2 copy', 'success', ?, ?, 2, ?)`,
+      ).bind(expiredRunId, Math.floor(expiredStartedAtMs / 1_000), expiredRunId),
       env.DB.prepare(
         `INSERT INTO usage_logs
            (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at)
@@ -752,13 +790,14 @@ async function seedSimpleRun(
   outcome: "success" | "failed",
   startedAtMs: number,
   errorCode: string | null = null,
+  traceComplete = 0,
 ): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO usage_operation_runs
        (run_id, api_user_id, api_user_name, schema_version, operation_kind, title, outcome,
         client_version, started_at_ms, error_code, trace_complete)
-     VALUES (?, 7, 'Alice Zhang', 2, 'simple', 'Simple run', ?, '1.4.0', ?, ?, 0)`,
-  ).bind(runId, outcome, startedAtMs, errorCode).run();
+     VALUES (?, 7, 'Alice Zhang', 2, 'simple', 'Simple run', ?, '1.4.0', ?, ?, ?)`,
+  ).bind(runId, outcome, startedAtMs, errorCode, traceComplete).run();
 }
 
 function seedRomLog(

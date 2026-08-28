@@ -128,9 +128,7 @@ WITH combined_runs AS (
     NULL AS error_code
   FROM usage_logs AS l
   LEFT JOIN api_users AS u ON u.id = l.api_user_id
-  WHERE NOT EXISTS (
-    SELECT 1 FROM usage_operation_runs AS projected WHERE projected.run_id = l.event_key
-  )
+  WHERE l.source_schema = 1
 )
 `;
 

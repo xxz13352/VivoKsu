@@ -234,6 +234,7 @@ async function prepareTraceUpload(
     payload.runs
       .filter((run) => run.trace_complete && run.outcome !== "running")
       .map((run) => run.run_id),
+    user.id,
   );
   const completedRunIds = new Set(
     persistedRuns.filter((run) => run.trace_complete === 1).map((run) => run.run_id),
@@ -595,14 +596,20 @@ async function readPersistedRuns(db: D1Database, runIds: string[]): Promise<Pers
   );
 }
 
-async function readProjectedRunIds(db: D1Database, runIds: string[]): Promise<Set<string>> {
-  const rows = await readRowsByIds<{ event_key: string }>(db,
-    `SELECT event_key
-     FROM usage_logs`,
-    "event_key",
-    runIds,
-  );
-  return new Set(rows.map((row) => row.event_key));
+async function readProjectedRunIds(db: D1Database, runIds: string[], userId: number): Promise<Set<string>> {
+  const uniqueIds = [...new Set(runIds)];
+  const batches: string[][] = [];
+  for (let offset = 0; offset < uniqueIds.length; offset += D1_READ_ID_BATCH_SIZE) {
+    batches.push(uniqueIds.slice(offset, offset + D1_READ_ID_BATCH_SIZE));
+  }
+  const results = await Promise.all(batches.map((batch) => db.prepare(
+    `SELECT trace_run_id
+     FROM usage_logs
+     WHERE source_schema = 2
+       AND api_user_id = ?
+       AND trace_run_id IN (${batch.map(() => "?").join(",")})`,
+  ).bind(userId, ...batch).all<{ trace_run_id: string }>()));
+  return new Set(results.flatMap((result) => result.results.map((row) => row.trace_run_id)));
 }
 
 function persistedRunMatches(
@@ -882,12 +889,20 @@ async function findCrossUserOwnershipConflict(
       "usage_operation_runs.api_user_id",
       payload.output_chunks.map((chunk) => chunk.chunk_id),
     ),
+    ownershipRows(
+      db,
+      "trace_run_id",
+      "usage_logs",
+      "api_user_id",
+      payload.runs.filter((run) => run.trace_complete).map((run) => run.run_id),
+    ),
   ] as const;
-  const [runs, events, chunks] = await Promise.all(checks);
+  const [runs, events, chunks, projections] = await Promise.all(checks);
   return [
     ...ownershipConflicts("run", runs, userId),
     ...ownershipConflicts("event", events, userId),
     ...ownershipConflicts("output_chunk", chunks, userId),
+    ...ownershipConflicts("run", projections, userId),
   ];
 }
 
@@ -1059,9 +1074,10 @@ function buildTraceStatements(
     if (!run.trace_complete || run.outcome === "running") continue;
     statements.push(db.prepare(
       `INSERT INTO usage_logs
-         (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at, ended_at, duration_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(event_key) DO NOTHING`,
+         (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at, ended_at,
+          duration_ms, source_schema, trace_run_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?)
+       ON CONFLICT(trace_run_id) WHERE source_schema = 2 DO NOTHING`,
     ).bind(
       user.id,
       persistedRunById.get(run.run_id)?.api_user_name ?? user.name,
@@ -1072,6 +1088,7 @@ function buildTraceStatements(
       Math.floor(run.started_at_ms / 1000),
       run.ended_at_ms === null ? null : Math.floor(run.ended_at_ms / 1000),
       run.duration_ms,
+      run.run_id,
     ));
   }
   statements.push(db.prepare(
@@ -1122,6 +1139,15 @@ function buildIngestGuardStatement(
     "chunk_id",
     "usage_operation_runs.api_user_id",
     payload.output_chunks.map((chunk) => chunk.chunk_id),
+    userId,
+  );
+  appendOwnershipGuardCheck(
+    checks,
+    bindings,
+    "usage_logs",
+    "trace_run_id",
+    "api_user_id",
+    payload.runs.filter((run) => run.trace_complete).map((run) => run.run_id),
     userId,
   );
   appendSealedOpenRunGuard(checks, bindings, referencedRunIds, userId);

@@ -253,6 +253,41 @@ describe("trace V2 retention", () => {
     expect(await rowCount("usage_logs", "event_key", "legacy-unrelated")).toBe(1);
   });
 
+  it("deletes only the owner-bound V2 projection when a V1 row has the same event key", async () => {
+    const runId = "019d9c40-7b3c-7000-8000-000000000188";
+    const startedAtMs = FIXED_NOW_MS - 181 * DAY_MS;
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO usage_operation_runs
+           (run_id, api_user_id, api_user_name, schema_version, operation_kind, title, outcome,
+            client_version, started_at_ms, ended_at_ms, duration_ms, final_sequence, trace_complete,
+            retention_detail_cleared)
+         VALUES (?, 7, 'User 7', 2, 'retention', 'Expired V2', 'success', '1.4.0', ?, ?, 1, 1, 1, 1)`,
+      ).bind(runId, startedAtMs, startedAtMs + 1),
+      env.DB.prepare(
+        `INSERT INTO usage_logs
+           (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at,
+            source_schema, trace_run_id)
+         VALUES (8, 'Legacy user', 'legacy', 'Colliding V1 history', 'failed', ?, ?, 1, NULL)`,
+      ).bind(runId, Math.floor(startedAtMs / 1_000)),
+      env.DB.prepare(
+        `INSERT INTO usage_logs
+           (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at,
+            source_schema, trace_run_id)
+         VALUES (7, 'User 7', 'retention', 'Expired V2', 'success', ?, ?, 2, ?)`,
+      ).bind(runId, Math.floor(startedAtMs / 1_000), runId),
+    ]);
+
+    const result = await purgeExpiredTraceData(env.DB, FIXED_NOW_MS);
+    const remaining = await env.DB.prepare(
+      "SELECT api_user_id, source_schema, trace_run_id FROM usage_logs WHERE event_key = ?",
+    ).bind(runId).all<{ api_user_id: number; source_schema: number; trace_run_id: string | null }>();
+
+    expect(result.runs_deleted).toBe(1);
+    expect(await rowCount("usage_operation_runs", "run_id", runId)).toBe(0);
+    expect(remaining.results).toEqual([{ api_user_id: 8, source_schema: 1, trace_run_id: null }]);
+  });
+
   it("clears operational detail after thirty days but preserves run and event metadata", async () => {
     const trace = await seedTrace("thirty-one", 31);
 
@@ -573,13 +608,18 @@ async function seedTraceBatch(
     if (includeProjection) {
       statementsForTrace.push(
         env.DB.prepare(
+          "UPDATE usage_operation_runs SET trace_complete = 1 WHERE run_id = ?",
+        ).bind(trace.runId),
+        env.DB.prepare(
           `INSERT INTO usage_logs
-             (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at)
-           VALUES (7, 'User 7', 'fastboot_flash', ?, 'success', ?, ?)`,
+             (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at,
+              source_schema, trace_run_id)
+           VALUES (7, 'User 7', 'fastboot_flash', ?, 'success', ?, ?, 2, ?)`,
         ).bind(
           `Projected ${trace.runId}`,
           trace.runId,
           Math.floor(startedAtMs / 1_000),
+          trace.runId,
         ),
       );
     }

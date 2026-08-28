@@ -160,10 +160,10 @@ export async function purgeExpiredTraceData(
     db.prepare(
       `DELETE FROM usage_logs
        WHERE id IN (
-         SELECT legacy.id
-         FROM usage_logs AS legacy
+         SELECT projection.id
+         FROM usage_logs AS projection
          JOIN (
-           SELECT run.run_id, run.started_at_ms
+           SELECT run.run_id, run.api_user_id, run.started_at_ms
            FROM usage_operation_runs AS run
            WHERE run.started_at_ms < ?
              AND NOT EXISTS (
@@ -173,10 +173,13 @@ export async function purgeExpiredTraceData(
              )
            ORDER BY run.started_at_ms ASC, run.run_id ASC
            LIMIT ?
-         ) AS expired_run ON expired_run.run_id = legacy.event_key
+         ) AS expired_run
+           ON projection.source_schema = 2
+          AND projection.trace_run_id = expired_run.run_id
+          AND projection.api_user_id = expired_run.api_user_id
          ORDER BY expired_run.started_at_ms ASC,
                   expired_run.run_id ASC,
-                  legacy.id ASC
+                  projection.id ASC
          LIMIT ?
        )`,
     ).bind(cutoff180d, RETENTION_BATCH_LIMIT, RETENTION_BATCH_LIMIT),
@@ -196,8 +199,10 @@ export async function purgeExpiredTraceData(
        )
          AND NOT EXISTS (
            SELECT 1
-           FROM usage_logs AS legacy
-           WHERE legacy.event_key = usage_operation_runs.run_id
+           FROM usage_logs AS projection
+           WHERE projection.source_schema = 2
+             AND projection.trace_run_id = usage_operation_runs.run_id
+             AND projection.api_user_id = usage_operation_runs.api_user_id
          )`,
     ).bind(cutoff180d, RETENTION_BATCH_LIMIT),
   ]);

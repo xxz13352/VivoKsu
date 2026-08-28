@@ -2,6 +2,10 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations, reset, type D1Migration } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { purgeExpiredTraceData } from "../src/trace-v2-retention";
+import type { KeysetPageV2, TraceRunSummaryV2 } from "../src/trace-v2-contract";
+import { listTraceRunsV2 } from "../web/src/trace-v2-query";
+
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_MIGRATIONS: D1Migration[];
@@ -29,6 +33,136 @@ describe("usage trace V2 D1 migration", () => {
     expect(await tableExists("usage_operation_runs")).toBe(true);
     expect(await tableExists("usage_operation_events")).toBe(true);
     expect(await tableExists("usage_output_chunks")).toBe(true);
+    expect(await columnExists("usage_logs", "source_schema")).toBe(true);
+    expect(await columnExists("usage_logs", "trace_run_id")).toBe(true);
+    expect(await scalar("SELECT source_schema AS value FROM usage_logs WHERE event_key='legacy-1'")).toBe(1);
+  });
+
+  it("upgrades legacy usage logs and allows a tagged V2 projection with the same event key", async () => {
+    const runId = "019d9c40-7b3c-7000-8000-000000000288";
+    await env.DB.prepare(
+      "INSERT INTO usage_logs (api_user_id, operation_kind,status,event_key,started_at) VALUES (8,'legacy','success',?,1)",
+    ).bind(runId).run();
+    await migrateTraceV2();
+    await seedDbRunWithState(runId, "success", 1);
+
+    await env.DB.prepare(
+      `INSERT INTO usage_logs
+         (api_user_id, operation_kind, status, event_key, started_at, source_schema, trace_run_id)
+       VALUES (7, 'projection', 'success', ?, 1, 2, ?)`,
+    ).bind(runId, runId).run();
+
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ?", runId)).toBe(2);
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ? AND source_schema = 1 AND trace_run_id IS NULL",
+      runId,
+    )).toBe(1);
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ? AND source_schema = 2 AND trace_run_id = ?",
+      runId,
+      runId,
+    )).toBe(1);
+  });
+
+  it("backfills only exact pre-stage projections and preserves a colliding foreign V1 row", async () => {
+    const projectionRunId = "019d9c40-7b3c-7000-8000-000000000290";
+    const collisionRunId = "019d9c40-7b3c-7000-8000-000000000291";
+    const migrations = env.TEST_TRACE_V2_UPGRADE_MIGRATIONS ?? [];
+    await applyD1Migrations(env.DB, migrations.slice(0, -1));
+    await env.DB.exec("CREATE UNIQUE INDEX idx_usage_event ON usage_logs(event_key)");
+    await seedDbRunWithState(projectionRunId, "success", 1);
+    await seedDbRunWithState(collisionRunId, "success", 1);
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO usage_logs
+           (id, api_user_id, api_user_name, operation_kind, title, status, event_key,
+            started_at, ended_at, duration_ms, created_at)
+         SELECT 90, api_user_id, api_user_name, operation_kind, title, outcome, run_id,
+                CAST(started_at_ms / 1000 AS INTEGER),
+                CASE WHEN ended_at_ms IS NULL THEN NULL ELSE CAST(ended_at_ms / 1000 AS INTEGER) END,
+                duration_ms, created_at
+         FROM usage_operation_runs WHERE run_id = ?`,
+      ).bind(projectionRunId),
+      env.DB.prepare(
+        `INSERT INTO usage_logs
+           (id, api_user_id, api_user_name, operation_kind, title, status, event_key, started_at)
+         VALUES (91, 8, 'Foreign legacy user', 'legacy', 'Colliding V1 history', 'failed', ?, 1)`,
+      ).bind(collisionRunId),
+    ]);
+
+    await applyD1Migrations(env.DB, migrations.slice(-1));
+
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_logs WHERE id = 90 AND source_schema = 2 AND trace_run_id = ?",
+      projectionRunId,
+    )).toBe(1);
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_logs WHERE id = 91 AND source_schema = 1 AND trace_run_id IS NULL",
+    )).toBe(1);
+    await env.DB.exec(
+      "CREATE TABLE api_users (id INTEGER PRIMARY KEY, username TEXT NOT NULL, name TEXT NOT NULL)",
+    );
+    const response = await listTraceRunsV2(
+      new Request("https://web.nwflash.cc.cd/api/usage-logs/v2/runs?limit=10"),
+      new URL("https://web.nwflash.cc.cd/api/usage-logs/v2/runs?limit=10"),
+      { DB: env.DB },
+    );
+    const page = await response.json() as KeysetPageV2<TraceRunSummaryV2>;
+    expect(page.items.map((item) => item.trace_ref).sort()).toEqual([
+      "v1:91",
+      `v2:${projectionRunId}`,
+      `v2:${collisionRunId}`,
+    ].sort());
+    await expect(env.DB.prepare(
+      "UPDATE usage_logs SET api_user_id = 8 WHERE id = 90",
+    ).run()).rejects.toThrow(/projection provenance/i);
+    await expect(env.DB.prepare(
+      `INSERT INTO usage_logs
+         (api_user_id, operation_kind, status, event_key, started_at, source_schema, trace_run_id)
+       VALUES (8, 'forged-stage', 'success', ?, 1, 2, ?)`,
+    ).bind(collisionRunId, collisionRunId).run()).rejects.toThrow(/projection provenance/i);
+
+    await purgeExpiredTraceData(env.DB, Date.UTC(2026, 7, 28));
+
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_operation_runs")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs WHERE source_schema = 2")).toBe(0);
+    expect(await scalar("SELECT COUNT(*) AS value FROM usage_logs WHERE id = 91 AND source_schema = 1")).toBe(1);
+  });
+
+  it("rejects forged projection provenance in a fresh schema", async () => {
+    const runId = "019d9c40-7b3c-7000-8000-000000000289";
+    await applyFreshSchema();
+    await seedDbRunWithState(runId, "success", 1);
+
+    await expect(env.DB.prepare(
+      `INSERT INTO usage_logs
+         (api_user_id, operation_kind, status, event_key, started_at, source_schema, trace_run_id)
+       VALUES (8, 'forged-owner', 'success', ?, 1, 2, ?)`,
+    ).bind(runId, runId).run()).rejects.toThrow(/projection provenance/i);
+    await env.DB.prepare(
+      `INSERT INTO usage_logs
+         (api_user_id, operation_kind, status, event_key, started_at, source_schema, trace_run_id)
+       VALUES (7, 'valid-projection', 'success', ?, 1, 2, ?)`,
+    ).bind(runId, runId).run();
+    await expect(env.DB.prepare(
+      "UPDATE usage_logs SET api_user_id = 8 WHERE trace_run_id = ?",
+    ).bind(runId).run()).rejects.toThrow(/projection provenance/i);
+    await expect(env.DB.prepare(
+      "UPDATE usage_logs SET trace_run_id = '019d9c40-7b3c-7000-8000-000000000299' WHERE trace_run_id = ?",
+    ).bind(runId).run()).rejects.toThrow(/projection provenance/i);
+    await expect(env.DB.prepare(
+      "UPDATE usage_logs SET source_schema = 1 WHERE trace_run_id = ?",
+    ).bind(runId).run()).rejects.toThrow(/projection provenance/i);
+    await expect(env.DB.prepare(
+      `INSERT INTO usage_logs
+         (api_user_id, operation_kind, status, event_key, started_at, source_schema, trace_run_id)
+       VALUES (7, 'forged-binding', 'success', ?, 1, 2, '019d9c40-7b3c-7000-8000-000000000299')`,
+    ).bind(runId).run()).rejects.toThrow(/projection provenance/i);
+    await expect(env.DB.prepare(
+      `INSERT INTO usage_logs
+         (api_user_id, operation_kind, status, event_key, started_at, source_schema, trace_run_id)
+       VALUES (7, 'forged-v1', 'success', ?, 1, 1, ?)`,
+    ).bind(runId, runId).run()).rejects.toThrow(/projection provenance/i);
   });
 
   it("upgrades legacy triggers through the idempotent P0 forward migration", async () => {
@@ -57,7 +191,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("creates the final retention marker shape in a fresh schema", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
     await seedDbRun("run-fresh-retention-shape");
     await seedDbEvent("event-fresh-retention-shape", "run-fresh-retention-shape", 1, 0, 0);
 
@@ -83,7 +217,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("rejects a direct event sequence above one hundred in a fresh schema", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
     await seedDbRun("run-schema-sequence-limit");
 
     await expect(seedDbEvent("event-schema-sequence-limit", "run-schema-sequence-limit", 101, 0, 0))
@@ -91,7 +225,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("keeps sequence one hundred legal and rejects a higher update in a fresh schema", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
     await seedDbRun("run-schema-sequence-insert");
     await expect(seedDbEvent(
       "event-schema-sequence-insert",
@@ -134,7 +268,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("rejects a complete running run insert in a fresh schema and allows a terminal one", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
 
     await expect(seedDbRunWithState("run-schema-complete-running", "running", 1))
       .rejects.toThrow(/terminal outcome/i);
@@ -233,7 +367,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("seals direct event and chunk inserts in the fresh schema", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
     await expectSealedTrigger("trg_trace_events_reject_completed_run");
     await expectSealedTrigger("trg_trace_chunks_reject_completed_run");
     await seedDbRun("run-schema-open-sealed");
@@ -281,7 +415,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("rejects finalizing a sealed fresh run before terminal and evidence checks", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
     await seedDbRunWithCompleteEvidence("run-schema-finalize-sealed");
     await env.DB.prepare(
       "UPDATE usage_operation_runs SET retention_detail_cleared = 1 WHERE run_id = 'run-schema-finalize-sealed'",
@@ -306,7 +440,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("rejects direct detail changes and marker reset on a sealed fresh run", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
     await assertSealedRunDetailUpdates("run-schema-detail-sealed");
   });
 
@@ -319,7 +453,7 @@ describe("usage trace V2 D1 migration", () => {
   });
 
   it("rejects direct detail changes and marker reset on a sealed fresh event", async () => {
-    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    await applyFreshSchema();
     await assertSealedEventDetailUpdates(
       "run-schema-event-detail-sealed",
       "event-schema-detail-sealed",
@@ -453,6 +587,11 @@ async function migrateTraceV2(): Promise<void> {
   await applyD1Migrations(env.DB, env.TEST_TRACE_V2_UPGRADE_MIGRATIONS ?? []);
 }
 
+async function applyFreshSchema(): Promise<void> {
+  await env.DB.exec("DROP TABLE usage_logs");
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+}
+
 async function seedDbRun(runId: string): Promise<D1Result<unknown>> {
   return seedDbRunWithState(runId, "running", 0);
 }
@@ -566,6 +705,24 @@ async function assertRetentionStageShape(): Promise<void> {
     columns: "run_id,sequence,event_id",
     partial: 1,
   });
+  expect(await columnDefinition("usage_logs", "source_schema")).toEqual({
+    dflt_value: "1",
+    not_null: 1,
+  });
+  expect(await columnDefinition("usage_logs", "trace_run_id")).toEqual({
+    dflt_value: null,
+    not_null: 0,
+  });
+  expect(await namedIndexDefinition("usage_logs", "idx_usage_event_v1")).toEqual({
+    columns: "event_key",
+    partial: 1,
+  });
+  expect(await namedIndexDefinition("usage_logs", "idx_usage_projection_v2")).toEqual({
+    columns: "trace_run_id",
+    partial: 1,
+  });
+  expect(await triggerSql("trg_usage_logs_validate_projection_insert")).toMatch(/projection provenance invalid/i);
+  expect(await triggerSql("trg_usage_logs_validate_projection_update")).toMatch(/projection provenance invalid/i);
 }
 
 async function retentionColumnDefinition(table: string): Promise<{ dflt_value: string | null; not_null: number } | null> {
@@ -574,19 +731,32 @@ async function retentionColumnDefinition(table: string): Promise<{ dflt_value: s
   ).bind(table).first<{ dflt_value: string | null; not_null: number }>();
 }
 
+async function columnDefinition(
+  table: string,
+  column: string,
+): Promise<{ dflt_value: string | null; not_null: number } | null> {
+  return env.DB.prepare(
+    "SELECT dflt_value, [notnull] AS not_null FROM pragma_table_info(?) WHERE name = ?",
+  ).bind(table, column).first<{ dflt_value: string | null; not_null: number }>();
+}
+
 async function indexDefinition(name: string): Promise<{ columns: string; partial: number } | null> {
+  return namedIndexDefinition(name.includes("runs") ? "usage_operation_runs" : "usage_operation_events", name);
+}
+
+async function namedIndexDefinition(
+  table: string,
+  name: string,
+): Promise<{ columns: string; partial: number } | null> {
   return env.DB.prepare(
     `SELECT (
        SELECT group_concat(name, ',')
        FROM (SELECT name FROM pragma_index_info(?) ORDER BY seqno)
      ) AS columns,
      partial
-     FROM pragma_index_list(CASE
-       WHEN ? LIKE '%runs%' THEN 'usage_operation_runs'
-       ELSE 'usage_operation_events'
-     END)
+     FROM pragma_index_list(?)
      WHERE name = ?`,
-  ).bind(name, name, name).first<{ columns: string; partial: number }>();
+  ).bind(name, table, name).first<{ columns: string; partial: number }>();
 }
 
 async function triggerSql(name: string): Promise<string> {
@@ -691,8 +861,8 @@ async function assertSealedEventDetailUpdates(runId: string, eventId: string): P
   });
 }
 
-async function scalar(query: string): Promise<number> {
-  const row = await env.DB.prepare(query).first<{ value: number }>();
+async function scalar(query: string, ...bindings: unknown[]): Promise<number> {
+  const row = await env.DB.prepare(query).bind(...bindings).first<{ value: number }>();
   return Number(row?.value ?? 0);
 }
 

@@ -267,6 +267,52 @@ describe("POST /api/usage/traces/v2", () => {
     expect(await text("SELECT source_ip AS value FROM usage_operation_runs WHERE run_id = ?", successFixture.runs[0].run_id)).toBe("203.0.113.45");
   });
 
+  it("keeps a cross-user V1 event key while creating an owner-bound V2 projection", async () => {
+    await seedUser("trace-bearer", 7);
+    const runId = successFixture.runs[0].run_id;
+    await env.DB.prepare(
+      `INSERT INTO usage_logs
+         (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at)
+       VALUES (8, 'Legacy user', 'legacy', 'Unrelated V1 UUID key', 'failed', ?, ?)`,
+    ).bind(runId, Math.floor(successFixture.runs[0].started_at_ms / 1_000)).run();
+
+    const response = await postTrace(successFixture, "trace-bearer", "203.0.113.45");
+    const rows = await env.DB.prepare(
+      `SELECT api_user_id, source_schema, trace_run_id
+       FROM usage_logs WHERE event_key = ? ORDER BY source_schema`,
+    ).bind(runId).all<{ api_user_id: number; source_schema: number; trace_run_id: string | null }>();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(successAckFixture);
+    expect(rows.results).toEqual([
+      { api_user_id: 8, source_schema: 1, trace_run_id: null },
+      { api_user_id: 7, source_schema: 2, trace_run_id: runId },
+    ]);
+  });
+
+  it("keeps legacy usage-log retries idempotent with the V1 partial unique index", async () => {
+    await seedUser("trace-bearer", 7);
+    const eventKey = "019d9c40-7b3c-7000-8000-000000000089";
+    const payload = {
+      logs: [{
+        operation: "legacy",
+        title: "Legacy idempotent retry",
+        status: "success",
+        event_id: eventKey,
+        started_at: 1_787_500_000,
+      }],
+    };
+
+    const first = await postLegacyUsage(payload, "trace-bearer");
+    const retry = await postLegacyUsage(payload, "trace-bearer");
+
+    expect([first.status, retry.status]).toEqual([200, 200]);
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_logs WHERE event_key = ? AND source_schema = 1",
+      eventKey,
+    )).toBe(1);
+  });
+
   it("persists the frozen open to child-only to finalize-only fixture chain", async () => {
     await seedUser("trace-bearer", 7);
 
@@ -2197,6 +2243,38 @@ describe("POST /api/usage/traces/v2", () => {
     )).toBe(1);
   });
 
+  it("keeps one owner-bound projection for concurrent same-user terminal retries", async () => {
+    await seedUser("trace-bearer", 7);
+    const [firstDb, secondDb] = pairedBatchBarrierDatabases();
+    const user = { id: 7, username: "user-7", name: "User 7", bearer_token: "trace-bearer" };
+
+    const responses = await Promise.all([
+      ingestTraceUploadV2(
+        { DB: firstDb },
+        traceRequest(successFixture, "trace-bearer", "203.0.113.61"),
+        user,
+      ),
+      ingestTraceUploadV2(
+        { DB: secondDb },
+        traceRequest(successFixture, "trace-bearer", "203.0.113.62"),
+        user,
+      ),
+    ]);
+    const bodies = await Promise.all(responses.map((response) => response.json() as Promise<any>));
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(bodies).toEqual([successAckFixture, successAckFixture]);
+    expect(await scalar(
+      `SELECT COUNT(*) AS value FROM usage_logs
+       WHERE source_schema = 2 AND trace_run_id = ? AND api_user_id = 7`,
+      successFixture.runs[0].run_id,
+    )).toBe(1);
+    expect(await scalar(
+      "SELECT COUNT(*) AS value FROM usage_logs WHERE source_schema = 1 AND event_key = ?",
+      successFixture.runs[0].run_id,
+    )).toBe(0);
+  });
+
   it("does not persist plaintext appended to redaction markers", async () => {
     await seedUser("trace-bearer", 7);
     const canonical = copySuccess();
@@ -2825,6 +2903,18 @@ async function postTrace(payload: unknown, token: string | null, ip: string): Pr
   return exports.default.fetch(new Request("https://api.nwflash.cc.cd/api/usage/traces/v2", {
     method: "POST",
     headers,
+    body: JSON.stringify(payload),
+  }), env);
+}
+
+async function postLegacyUsage(payload: unknown, token: string): Promise<Response> {
+  return exports.default.fetch(new Request("https://api.nwflash.cc.cd/api/usage/logs", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+      "X-Nwflash-Version": "1.4.0",
+    },
     body: JSON.stringify(payload),
   }), env);
 }

@@ -1,3 +1,35 @@
+ALTER TABLE usage_logs
+  ADD COLUMN source_schema INTEGER NOT NULL DEFAULT 1
+  CHECK(source_schema IN (1,2));
+
+ALTER TABLE usage_logs
+  ADD COLUMN trace_run_id TEXT;
+
+-- Pre-stage V2 projection rows have no explicit provenance. Backfill only rows whose owner,
+-- binding, terminal state, summary fields, timestamps, and creation second exactly match the
+-- V2 run. Ambiguous or foreign legacy rows remain source_schema=1.
+UPDATE usage_logs
+SET source_schema = 2,
+    trace_run_id = event_key
+WHERE EXISTS (
+  SELECT 1
+  FROM usage_operation_runs AS run
+  WHERE run.trace_complete = 1
+    AND run.run_id IS usage_logs.event_key
+    AND run.api_user_id IS usage_logs.api_user_id
+    AND run.api_user_name IS usage_logs.api_user_name
+    AND run.operation_kind IS usage_logs.operation_kind
+    AND run.title IS usage_logs.title
+    AND run.outcome IS usage_logs.status
+    AND CAST(run.started_at_ms / 1000 AS INTEGER) IS usage_logs.started_at
+    AND CASE
+      WHEN run.ended_at_ms IS NULL THEN NULL
+      ELSE CAST(run.ended_at_ms / 1000 AS INTEGER)
+    END IS usage_logs.ended_at
+    AND run.duration_ms IS usage_logs.duration_ms
+    AND run.created_at IS usage_logs.created_at
+);
+
 ALTER TABLE usage_operation_runs
   ADD COLUMN retention_detail_cleared INTEGER NOT NULL DEFAULT 0
   CHECK(retention_detail_cleared IN (0,1));
@@ -13,6 +45,50 @@ CREATE INDEX idx_trace_runs_retention_detail_pending
 CREATE INDEX idx_trace_events_retention_detail_pending
   ON usage_operation_events(run_id, sequence, event_id)
   WHERE retention_detail_cleared = 0;
+
+DROP INDEX IF EXISTS idx_usage_event;
+CREATE UNIQUE INDEX idx_usage_event_v1
+  ON usage_logs(event_key) WHERE source_schema = 1;
+CREATE UNIQUE INDEX idx_usage_projection_v2
+  ON usage_logs(trace_run_id) WHERE source_schema = 2;
+
+DROP TRIGGER IF EXISTS trg_usage_logs_validate_projection_insert;
+CREATE TRIGGER trg_usage_logs_validate_projection_insert
+BEFORE INSERT ON usage_logs
+BEGIN
+  SELECT RAISE(ABORT, 'usage log projection provenance invalid')
+  WHERE (NEW.source_schema = 1 AND NEW.trace_run_id IS NOT NULL)
+     OR (NEW.source_schema = 2 AND (
+       NEW.trace_run_id IS NULL
+       OR NEW.event_key IS NOT NEW.trace_run_id
+       OR NEW.api_user_id IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM usage_operation_runs AS run
+         WHERE run.run_id = NEW.trace_run_id
+           AND run.api_user_id = NEW.api_user_id
+           AND run.trace_complete = 1
+       )
+     ));
+END;
+
+DROP TRIGGER IF EXISTS trg_usage_logs_validate_projection_update;
+CREATE TRIGGER trg_usage_logs_validate_projection_update
+BEFORE UPDATE OF source_schema, trace_run_id, event_key, api_user_id ON usage_logs
+BEGIN
+  SELECT RAISE(ABORT, 'usage log projection provenance invalid')
+  WHERE (NEW.source_schema = 1 AND NEW.trace_run_id IS NOT NULL)
+     OR (NEW.source_schema = 2 AND (
+       NEW.trace_run_id IS NULL
+       OR NEW.event_key IS NOT NEW.trace_run_id
+       OR NEW.api_user_id IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM usage_operation_runs AS run
+         WHERE run.run_id = NEW.trace_run_id
+           AND run.api_user_id = NEW.api_user_id
+           AND run.trace_complete = 1
+       )
+     ));
+END;
 
 DROP TRIGGER IF EXISTS trg_trace_events_reject_sealed_detail_update;
 CREATE TRIGGER trg_trace_events_reject_sealed_detail_update
