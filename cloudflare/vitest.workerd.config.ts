@@ -6,8 +6,33 @@ import path from "node:path";
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
+const adminTextModulePaths = new Set([
+  "web/src/admin/index.html",
+  "web/src/admin/styles.css",
+  "web/src/admin/app.js",
+  "web/src/admin/api.js",
+  "web/src/admin/router.js",
+  "web/src/admin/components.js",
+  "web/src/admin/pages/audit.js",
+  "web/src/admin/pages/overview.js",
+  "web/src/admin/pages/versions.js",
+  "web/src/admin/pages/users.js",
+  "web/src/admin/pages/sessions.js",
+  "web/src/admin/pages/rom.js",
+].map((relative) => canonicalModulePath(path.join(import.meta.dirname, relative))));
+
 export default defineConfig({
   plugins: [
+    {
+      name: "admin-static-text-modules",
+      enforce: "pre",
+      async load(id) {
+        const filename = id.split("?", 1)[0];
+        if (!adminTextModulePaths.has(canonicalModulePath(filename))) return null;
+        const source = await readFile(filename, "utf8");
+        return { code: `export default ${JSON.stringify(source)};`, map: null };
+      },
+    },
     cloudflareTest(async () => {
       const migrationDirectory = await mkdtemp(path.join(tmpdir(), "nwflash-workerd-migrations-"));
       const schema = await readFile(path.join(import.meta.dirname, "web", "schema.sql"), "utf8");
@@ -41,7 +66,9 @@ export default defineConfig({
         wrangler: { configPath: "./wrangler.toml" },
         miniflare: {
           modulesRules: [
-            { type: "Text", include: ["**/*.sql", "**/*.html", "**/*.css", "**/admin/**/*.js"], fallthrough: true },
+            { type: "Text", include: ["**/*.sql"], fallthrough: true },
+            { type: "Text", include: ["**/*.html", "**/*.css"], fallthrough: true },
+            { type: "Text", include: ["**/admin/*.js", "**/admin/**/*.js"], fallthrough: false },
           ],
           bindings: {
             TEST_MIGRATIONS: migrations,
@@ -59,3 +86,7 @@ export default defineConfig({
     testTimeout: 10_000,
   },
 });
+
+function canonicalModulePath(filename: string): string {
+  return path.resolve(filename).replaceAll("\\", "/").toLowerCase();
+}

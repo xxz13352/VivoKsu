@@ -36,16 +36,24 @@ const DAY_MS = 86_400_000;
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TRACE_OUTCOMES = new Set(["running", "success", "failed", "canceled", "denied", "aborted", "unknown"]);
 
-const RESPONSE_HEADERS: Record<string, string> = {
+export const ADMIN_RESPONSE_SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   "Cache-Control": "no-store",
-  "Content-Type": "application/json; charset=utf-8",
   "Content-Security-Policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+    "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
+    + "object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    + "font-src 'self'; connect-src 'self'",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Resource-Policy": "same-origin",
   "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
   "Referrer-Policy": "no-referrer",
   "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
+});
+
+const RESPONSE_HEADERS: Record<string, string> = {
+  ...ADMIN_RESPONSE_SECURITY_HEADERS,
+  "Content-Type": "application/json; charset=utf-8",
 };
 
 const COMBINED_RUNS_CTE = `
