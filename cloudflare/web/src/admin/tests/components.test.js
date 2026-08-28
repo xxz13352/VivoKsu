@@ -45,6 +45,40 @@ describe("DOM-safe primitives", () => {
       /URL/i,
     );
   });
+
+  it("rejects network-path, credentialed, control-character, and unsafe blank-target links", () => {
+    const { window } = createDom();
+
+    for (const href of [
+      "//evil.example/payload",
+      "\\\\evil.example\\payload",
+      "/\\evil.example/payload",
+      "https://user:password@example.test/archive.zip",
+      "https://example.test/archive.zip\nignored",
+    ]) {
+      expect(() => createSafeElement(window.document, "a", { href }, "unsafe")).toThrow(/URL/i);
+    }
+    expect(() => createSafeElement(
+      window.document,
+      "a",
+      { href: "https://example.test/archive.zip", target: "_blank" },
+      "missing rel",
+    )).toThrow(/noopener/i);
+    expect(() => createSafeElement(
+      window.document,
+      "a",
+      { href: "https://example.test/archive.zip", target: "_BlAnK" },
+      "mixed-case blank target",
+    )).toThrow(/noopener/i);
+    expect(() => createSafeElement(
+      window.document,
+      "a",
+      { href: "https://example.test/archive.zip", target: "_blank", rel: "noopener noreferrer" },
+      "safe",
+    )).not.toThrow();
+    expect(() => createSafeElement(window.document, "a", { href: "/admin/app.js" }, "same origin"))
+      .not.toThrow();
+  });
 });
 
 describe("page states and announcements", () => {
@@ -89,6 +123,21 @@ describe("page states and announcements", () => {
     cancel();
     dismiss();
     expect(alerts.textContent).toBe("");
+  });
+
+  it("gives a dismissible persistent alert a full-size uniquely named control", () => {
+    const { window } = createDom();
+    const alerts = window.document.createElement("div");
+
+    showPersistentAlert(alerts, {
+      title: "版本刷新失败",
+      message: "请重试。",
+      dismissLabel: "关闭",
+    });
+
+    const dismiss = alerts.querySelector("button");
+    expect(dismiss.classList.contains("button")).toBe(true);
+    expect(dismiss.getAttribute("aria-label")).toContain("版本刷新失败");
   });
 });
 
@@ -223,6 +272,41 @@ describe("confirmation dialog", () => {
     expect(dialog.isOpen()).toBe(true);
     expect(confirm.disabled).toBe(false);
   });
+
+  it("describes busy confirmation and focuses a stable fallback when the trigger is replaced", async () => {
+    const { window } = createDom();
+    const trigger = window.document.createElement("button");
+    const fallback = window.document.createElement("h1");
+    fallback.dataset.routeHeading = "true";
+    fallback.tabIndex = -1;
+    window.document.body.append(trigger, fallback);
+    const completion = deferred();
+    const dialog = createConfirmationDialog({
+      document: window.document,
+      title: "删除版本",
+      message: "删除后无法恢复。",
+      onConfirm: async () => {
+        trigger.remove();
+        await completion.promise;
+      },
+    });
+    window.document.body.append(dialog.element);
+    dialog.open(trigger);
+
+    const describedBy = dialog.element.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(dialog.element.querySelector(`#${describedBy}`)?.textContent).toBe("删除后无法恢复。");
+    const confirm = dialog.element.querySelector('[data-dialog-action="confirm"]');
+    confirm.click();
+    const busy = dialog.element.querySelector('[data-dialog-status="busy"]');
+    expect(busy?.getAttribute("role")).toBe("status");
+    expect(busy?.hidden).toBe(false);
+    expect(busy?.textContent).toContain("正在提交");
+
+    completion.resolve();
+    await vi.waitFor(() => expect(dialog.isOpen()).toBe(false));
+    expect(window.document.activeElement).toBe(fallback);
+  });
 });
 
 describe("history focus return", () => {
@@ -268,3 +352,13 @@ describe("page activation guard", () => {
     expect(isCurrentPageActivation(page, controller, page, controller)).toBe(false);
   });
 });
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}

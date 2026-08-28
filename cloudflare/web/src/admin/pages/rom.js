@@ -91,8 +91,15 @@ export function createRomPage(context) {
     ];
     const downloadUrl = safeHttpUrl(row.url);
     if (downloadUrl) {
+      const recordId = String(row.id ?? "未知").slice(0, 64);
+      const downloadLabel = `打开记录 ${recordId} ${String(row.pd ?? "未知 PD").slice(0, 64)} ${String(row.version ?? "未知版本").slice(0, 64)} 下载地址`;
       children.push(createElement(context.document, "p", { className: "rom-url" }, [
-        createElement(context.document, "a", { href: downloadUrl, target: "_blank", rel: "noopener noreferrer" }, "打开下载地址"),
+        createElement(context.document, "a", {
+          href: downloadUrl,
+          target: "_blank",
+          rel: "noopener noreferrer",
+          "aria-label": downloadLabel,
+        }, "打开下载地址"),
         createElement(context.document, "code", {}, downloadUrl),
       ]));
     }

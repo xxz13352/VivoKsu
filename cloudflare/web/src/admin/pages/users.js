@@ -118,10 +118,12 @@ export function createUsersPage(context) {
   }
 
   function actionButton({ user, action, label, clearToken = false, title = "轮换令牌", message = `确认轮换 ${user.username ?? "该用户"} 的令牌吗？`, confirmLabel = label }, mutation) {
+    const targetLabel = String(user.username ?? user.name ?? `用户 ${user.id ?? "未知"}`).slice(0, 128);
     const button = createElement(context.document, "button", {
       type: "button",
       className: action === "delete-user" ? "button button-danger" : "button",
       "data-action": action,
+      "aria-label": `${label}用户 ${targetLabel}`,
       disabled: pendingUsers.has(String(user.id)),
     }, label);
     button.addEventListener("click", () => {
@@ -136,6 +138,7 @@ export function createUsersPage(context) {
         setUserActionsDisabled(button, false);
       };
       void context.confirm({
+        trigger: button,
         title,
         message,
         confirmLabel,

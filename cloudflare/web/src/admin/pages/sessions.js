@@ -83,8 +83,11 @@ export function createSessionsPage(context) {
     } catch (error) {
       if (!isCurrent(request)) return false;
       if (hasAuthoritativeSnapshot) {
-        refreshError = error?.message ?? "在线会话刷新失败。";
-        render();
+        const nextError = error?.message ?? "在线会话刷新失败。";
+        if (refreshError !== nextError) {
+          refreshError = nextError;
+          render();
+        }
         return false;
       }
       renderPageState(element, {
@@ -109,7 +112,7 @@ export function createSessionsPage(context) {
     const pending = pendingKickIds.size > 0 ? createElement(
       context.document,
       "p",
-      { className: "pending-kick", role: "status" },
+      { className: "pending-kick" },
       pendingKickIds.size === 1 ? "正在等待服务器确认会话移除。" : `正在等待服务器确认 ${pendingKickIds.size} 个会话移除。`,
     ) : null;
     const refreshFailure = refreshError ? refreshFailureNotice(refreshError) : null;
@@ -146,10 +149,13 @@ export function createSessionsPage(context) {
 
   function sessionRow(session) {
     const key = `kick:${session.session_id}`;
+    const sessionName = String(session.username ?? session.name ?? "未知用户").slice(0, 96);
+    const sessionId = String(session.session_id ?? "未知会话").slice(0, 128);
     const kick = createElement(context.document, "button", {
       type: "button",
       className: "button button-danger",
       "data-action": "kick-session",
+      "aria-label": `强制下线 ${sessionName} 会话 ${sessionId}`,
       disabled: pendingKickIds.has(session.session_id) || pendingActions.has(key),
     }, pendingKickIds.has(session.session_id) ? "等待确认" : "强制下线");
     kick.addEventListener("click", () => {
@@ -163,6 +169,7 @@ export function createSessionsPage(context) {
         kick.disabled = false;
       };
       void context.confirm({
+        trigger: kick,
         title: "强制下线",
         message: `确认下线 ${session.username ?? session.name ?? "该会话"} 吗？`,
         confirmLabel: "下线",

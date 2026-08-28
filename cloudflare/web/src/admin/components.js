@@ -70,6 +70,7 @@ const SAFE_ATTRIBUTES = new Set([
 const BOOLEAN_ATTRIBUTES = new Set(["checked", "disabled", "hidden", "readonly", "required", "selected"]);
 const URL_ATTRIBUTES = new Set(["href"]);
 const SAFE_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
+const URL_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 
 export const PAGE_STATES = Object.freeze([
   "loading",
@@ -114,7 +115,10 @@ function isSafeAttribute(name) {
 }
 
 function assertSafeUrl(value) {
-  const stringValue = String(value).trim();
+  const rawValue = String(value);
+  if (URL_CONTROL_CHARACTERS.test(rawValue)) throw new TypeError("Unsafe URL value");
+  const stringValue = rawValue.trim();
+  if (stringValue.startsWith("//") || stringValue.includes("\\")) throw new TypeError("Unsafe URL value");
   if (stringValue === "" || stringValue.startsWith("#") || stringValue.startsWith("/") || stringValue.startsWith("./") || stringValue.startsWith("../")) {
     return;
   }
@@ -125,6 +129,9 @@ function assertSafeUrl(value) {
     throw new TypeError("Unsafe URL value");
   }
   if (!SAFE_URL_PROTOCOLS.has(parsed.protocol)) throw new TypeError("Unsafe URL protocol");
+  if ((parsed.protocol === "http:" || parsed.protocol === "https:") && (parsed.username || parsed.password)) {
+    throw new TypeError("Unsafe URL credentials");
+  }
 }
 
 function appendSafeChild(document, element, child) {
@@ -163,6 +170,12 @@ export function createSafeElement(document, tagName, attributes = {}, children =
       element.toggleAttribute(attributeName, Boolean(rawValue));
     } else {
       element.setAttribute(attributeName, String(rawValue));
+    }
+  }
+  if (normalizedTag === "a" && element.getAttribute("target")?.toLowerCase() === "_blank") {
+    const rel = new Set((element.getAttribute("rel") ?? "").toLowerCase().split(/\s+/).filter(Boolean));
+    if (!rel.has("noopener") || !rel.has("noreferrer")) {
+      throw new TypeError("Blank-target links require noopener noreferrer");
     }
   }
 
@@ -249,7 +262,11 @@ export function showPersistentAlert(container, { message, title = null, kind = "
   let dismissButton = null;
   let dismiss = () => alert.remove();
   if (dismissLabel) {
-    dismissButton = createSafeElement(document, "button", { type: "button" }, dismissLabel);
+    dismissButton = createSafeElement(document, "button", {
+      type: "button",
+      className: "button persistent-alert-dismiss",
+      "aria-label": title ? `${dismissLabel}：${title}` : dismissLabel,
+    }, dismissLabel);
     dismissButton.addEventListener("click", dismiss);
     alert.append(dismissButton);
   }
@@ -399,9 +416,17 @@ export function createConfirmationDialog({
 } = {}) {
   if (!document?.createElement) throw new TypeError("A DOM document is required");
   const titleId = `confirmation-title-${++focusReturnSequence}`;
+  const messageId = `confirmation-message-${focusReturnSequence}`;
   const titleElement = createSafeElement(document, "h2", { id: titleId }, title ?? "确认操作");
-  const messageElement = createSafeElement(document, "p", { className: "confirmation-message" }, message ?? "");
+  const messageElement = createSafeElement(document, "p", { id: messageId, className: "confirmation-message" }, message ?? "");
   const alert = createSafeElement(document, "div", { role: "alert", className: "confirmation-error", hidden: true });
+  const busyStatus = createSafeElement(document, "p", {
+    role: "status",
+    className: "confirmation-busy",
+    hidden: true,
+    "aria-live": "polite",
+    "data-dialog-status": "busy",
+  }, "正在提交，请稍候。");
   const cancelButton = createSafeElement(
     document,
     "button",
@@ -418,6 +443,7 @@ export function createConfirmationDialog({
   const panel = createSafeElement(document, "div", { className: "confirmation-panel" }, [
     titleElement,
     messageElement,
+    busyStatus,
     alert,
     actions,
   ]);
@@ -429,6 +455,7 @@ export function createConfirmationDialog({
       role: "dialog",
       "aria-modal": "true",
       "aria-labelledby": titleId,
+      "aria-describedby": messageId,
       hidden: true,
     },
     panel,
@@ -442,6 +469,7 @@ export function createConfirmationDialog({
     busy = Boolean(nextBusy);
     cancelButton.disabled = busy;
     confirmButton.disabled = busy;
+    busyStatus.hidden = !busy;
     element.setAttribute("aria-busy", String(busy));
   }
 
@@ -452,9 +480,14 @@ export function createConfirmationDialog({
     element.removeAttribute("open");
     setBusy(false);
     if (notify && reason === "cancel") onCancel?.();
-    const target = returnFocus;
+    const target = returnFocus?.isConnected
+      ? returnFocus
+      : document.querySelector("[data-route-heading], [data-page-title], main h1, h1");
     returnFocus = null;
-    if (target?.isConnected && typeof target.focus === "function") target.focus();
+    if (target?.isConnected && typeof target.focus === "function") {
+      if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+      target.focus();
+    }
   }
 
   function cancel(event) {

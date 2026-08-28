@@ -104,7 +104,8 @@ test("renders authoritative fields and safe ROM evidence in all five workspaces"
 
   await page.getByRole("button", { name: "ROM 查询" }).click();
   await expect(page.getByRole("heading", { name: "ROM 查询", level: 2 })).toBeVisible();
-  await expect(page.getByRole("link", { name: "打开下载地址" })).toHaveAttribute("href", "https://example.test/rom.zip");
+  await expect(page.getByRole("link", { name: "打开记录 1 PD1 1.0 下载地址" }))
+    .toHaveAttribute("href", "https://example.test/rom.zip");
   await expect(page.getByText("https://example.test/rom.zip", { exact: true })).toBeVisible();
   await expect(page.getByText("旧记录未保存失败原因。")).toBeVisible();
   await expect(page.getByText("PD3 · 1.0").locator("..").getByRole("link")).toHaveCount(0);

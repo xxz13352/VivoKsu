@@ -498,6 +498,118 @@ describe("operational workspace contracts", () => {
     page.element.querySelector('[data-action="next-page"]').click();
     expect(ctx.navigate).toHaveBeenCalledWith(expect.objectContaining({ cursor: "opaque-next-cursor" }));
   });
+
+  it("binds repeated workspace action names to their authoritative target", async () => {
+    const { window } = createDom();
+    const versions = createVersionsPage(context({
+      document: window.document,
+      api: {
+        getAppVersions: vi.fn().mockResolvedValue({
+          versions: [{ id: 9, version: "2.0.0", min_version: "1.0.0", enabled: 1 }],
+        }),
+      },
+    }));
+    await versions.activate({ view: "versions" }, new AbortController().signal);
+    expect(versions.element.querySelector('[data-action="delete-version"]').getAttribute("aria-label"))
+      .toContain("2.0.0");
+
+    const users = createUsersPage(context({
+      document: window.document,
+      api: {
+        getUsers: vi.fn().mockResolvedValue({
+          users: [{ id: 7, username: "alice", name: "Alice", enabled: 1, banned: 0 }],
+        }),
+      },
+    }));
+    await users.activate({ view: "users" }, new AbortController().signal);
+    for (const action of ["rotate-token", "toggle-ban", "delete-user"]) {
+      expect(users.element.querySelector(`[data-action="${action}"]`).getAttribute("aria-label"))
+        .toContain("alice");
+    }
+
+    const sessions = createSessionsPage(context({
+      document: window.document,
+      api: {
+        getOnlineSessions: vi.fn().mockResolvedValue({
+          sessions: [{ session_id: "s-1", user_id: 7, username: "alice", name: "Alice" }],
+        }),
+      },
+    }));
+    await sessions.activate({ view: "sessions" }, new AbortController().signal);
+    const kick = sessions.element.querySelector('[data-action="kick-session"]');
+    expect(kick.getAttribute("aria-label")).toContain("alice");
+    expect(kick.getAttribute("aria-label")).toContain("s-1");
+
+    const rom = createRomPage(context({
+      document: window.document,
+      api: {
+        getRomLogs: vi.fn().mockResolvedValue({
+          items: [1, 2].map((id) => ({
+            id,
+            user_name: "Alice",
+            pd: "PD1",
+            version: "1.0",
+            status: 200,
+            url: "https://example.test/rom.zip",
+            failure_reason: null,
+            detail_unavailable_reason: null,
+          })),
+          next_cursor: null,
+        }),
+      },
+    }));
+    await rom.activate({ view: "rom" }, new AbortController().signal);
+    const romLabels = [...rom.element.querySelectorAll("a")].map((link) => link.getAttribute("aria-label"));
+    expect(romLabels).toHaveLength(2);
+    expect(new Set(romLabels).size).toBe(2);
+    expect(romLabels.every((label) => label.includes("PD1"))).toBe(true);
+
+    versions.destroy();
+    users.destroy();
+    sessions.destroy();
+    rom.destroy();
+  });
+
+  it("keeps the persistent session pending indicator out of repeated live regions", async () => {
+    const { window } = createDom();
+    const ctx = context({
+      document: window.document,
+      api: {
+        getOnlineSessions: vi.fn().mockResolvedValue({
+          sessions: [{ session_id: "s-1", user_id: 7, username: "alice", name: "Alice" }],
+        }),
+      },
+    });
+    const page = createSessionsPage(ctx);
+    await page.activate({ view: "sessions" }, new AbortController().signal);
+    page.element.querySelector('[data-action="kick-session"]').click();
+    await vi.waitFor(() => expect(ctx.api.kickSession).toHaveBeenCalledOnce());
+
+    const pending = page.element.querySelector(".pending-kick");
+    expect(pending).not.toBeNull();
+    expect(pending.hasAttribute("role")).toBe(false);
+    expect(pending.hasAttribute("aria-live")).toBe(false);
+    page.destroy();
+  });
+
+  it("does not recreate an identical session refresh alert on every poll", async () => {
+    vi.useFakeTimers();
+    const { window } = createDom();
+    Object.defineProperty(window.document, "visibilityState", { configurable: true, value: "visible" });
+    const reads = vi.fn()
+      .mockResolvedValueOnce({ sessions: [{ session_id: "s-1", user_id: 7, username: "alice" }] })
+      .mockRejectedValue(new Error("refresh failed"));
+    const page = createSessionsPage(context({ document: window.document, api: { getOnlineSessions: reads } }));
+    await page.activate({ view: "sessions" }, new AbortController().signal);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const firstAlert = page.element.querySelector(".session-refresh-error");
+    expect(firstAlert?.getAttribute("role")).toBe("alert");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(reads).toHaveBeenCalledTimes(3);
+    expect(page.element.querySelector(".session-refresh-error")).toBe(firstAlert);
+    page.destroy();
+  });
 });
 
 function successFor(view) {

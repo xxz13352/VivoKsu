@@ -206,7 +206,7 @@ function showShell() {
   listen(passwordButton, "click", () => {
     accountMenu.hidden = true;
     accountButton.setAttribute("aria-expanded", "false");
-    showPasswordForm({ page, alerts, status });
+    showPasswordForm({ page, alerts, status, returnFocus: accountButton });
   });
   listen(logoutButton, "click", async () => {
     logoutButton.disabled = true;
@@ -332,7 +332,7 @@ function openConfirmation(options = {}) {
   return dialog;
 }
 
-function showPasswordForm({ page, alerts, status }) {
+function showPasswordForm({ page, alerts, status, returnFocus }) {
   clearCurrentPage();
   const password = createElement(document, "input", {
     id: "new-admin-password",
@@ -363,7 +363,10 @@ function showPasswordForm({ page, alerts, status }) {
   ]);
   page.replaceChildren(form);
   const pageContext = createPageContext({ alerts, status });
-  listen(cancel, "click", () => void renderRoute(currentRoute ?? { view: "overview" }, page, pageContext));
+  listen(cancel, "click", async () => {
+    await renderRoute(currentRoute ?? { view: "overview" }, page, pageContext);
+    if (returnFocus?.isConnected && typeof returnFocus.focus === "function") returnFocus.focus();
+  });
   listen(form, "submit", async (event) => {
     event.preventDefault();
     alerts.replaceChildren();

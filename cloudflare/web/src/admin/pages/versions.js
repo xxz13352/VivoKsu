@@ -76,11 +76,13 @@ export function createVersionsPage(context) {
 
   function versionRow(version) {
     const key = `delete:${version.id}`;
+    const versionLabel = String(version.version ?? "未命名版本").slice(0, 128);
     const remove = createElement(context.document, "button", {
       type: "button",
       className: "button button-danger",
       "data-action": "delete-version",
       "data-version-id": String(version.id),
+      "aria-label": `删除版本 ${versionLabel}`,
       disabled: pendingActions.has(key),
     }, "删除");
     remove.addEventListener("click", () => {
@@ -94,6 +96,7 @@ export function createVersionsPage(context) {
         remove.disabled = false;
       };
       void context.confirm({
+        trigger: remove,
         title: "删除版本策略",
         message: `确认删除 ${version.version ?? "此版本"} 吗？`,
         confirmLabel: "删除",
