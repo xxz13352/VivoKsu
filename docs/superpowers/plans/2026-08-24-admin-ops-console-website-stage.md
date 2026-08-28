@@ -826,7 +826,7 @@ export interface TraceRetentionResult {
 export async function purgeExpiredTraceData(db: D1Database, nowMs: number): Promise<TraceRetentionResult>;
 ```
 
-At 30 days delete outputs and clear command/paths/URLs/IP/serial; at 90 days delete event metadata; at 180 days delete runs. The D1-only `retention_detail_cleared` marker and partial indexes restrict 30-day candidate seeks to pending rows; clearing operational detail sets the marker permanently for an open run. Such a run is detail-sealed: finalization, identity/detail mutation, event upload, and chunk retry are item-level `invalid` with a `retention_expired` explanation, the marker is never reset, and no V1 projection is created. This is internal storage state, not a wire field. Every DELETE/UPDATE selects a deterministic ordered batch of at most 100 rows so later cron executions drain backlog without one unbounded transaction. Before deleting each 180-day V2 run batch, delete only the compatibility `usage_logs` rows whose `event_key` belongs to that exact run batch; unrelated V1 rows remain. Existing V2 databases migrate in order base → P0 → one-time retention-stage, and all three migrations must succeed before the API receives upload traffic. The scheduled handler logs only result counts and cutoffs.
+At 30 days delete outputs and clear command/paths/URLs/IP/serial; at 90 days delete event metadata; at 180 days delete runs. The D1-only `retention_detail_cleared` marker and partial indexes restrict 30-day candidate seeks to pending rows; clearing operational detail sets the marker permanently for an open run. Such a run is detail-sealed: finalization, identity/detail mutation, event upload, and chunk retry are item-level `invalid` with a `retention_expired` explanation, the marker is never reset, and no V1 projection is created. This is internal storage state, not a wire field. Every DELETE/UPDATE selects a deterministic ordered batch of at most 100 rows so later cron executions drain backlog without one unbounded transaction. Compatibility projections carry D1-only `source_schema = 2` plus owner-bound `trace_run_id`; historical V1 rows remain `source_schema = 1`, so equal V1 event keys and V2 run IDs may coexist. Before deleting each 180-day V2 run batch, delete only the tagged projection whose trace ID and owner match that exact run; unrelated V1 rows remain. Existing V2 databases migrate in order base → P0 → one-time retention-stage, and all three migrations must succeed before the API receives upload traffic. The scheduled handler logs only result counts and cutoffs.
 
 - [ ] **Step 4: Run retention and existing cron tests**
 
@@ -1367,8 +1367,8 @@ npm --prefix cloudflare test
 npm --prefix cloudflare run test:workerd
 npm --prefix cloudflare run typecheck
 npm --prefix cloudflare run test:admin
-npm --prefix cloudflare exec -- wrangler deploy --dry-run --outdir .wrangler/website-stage-api
-npm --prefix cloudflare exec -- wrangler deploy --dry-run --config web/wrangler.toml --outdir .wrangler/website-stage-web
+npm --prefix cloudflare run dry-run:api
+npm --prefix cloudflare run dry-run:web
 git diff --check
 ```
 
@@ -1464,6 +1464,8 @@ Then run `git status --short` and inspect every remaining untracked path. Do not
 - [ ] **Step 7: Rerun the complete gate after review fixes and cleanup**
 
 Run the Step 1 command block again. Expected: all exit `0`.
+
+Because the final typecheck, browser, and Wrangler dry-runs recreate task-owned output, repeat the exact guarded Step 6 cleanup after this final gate, then run only `git status --short --untracked-files=all` and `git diff --check`. Do not rerun a generating command after that final cleanup.
 
 - [ ] **Step 8: Commit website acceptance, subsystem architecture, and handoff**
 
