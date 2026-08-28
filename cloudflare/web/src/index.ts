@@ -138,7 +138,6 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   // 登录 / 会话(免鉴权)
   if (method === "POST" && path === "/api/login") return login(request, env);
   if (method === "GET" && path === "/api/me") return me(request, env);
-  if (method === "POST" && path === "/api/logout") return logout(request, env);
 
   // CSRF 兜底:所有状态变更请求必须带 X-Requested-With(与浏览器 API client 配套)。
   // 登录除外(跨站表单无法自定义该头,此处覆盖登录后的全部写操作)。
@@ -148,6 +147,9 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
     }
     return json({ error: "请求缺少必要请求头。" }, 403);
   }
+
+  // Logout is allowed for expired sessions, but remains a protected state-changing request.
+  if (method === "POST" && path === "/api/logout") return logout(request, env);
 
   // 以下全部需要管理员会话
   const admin = await requireAdmin(request, env);

@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ADMIN_STATIC_FIXTURES } from "./admin-static-manifest.mjs";
 
 const root = fileURLToPath(new URL("../src/admin/", import.meta.url));
 const rootPrefix = root.endsWith(sep) ? root : `${root}${sep}`;
@@ -24,17 +25,9 @@ createServer(async (request, response) => {
     return;
   }
 
-  let relative;
-  try {
-    const decoded = decodeURIComponent(url.pathname);
-    if (decoded === "/" || decoded === "/admin/") relative = "index.html";
-    else if (decoded.startsWith("/admin/")) relative = decoded.slice("/admin/".length);
-    else {
-      response.writeHead(404).end("Not found");
-      return;
-    }
-  } catch {
-    response.writeHead(400).end("Bad request");
+  const relative = ADMIN_STATIC_FIXTURES[url.pathname];
+  if (relative === undefined) {
+    response.writeHead(404).end("Not found");
     return;
   }
 

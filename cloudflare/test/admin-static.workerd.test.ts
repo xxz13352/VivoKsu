@@ -158,7 +158,10 @@ describe("administrator response security headers", () => {
     const ndjson = await adminWorker.fetch(new Request(`${ORIGIN}/api/usage-logs/v2/export`, {
       headers: authenticated,
     }), env);
-    const logout = await adminWorker.fetch(new Request(`${ORIGIN}/api/logout`, { method: "POST" }), env);
+    const logout = await adminWorker.fetch(new Request(`${ORIGIN}/api/logout`, {
+      method: "POST",
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+    }), env);
     const poison = poisonAdminEnv();
     const redirect = await adminWorker.fetch(new Request(`http://web.nwflash.cc.cd/admin/app.js`, {
       headers: { "x-forwarded-proto": "http" },
@@ -179,6 +182,37 @@ describe("administrator response security headers", () => {
     expect(redirect.headers.get("location")).toBe("https://web.nwflash.cc.cd/admin/app.js");
     expectStrictSecurityHeaders(redirect, "HTTPS redirect");
     expect(poison.accesses()).toBe(0);
+  });
+
+  it("requires the mutation CSRF header before deleting an administrator session", async () => {
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO admins (id, username, salt, password_hash) VALUES (32, 'csrf-reviewer', 'unused', 'unused')",
+      ),
+      env.DB.prepare(
+        "INSERT INTO admin_sessions (admin_id, token, expires_at) VALUES (32, 'csrf-session', '2999-01-01T00:00:00.000Z')",
+      ),
+    ]);
+    const cookie = { Cookie: "nwflash_session=csrf-session" };
+
+    const rejected = await adminWorker.fetch(new Request(`${ORIGIN}/api/logout`, {
+      method: "POST",
+      headers: cookie,
+    }), env);
+    expect(rejected.status).toBe(403);
+    expect(Number((await env.DB.prepare(
+      "SELECT COUNT(*) AS value FROM admin_sessions WHERE token = 'csrf-session'",
+    ).first<{ value: number }>())?.value ?? 0)).toBe(1);
+
+    const accepted = await adminWorker.fetch(new Request(`${ORIGIN}/api/logout`, {
+      method: "POST",
+      headers: { ...cookie, "X-Requested-With": "XMLHttpRequest" },
+    }), env);
+    expect(accepted.status).toBe(200);
+    expect(accepted.headers.get("set-cookie")).toContain("nwflash_session=;");
+    expect(Number((await env.DB.prepare(
+      "SELECT COUNT(*) AS value FROM admin_sessions WHERE token = 'csrf-session'",
+    ).first<{ value: number }>())?.value ?? 0)).toBe(0);
   });
 });
 
