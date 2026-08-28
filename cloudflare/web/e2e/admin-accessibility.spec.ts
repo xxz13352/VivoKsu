@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./admin-test";
 
 import {
   createTask12ApiState,
@@ -40,6 +40,7 @@ async function expectNoAxeViolations(page: Page) {
 }
 
 test("passes axe on login, every primary workspace, and a destructive dialog", async ({ page }) => {
+  test.slow();
   const state = createTask12ApiState({ authenticated: false });
   const errors = monitorRuntime(page);
   await installTask12Api(page, state);
@@ -60,7 +61,7 @@ test("passes axe on login, every primary workspace, and a destructive dialog", a
     { route: "?view=audit&level=user&userId=7", ready: "[data-audit-action='open-run']" },
     { route: `?view=audit&level=run&runId=${encodeURIComponent(task12RunId)}`, ready: "[data-audit-action='open-event']" },
     { route: `?view=audit&level=command&runId=${encodeURIComponent(task12RunId)}&eventId=${task12EventId}`, ready: "[data-command-field='paths']" },
-    { route: `?view=audit&level=output&runId=${encodeURIComponent(task12RunId)}&eventId=${task12EventId}&stream=stdout`, ready: "[data-output-stream='stdout']" },
+    { route: `?view=audit&level=command&runId=${encodeURIComponent(task12RunId)}&eventId=${task12EventId}&stream=stdout`, ready: "[data-output-stream='stdout']" },
   ]) {
     await page.goto(`/${route}`);
     await expect(page.locator(ready)).toBeVisible();

@@ -6,6 +6,16 @@ const V2_TRACE_REF = /^v2:([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3
 const USER_FILTERS = Object.freeze(["from", "to", "status", "q"]);
 const RUN_FILTERS = Object.freeze(["userId", "kind", "status", "from", "to", "partition", "errorCode", "q"]);
 const EXPORT_FILTERS = Object.freeze(["userId", "kind", "status", "from", "to", "partition", "errorCode", "q"]);
+const AUDIT_FILTER_FIELDS = Object.freeze([
+  Object.freeze({ name: "from", label: "开始时间", maxlength: 40 }),
+  Object.freeze({ name: "to", label: "结束时间", maxlength: 40 }),
+  Object.freeze({ name: "status", label: "状态", maxlength: 32 }),
+  Object.freeze({ name: "kind", label: "操作类型", maxlength: 64 }),
+  Object.freeze({ name: "userId", label: "用户 ID", maxlength: 128 }),
+  Object.freeze({ name: "partition", label: "分区", maxlength: 64 }),
+  Object.freeze({ name: "errorCode", label: "错误码", maxlength: 128 }),
+  Object.freeze({ name: "q", label: "关键词", maxlength: 256 }),
+]);
 const PAGE_LIMIT = 50;
 const OUTPUT_LIMIT = 50;
 const RUN_OUTCOMES = new Set([
@@ -165,6 +175,7 @@ export function createAuditPage(context = {}) {
   function renderUsers(page) {
     const content = createElement(document, "div", { className: "audit-content" });
     content.append(renderBreadcrumbs("users"), renderLevelHeading("用户汇总", "按用户进入持久化操作记录。"));
+    content.append(createAuditFilterForm());
     content.append(createExportButton());
     if (page.items.length === 0) {
       content.append(createEmptyState(document, "当前筛选下没有用户操作记录。"));
@@ -183,6 +194,13 @@ export function createAuditPage(context = {}) {
           createElement(document, "strong", {}, label),
           createElement(document, "span", { className: "muted" }, `账号：${provided(user?.username)}`),
           createElement(document, "span", {}, `操作 ${finiteNumber(user?.operation_count)} · 失败 ${finiteNumber(user?.failed_count)}`),
+          user?.last_operation
+            ? createElement(document, "span", { className: "audit-last-operation" }, [
+              `最近操作：${provided(user.last_operation.title)} · `,
+              statusBadge(document, user.last_operation.outcome),
+              ` · ${formatTime(user.last_operation.started_at_ms)}`,
+            ])
+            : createElement(document, "span", { className: "muted" }, "最近操作：未提供"),
           createElement(document, "span", { className: "muted" }, `最后活动：${formatTime(user?.last_activity_at_ms)}`),
         ]);
         listen(button, "click", () => navigateTo({
@@ -206,6 +224,7 @@ export function createAuditPage(context = {}) {
   function renderRuns(page) {
     const content = createElement(document, "div", { className: "audit-content" });
     content.append(renderBreadcrumbs("runs"), renderLevelHeading("操作记录", "此层不读取命令输出。"));
+    content.append(createAuditFilterForm());
     content.append(createExportButton());
     if (page.items.length === 0) {
       content.append(createEmptyState(document, "当前筛选下没有操作记录。"));
@@ -248,7 +267,7 @@ export function createAuditPage(context = {}) {
     const { run } = detail;
     const content = createElement(document, "div", { className: "audit-content" });
     content.append(renderBreadcrumbs("run"), renderLevelHeading(provided(run.title), "按服务端 sequence 展示已持久化步骤。"));
-    content.append(createRunSummary(run), createExportButton());
+    content.append(createAuditFilterForm(), createRunSummary(run), createExportButton());
 
     if (run.source_schema === 1 || detail.source_schema === 1 || detail.detail_available === false) {
       content.append(createElement(document, "section", {
@@ -325,6 +344,7 @@ export function createAuditPage(context = {}) {
       renderLevelHeading(provided(event.step_name), showOutput
         ? "stdout 与 stderr 使用独立服务端游标读取。"
         : "仅展示服务端返回的步骤与命令证据。"),
+      createAuditFilterForm(),
       createRunSummary(run),
       createExportButton(),
     );
@@ -388,7 +408,7 @@ export function createAuditPage(context = {}) {
         }, `查看 ${stream}`);
         listen(button, "click", () => navigateTo({
           ...currentRoute,
-          level: "output",
+          level: "command",
           stream,
           cursor: null,
         }, focusId));
@@ -511,7 +531,7 @@ export function createAuditPage(context = {}) {
       { id: "runs", label: "操作", route: { ...currentRoute, level: "user", runId: null, eventId: null, stream: null, cursor: null } },
       { id: "run", label: "步骤", route: { ...currentRoute, level: "run", eventId: null, stream: null, cursor: null } },
       { id: "event", label: "执行详情", route: { ...currentRoute, level: "command", stream: null, cursor: null } },
-      { id: "output", label: "命令日志", route: { ...currentRoute, level: "output", stream: currentRoute.stream ?? "stdout", cursor: null } },
+      { id: "output", label: "命令日志", route: { ...currentRoute, level: "command", stream: currentRoute.stream ?? "stdout", cursor: null } },
     ];
     const currentIndex = order.findIndex((item) => item.id === current);
     const list = createElement(document, "ol", { className: "audit-breadcrumb-list" });
@@ -540,6 +560,82 @@ export function createAuditPage(context = {}) {
       createElement(document, "h2", { "data-route-heading": "true", tabindex: "-1" }, title),
       createElement(document, "p", { className: "muted" }, description),
     ]);
+  }
+
+  function createAuditFilterForm() {
+    const form = createElement(document, "form", {
+      className: "audit-filter-form",
+      "aria-label": "审计筛选",
+      "data-audit-filter-form": "true",
+    });
+    const fields = createElement(document, "div", { className: "audit-filter-fields" });
+    for (const field of AUDIT_FILTER_FIELDS) {
+      const id = `audit-filter-${field.name}`;
+      fields.append(createElement(document, "label", { className: "audit-filter-field", for: id }, [
+        field.label,
+        createElement(document, "input", {
+          id,
+          name: field.name,
+          type: field.name === "q" ? "search" : "text",
+          autocomplete: "off",
+          maxlength: String(field.maxlength),
+          value: textOrNull(currentRoute?.[field.name]) ?? "",
+          "data-audit-filter": field.name,
+        }),
+      ]));
+    }
+    const actions = createElement(document, "div", { className: "audit-filter-actions" });
+    const submit = createElement(document, "button", {
+      type: "submit",
+      className: "button",
+      "data-audit-filter-action": "submit",
+      "data-router-focus-id": "audit-filter-submit",
+    }, "应用筛选");
+    const reset = createElement(document, "button", {
+      type: "button",
+      className: "button button-secondary",
+      "data-audit-filter-action": "reset",
+      "data-router-focus-id": "audit-filter-reset",
+    }, "重置筛选");
+    actions.append(submit, reset);
+    form.append(fields, actions);
+    listen(form, "submit", (event) => {
+      event.preventDefault();
+      const filters = readAuditFilters(form);
+      navigateTo(auditFilterRoute(filters), "audit-filter-submit");
+    });
+    listen(reset, "click", () => {
+      navigateTo(auditFilterRoute(Object.fromEntries(AUDIT_FILTER_FIELDS.map(({ name }) => [name, null]))), "audit-filter-reset");
+    });
+    return form;
+  }
+
+  function readAuditFilters(form) {
+    return Object.fromEntries(AUDIT_FILTER_FIELDS.map(({ name }) => {
+      const value = form.elements.namedItem(name)?.value?.trim() ?? "";
+      return [name, value.length > 0 ? value : null];
+    }));
+  }
+
+  function auditFilterRoute(filters) {
+    const userId = filters.userId;
+    const hasRunOnlyFilter = Boolean(filters.kind || filters.partition || filters.errorCode);
+    return {
+      view: "audit",
+      level: userId || hasRunOnlyFilter ? "user" : "overview",
+      userId,
+      runId: null,
+      eventId: null,
+      stream: null,
+      from: filters.from,
+      to: filters.to,
+      status: filters.status,
+      kind: filters.kind,
+      partition: filters.partition,
+      errorCode: filters.errorCode,
+      q: filters.q,
+      cursor: null,
+    };
   }
 
   function createExportButton() {
@@ -664,24 +760,24 @@ function classifyRoute(route) {
       : { kind: "users" };
   }
   if (level === "user") {
-    return userId && !runId && !eventId && !stream
+    return !runId && !eventId && !stream
       ? { kind: "runs" }
-      : invalid("操作列表层级必须只绑定 userId。");
+      : invalid("操作列表层级不能携带运行、步骤或输出标识。");
   }
   if (level === "run") {
     return runId && !eventId && !stream && !cursor
       ? { kind: "run" }
       : invalid("步骤列表层级必须只绑定 trace_ref，且不能携带列表游标。");
   }
-  if (level === "event" || level === "command") {
+  if (level === "event") {
     return runId && eventId && !stream && !cursor
       ? { kind: "event", output: false }
       : invalid("步骤详情层级必须绑定 V2 trace_ref 与 event_id，且不能携带输出状态。");
   }
-  if (level === "output") {
-    return runId && eventId && stream && !cursor
-      ? { kind: "event", output: true }
-      : invalid("命令日志层级必须绑定 V2 trace_ref、event_id 与输出流。");
+  if (level === "command") {
+    return runId && eventId && !cursor
+      ? { kind: "event", output: stream !== null }
+      : invalid("命令层级必须绑定 V2 trace_ref 与 event_id，且不能携带列表游标。");
   }
   return invalid("审计层级与标识不一致。");
 }

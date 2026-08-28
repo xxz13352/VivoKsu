@@ -29,6 +29,7 @@ const SAFE_TAGS = new Set([
   "textarea",
   "th",
   "thead",
+  "time",
   "tr",
   "ul",
 ]);

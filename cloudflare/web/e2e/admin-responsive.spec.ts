@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./admin-test";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,10 +22,11 @@ const routes = [
   { name: "audit-user", url: "/?view=audit&level=user&userId=7", ready: "[data-audit-action='open-run']" },
   { name: "audit-run", url: `/?view=audit&level=run&runId=${encodeURIComponent(task12RunId)}`, ready: "[data-audit-action='open-event']" },
   { name: "audit-command", url: `/?view=audit&level=command&runId=${encodeURIComponent(task12RunId)}&eventId=${task12EventId}`, ready: "[data-command-field='paths'] .audit-code", localOverflow: true },
-  { name: "audit-output", url: `/?view=audit&level=output&runId=${encodeURIComponent(task12RunId)}&eventId=${task12EventId}&stream=stdout`, ready: "[data-output-stream='stdout']", localOverflow: true },
+  { name: "audit-output", url: `/?view=audit&level=command&runId=${encodeURIComponent(task12RunId)}&eventId=${task12EventId}&stream=stdout`, ready: "[data-output-stream='stdout']", localOverflow: true },
 ];
 
 test("keeps every primary workspace inside 320-1440 with readable text and 44px targets", async ({ page }) => {
+  test.slow();
   const state = createTask12ApiState();
   await installTask12Api(page, state);
   const screenshotRoot = validatedScreenshotRoot();

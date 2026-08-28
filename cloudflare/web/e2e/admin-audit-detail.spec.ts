@@ -1,8 +1,9 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./admin-test";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ADMIN_STATIC_FIXTURES } from "./admin-static-manifest.mjs";
 
 const TRACE_REF = "v2:019d9c40-7b3c-7000-8000-000000000002";
 const RUN_ID = TRACE_REF.slice(3);
@@ -132,17 +133,9 @@ async function createControlledExportServer() {
       response.end(`${JSON.stringify({ trace_ref: TRACE_REF })}\n`);
       return;
     }
-    let relative;
-    try {
-      const decoded = decodeURIComponent(url.pathname);
-      if (decoded === "/" || decoded === "/admin/") relative = "index.html";
-      else if (decoded.startsWith("/admin/")) relative = decoded.slice("/admin/".length);
-      else {
-        response.writeHead(404).end("Not found");
-        return;
-      }
-    } catch {
-      response.writeHead(400).end("Bad request");
+    const relative = ADMIN_STATIC_FIXTURES[url.pathname];
+    if (relative === undefined) {
+      response.writeHead(404).end("Not found");
       return;
     }
     const target = resolve(adminRoot, relative);
@@ -188,7 +181,7 @@ test("keeps unknown command evidence authoritative and pages stdout independentl
   });
   await installDetailApi(page, exportedUrls);
   await page.goto(
-    `/?view=audit&runId=${encodeURIComponent(TRACE_REF)}&eventId=${EVENT_ID}&level=output&stream=stdout`,
+    `/?view=audit&runId=${encodeURIComponent(TRACE_REF)}&eventId=${EVENT_ID}&level=command&stream=stdout`,
   );
 
   await expect.poll(() => errors).toEqual([]);

@@ -187,7 +187,7 @@ describe("independent command output streams", () => {
     const { page } = createHarness(api);
 
     await page.activate({
-      view: "audit", level: "output", userId: "7", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
+      view: "audit", level: "command", userId: "7", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
     });
 
     expect(getTraceOutput.mock.calls.map((call) => call[2])).toEqual([
@@ -222,7 +222,7 @@ describe("independent command output streams", () => {
     const { page } = createHarness(api);
 
     await page.activate({
-      view: "audit", level: "output", runId: TRACE_REF, eventId: EVENT_ID, stream: "stderr",
+      view: "audit", level: "command", runId: TRACE_REF, eventId: EVENT_ID, stream: "stderr",
     });
 
     expect(page.element.querySelector('[data-output-stream="stderr"]')?.textContent).toBe("(empty)");
@@ -249,7 +249,7 @@ describe("independent command output streams", () => {
     const { page } = createHarness(api);
 
     await page.activate({
-      view: "audit", level: "output", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
+      view: "audit", level: "command", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
     });
 
     expect(page.element.querySelector('[data-output-error="stdout"]')?.textContent).toContain("分页响应不连续");
@@ -274,7 +274,7 @@ describe("independent command output streams", () => {
     const { page } = createHarness(api);
 
     await page.activate({
-      view: "audit", level: "output", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
+      view: "audit", level: "command", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
     });
 
     expect(page.element.querySelector('[data-output-error="stdout"]')?.textContent).toContain("声明总数");
@@ -313,7 +313,7 @@ describe("independent command output streams", () => {
     };
     const { page } = createHarness(api);
     await page.activate({
-      view: "audit", level: "output", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
+      view: "audit", level: "command", runId: TRACE_REF, eventId: EVENT_ID, stream: "stdout",
     });
     const load = page.element.querySelector('[data-load-output="stdout"]');
 
@@ -358,7 +358,7 @@ describe("audited NDJSON export", () => {
     });
     await page.activate({
       view: "audit",
-      level: "output",
+      level: "command",
       userId: "7",
       runId: TRACE_REF,
       eventId: EVENT_ID,

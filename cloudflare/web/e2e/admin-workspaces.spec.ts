@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./admin-test";
 
 type WorkspaceState = {
   versionDeletes: number;
@@ -96,11 +96,11 @@ test("renders authoritative fields and safe ROM evidence in all five workspaces"
   await page.getByRole("button", { name: "用户管理" }).click();
   await expect(page.getByRole("heading", { name: "用户管理", level: 2 })).toBeVisible();
   await expect(page.getByText("Alice", { exact: true })).toBeVisible();
-  await expect(page.getByText("正常", { exact: true })).toBeVisible();
+  await expect(page.locator(".user-row").getByText("已启用", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "在线会话" }).click();
   await expect(page.getByRole("heading", { name: "在线会话", level: 2 })).toBeVisible();
-  await expect(page.getByText("1.2.3", { exact: true })).toBeVisible();
+  await expect(page.getByText("客户端：1.2.3", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "ROM 查询" }).click();
   await expect(page.getByRole("heading", { name: "ROM 查询", level: 2 })).toBeVisible();
@@ -133,7 +133,7 @@ test("confirms mutations once, reloads authority, and clears the one-time token 
   await page.evaluate(() => document.querySelector<HTMLButtonElement>('[data-dialog-action="confirm"]')?.click());
   expect(state.versionDeletes).toBe(1);
   deleteGate.resolve();
-  await expect(page.getByText("没有已配置的版本策略。")).toBeVisible();
+  await expect(page.getByText("当前筛选下没有版本策略。")).toBeVisible();
 
   await page.getByRole("button", { name: "用户管理" }).click();
   await page.locator('[data-action="rotate-token"]').click();

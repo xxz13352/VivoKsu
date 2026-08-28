@@ -28,7 +28,7 @@ const AUDIT_FIELDS = Object.freeze([
   "cursor",
 ]);
 const ROM_FIELDS = Object.freeze(["userId", "pd", "version", "status", "q", "cursor"]);
-const LEVELS = new Set(["overview", "user", "run", "event", "command", "output"]);
+const LEVELS = new Set(["overview", "user", "run", "event", "command"]);
 const STREAMS = new Set(["stdout", "stderr"]);
 const TOKEN_VALUE = /^[\p{L}\p{N}_.:@+/-]+$/u;
 const ID_VALUE = /^[A-Za-z0-9_.:-]+$/;

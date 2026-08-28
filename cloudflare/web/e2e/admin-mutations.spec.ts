@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./admin-test";
 
 import { createTask12ApiState, installTask12Api } from "./admin-api-fixtures";
 
@@ -14,9 +14,10 @@ function monitorRuntime(page: Page, allowedHttpStatuses: number[] = []) {
   return errors;
 }
 
-test("keeps a 403 mutation contextual, single-flight, and keyboard recoverable", async ({ page }) => {
+test("keeps a 403 mutation contextual, single-flight, and keyboard recoverable", async ({ page, runtimeGate }) => {
   const state = createTask12ApiState({ mutationStatus: { deleteVersion: 403 } });
   const errors = monitorRuntime(page, [403]);
+  runtimeGate.allowHttpError("/api/app-versions/9", 403);
   await installTask12Api(page, state);
   await page.goto("/?view=versions");
 
@@ -42,9 +43,10 @@ test("keeps a 403 mutation contextual, single-flight, and keyboard recoverable",
   expect(errors).toEqual([]);
 });
 
-test("fails closed to login on a protected 401 and clears token and dialog state", async ({ page }) => {
+test("fails closed to login on a protected 401 and clears token and dialog state", async ({ page, runtimeGate }) => {
   const state = createTask12ApiState({ mutationStatus: { rotateToken: 401 } });
   const errors = monitorRuntime(page, [401]);
+  runtimeGate.allowHttpError("/api/users/7/rotate-token", 401);
   await installTask12Api(page, state);
   await page.goto("/?view=users");
 
@@ -58,9 +60,10 @@ test("fails closed to login on a protected 401 and clears token and dialog state
   expect(errors).toEqual([]);
 });
 
-test("retains a 500 failure without optimistic removal and does not duplicate the request", async ({ page }) => {
+test("retains a 500 failure without optimistic removal and does not duplicate the request", async ({ page, runtimeGate }) => {
   const state = createTask12ApiState({ mutationStatus: { deleteUser: 500 } });
   const errors = monitorRuntime(page, [500]);
+  runtimeGate.allowHttpError("/api/users/7", 500);
   await installTask12Api(page, state);
   await page.goto("/?view=users");
 

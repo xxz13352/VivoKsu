@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./admin-test";
 
 const TRACE_REF = "v2:019d9c40-7b3c-7000-8000-000000000002";
 const RUN_ID = TRACE_REF.slice(3);

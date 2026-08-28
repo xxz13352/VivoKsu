@@ -1,8 +1,9 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./admin-test";
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { adminMe, loginSuccess, logoutSuccess } from "./admin-api-fixtures";
+import { ADMIN_STATIC_FIXTURE_PATHS } from "./admin-static-manifest.mjs";
 
 const menuLabels = ["概览", "版本策略", "用户管理", "在线会话", "操作审计", "ROM 查询"];
 
@@ -114,8 +115,18 @@ test("restores an authenticated six-menu shell with keyboard navigation", async 
   page.on("pageerror", (error) => errors.push(error.message));
   await installApiFixtures(page, state);
 
-  expect((await page.request.get("/admin/app.js")).status()).toBe(200);
+  expect(ADMIN_STATIC_FIXTURE_PATHS).toHaveLength(12);
+  for (const path of ADMIN_STATIC_FIXTURE_PATHS) {
+    const response = await page.request.get(path);
+    expect(response.status()).toBe(200);
+    const contentType = response.headers()["content-type"];
+    if (path === "/") expect(contentType).toContain("text/html");
+    else if (path.endsWith(".css")) expect(contentType).toContain("text/css");
+    else expect(contentType).toContain("text/javascript");
+  }
   expect((await page.request.get("/app.js")).status()).toBe(404);
+  expect((await page.request.get("/admin/")).status()).toBe(404);
+  expect((await page.request.get("/admin/tests/api.test.js")).status()).toBe(404);
 
   await page.goto("/?view=overview");
   await expect(page.getByRole("main")).toBeVisible();
@@ -140,8 +151,10 @@ test("restores an authenticated six-menu shell with keyboard navigation", async 
   expect(errors).toEqual([]);
 });
 
-test("supports safe deep links, login errors, Back focus, logout, and active 401 recovery", async ({ page }) => {
+test("supports safe deep links, login errors, Back focus, logout, and active 401 recovery", async ({ page, runtimeGate }) => {
   const state = { authenticated: false, loginAccepted: false };
+  runtimeGate.allowHttpError("/api/login", 401);
+  runtimeGate.allowHttpError("/api/change-password", 401);
   await installApiFixtures(page, state);
   await page.goto("/?view=audit&level=run&runId=v2%3A019d0000-0000-7000-8000-000000000001&token=top-secret");
   await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
@@ -182,6 +195,18 @@ test("supports safe deep links, login errors, Back focus, logout, and active 401
   await page.getByRole("button", { name: "保存并重新登录" }).click();
   await expect(page.getByRole("heading", { name: "管理员登录" })).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("会话已失效");
+});
+
+test("routes the global search through the bounded audit query contract", async ({ page }) => {
+  const state = { authenticated: true };
+  await installApiFixtures(page, state);
+  await page.goto("/?view=overview");
+
+  const search = page.getByRole("searchbox", { name: "全局搜索" });
+  await search.fill("boot_a");
+  await search.press("Enter");
+  await expect(page).toHaveURL(/\?view=audit.*q=boot_a/);
+  await expect(page.getByRole("heading", { name: "操作审计", level: 1 })).toBeVisible();
 });
 
 test("keeps labels, targets, and layout intact at base responsive widths", async ({ page }) => {

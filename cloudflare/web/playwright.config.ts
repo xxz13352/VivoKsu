@@ -1,6 +1,8 @@
 import { defineConfig } from "@playwright/test";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const artifactRoot = fileURLToPath(new URL("./.artifacts/admin-website/", import.meta.url));
 
 export default defineConfig({
   testDir: "./e2e",
@@ -8,7 +10,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: "line",
-  outputDir: join(tmpdir(), "nwflash-admin-playwright-results"),
+  outputDir: join(artifactRoot, "test-results"),
   use: {
     baseURL: "http://127.0.0.1:4179",
     browserName: "chromium",

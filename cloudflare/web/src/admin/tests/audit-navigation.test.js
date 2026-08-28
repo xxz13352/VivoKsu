@@ -239,7 +239,6 @@ describe("audit hierarchy and route state", () => {
     ["run level with event", { level: "run", runId: TRACE_REF, eventId: EVENT_ID }],
     ["user level with run", { level: "user", userId: "7", runId: TRACE_REF }],
     ["overview level with user", { level: "overview", userId: "7" }],
-    ["command level with stream", { level: "command", runId: TRACE_REF, eventId: EVENT_ID, stream: "stderr" }],
     ["run level with list cursor", { level: "run", runId: TRACE_REF, cursor: "list-cursor" }],
   ])("rejects the contradictory deep link: %s", async (_name, route) => {
     const api = {
@@ -342,7 +341,7 @@ describe("audit hierarchy and route state", () => {
     };
     const { page } = createHarness(api);
 
-    await page.activate({ view: "audit", level: "output", eventId: EVENT_ID, stream: "stderr" });
+    await page.activate({ view: "audit", level: "command", eventId: EVENT_ID, stream: "stderr" });
 
     expect(page.element.textContent).toContain("审计链接参数不完整");
     expect(api.getTraceUsers).not.toHaveBeenCalled();

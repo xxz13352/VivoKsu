@@ -65,6 +65,10 @@ export function createSessionsPage(context) {
     try {
       const response = await context.api.getOnlineSessions({ signal: request.signal });
       if (!isCurrent(request)) return false;
+      if (!Array.isArray(response?.sessions)) {
+        renderPageState(element, { state: "partial", title: "会话数据不完整", message: "服务器未返回完整的在线会话结构。" });
+        return false;
+      }
       sessions = response?.sessions ?? [];
       hasAuthoritativeSnapshot = true;
       refreshError = null;
@@ -151,6 +155,13 @@ export function createSessionsPage(context) {
     const key = `kick:${session.session_id}`;
     const sessionName = String(session.username ?? session.name ?? "未知用户").slice(0, 96);
     const sessionId = String(session.session_id ?? "未知会话").slice(0, 128);
+    const reason = createElement(context.document, "input", {
+      type: "text",
+      maxlength: "200",
+      placeholder: "下线原因（可选，最多 200 字）",
+      "aria-label": `下线 ${sessionName} 的原因`,
+      "data-kick-reason": String(session.session_id),
+    });
     const kick = createElement(context.document, "button", {
       type: "button",
       className: "button button-danger",
@@ -171,13 +182,13 @@ export function createSessionsPage(context) {
       void context.confirm({
         trigger: kick,
         title: "强制下线",
-        message: `确认下线 ${session.username ?? session.name ?? "该会话"} 吗？`,
+        message: `确认下线 ${session.username ?? session.name ?? "该会话"} 吗？原因：${reason.value.trim() || "未填写"}`,
         confirmLabel: "下线",
         onCancel: restore,
         onConfirm: async () => {
           if (!isCurrent(request)) return true;
           try {
-            await context.api.kickSession({ sessionId: session.session_id }, { signal: request.signal });
+            await context.api.kickSession({ sessionId: session.session_id, reason: reason.value.slice(0, 200).trim() }, { signal: request.signal });
           } catch (error) {
             if (!isCurrent(request)) return true;
             restore();
@@ -195,9 +206,27 @@ export function createSessionsPage(context) {
     });
     return createElement(context.document, "li", { className: "session-row" }, [
       createElement(context.document, "strong", {}, session.username ?? session.name ?? "未知会话"),
-      createElement(context.document, "span", { className: "muted" }, session.client_version ?? ""),
+      createElement(context.document, "code", {}, `会话：${session.session_id ?? "—"}`),
+      createElement(context.document, "span", { className: "muted" }, `客户端：${session.client_version ?? "—"}`),
+      createElement(context.document, "span", { className: "muted" }, `IP：${session.ip ?? "—"}`),
+      createElement(context.document, "time", { className: "muted" }, `上线：${formatSessionTime(session.connected_at)}`),
+      createElement(context.document, "time", { className: "muted" }, `最后心跳：${formatSessionTime(session.last_seen_at)}`),
+      createElement(context.document, "span", { className: "muted" }, `在线时长：${formatDuration(session.duration_seconds)}`),
+      reason,
       kick,
     ]);
+  }
+
+  function formatSessionTime(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds)) return "—";
+    try { return new Date(seconds * 1_000).toISOString(); }
+    catch { return String(value); }
+  }
+
+  function formatDuration(value) {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) && seconds >= 0 ? `${Math.floor(seconds)} 秒` : "—";
   }
 
   function stopPolling() {

@@ -169,6 +169,16 @@ function showShell() {
   const passwordButton = createElement(document, "button", { type: "button", className: "account-action" }, "修改密码");
   const logoutButton = createElement(document, "button", { type: "button", className: "account-action account-logout" }, "退出登录");
   accountMenu.append(passwordButton, logoutButton);
+  const globalSearchInput = createElement(document, "input", {
+    type: "search",
+    name: "q",
+    placeholder: "搜索用户、运行、分区、错误码、序列号或 URL",
+    "aria-label": "全局搜索",
+  });
+  const globalSearch = createElement(document, "form", { className: "global-search", role: "search" }, [
+    globalSearchInput,
+    createElement(document, "button", { type: "submit", className: "button" }, "搜索"),
+  ]);
 
   menu = createAdminMenu({
     document,
@@ -181,14 +191,39 @@ function showShell() {
       });
     },
   });
+  const currentPathPage = createElement(document, "strong", { className: "current-path-page", "aria-current": "page" }, VIEW_COPY.overview.title);
+  const currentPath = createElement(document, "nav", { className: "current-path", "aria-label": "当前位置" }, [
+    createElement(document, "span", { className: "current-path-prefix" }, "NWFLASH"),
+    createElement(document, "span", { className: "current-path-separator", "aria-hidden": "true" }, " / "),
+    createElement(document, "span", { className: "current-path-prefix" }, "ADMIN"),
+    createElement(document, "span", { className: "current-path-separator", "aria-hidden": "true" }, " / "),
+    currentPathPage,
+  ]);
+  const serviceHealth = createElement(document, "div", {
+    className: "service-health",
+    role: "status",
+    "aria-label": "服务健康",
+  }, [
+    createElement(document, "span", { className: "service-health-indicator", "aria-hidden": "true" }),
+    createElement(document, "span", { className: "service-health-copy" }, [
+      createElement(document, "strong", {}, "管理员会话"),
+      createElement(document, "small", {}, "会话已验证"),
+    ]),
+  ]);
+  const sidebar = createElement(document, "div", { className: "shell-sidebar" }, [
+    buildBrand(true),
+    menu.element,
+    serviceHealth,
+  ]);
   const header = createElement(document, "header", { className: "topbar" }, [
     createElement(document, "div", { className: "topbar-inner" }, [
-      buildBrand(true),
+      currentPath,
+      globalSearch,
       createElement(document, "div", { className: "account" }, [accountButton, accountMenu]),
     ]),
-    menu.element,
   ]);
-  root.replaceChildren(header, alerts, status, page);
+  const shellContent = createElement(document, "div", { className: "shell-content" }, [header, alerts, status, page]);
+  root.replaceChildren(sidebar, shellContent);
 
   listen(accountButton, "click", () => {
     const nextHidden = !accountMenu.hidden;
@@ -208,6 +243,12 @@ function showShell() {
     accountButton.setAttribute("aria-expanded", "false");
     showPasswordForm({ page, alerts, status, returnFocus: accountButton });
   });
+  listen(globalSearch, "submit", (event) => {
+    event.preventDefault();
+    const q = globalSearchInput.value.trim();
+    if (!q) return;
+    void router?.navigate({ view: "audit", q, level: "overview" });
+  });
   listen(logoutButton, "click", async () => {
     logoutButton.disabled = true;
     try {
@@ -223,7 +264,14 @@ function showShell() {
   });
 
   const pageContext = createPageContext({ alerts, status });
-  router = createRouter({ window, onRoute: (route) => renderRoute(route, page, pageContext) });
+  router = createRouter({
+    window,
+    onRoute: (route) => {
+      globalSearchInput.value = route.view === "audit" ? route.q ?? "" : "";
+      currentPathPage.textContent = (VIEW_COPY[route.view] ?? VIEW_COPY.overview).title;
+      return renderRoute(route, page, pageContext);
+    },
+  });
   void router.start();
 }
 

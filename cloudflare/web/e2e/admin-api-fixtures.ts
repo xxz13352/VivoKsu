@@ -23,6 +23,7 @@ export const task12LongEvidence = `${task12MaliciousText}-${"very-long-output-se
 export interface Task12RequestRecord {
   method: string;
   pathname: string;
+  url: string;
   headers: Record<string, string>;
   body: string | null;
 }
@@ -44,16 +45,16 @@ export function createTask12ApiState(overrides: Partial<Task12ApiState> = {}): T
     unmocked: [],
     mutationStatus: {},
     versions: [
-      { id: 9, version: "2.0.0", min_version: "1.0.0", enabled: 1 },
-      { id: 10, version: task12MaliciousText, min_version: "1.0.0", enabled: 0 },
+      { id: 9, version: "2.0.0", min_version: "1.0.0", download_url: "https://example.test/v2.zip", note: "stable", enabled: 1 },
+      { id: 10, version: task12MaliciousText, min_version: "1.0.0", download_url: "", note: task12MaliciousText, enabled: 0 },
     ],
     users: [
-      { id: 7, username: "alice", name: task12MaliciousText, enabled: 1, banned: 0 },
-      { id: 8, username: "bob", name: "Bob", enabled: 1, banned: 0 },
+      { id: 7, username: "alice", name: task12MaliciousText, note: "operator", created_at: "2026-08-28", enabled: 1, banned: 0 },
+      { id: 8, username: "bob", name: "Bob", note: "support", created_at: "2026-08-28", enabled: 1, banned: 0 },
     ],
     sessions: [
-      { session_id: "session-alice-001", user_id: 7, username: "alice", name: "Alice", client_version: "3.10.4", ip: "203.0.113.7" },
-      { session_id: "session-bob-002", user_id: 8, username: "bob", name: "Bob", client_version: "3.10.4", ip: "203.0.113.8" },
+      { session_id: "session-alice-001", user_id: 7, username: "alice", name: "Alice", client_version: "3.10.4", ip: "203.0.113.7", connected_at: 1_787_500_000, last_seen_at: 1_787_500_100, duration_seconds: 100 },
+      { session_id: "session-bob-002", user_id: 8, username: "bob", name: "Bob", client_version: "3.10.4", ip: "203.0.113.8", connected_at: 1_787_500_000, last_seen_at: 1_787_500_200, duration_seconds: 200 },
     ],
     ...overrides,
   };
@@ -80,8 +81,8 @@ export async function installTask12Api(page: Page, state: Task12ApiState): Promi
     }
     if (pathname === "/api/usage-logs/v2/overview" && request.method() === "GET") return route.fulfill({ json: {
       totals: { api_users: state.users.length, online_sessions: state.sessions.length, operations: 12, failed: 1 },
-      trend: [],
-      recent_failures: [],
+      trend: [{ bucket_start_ms: 1_787_500_000_000, operations: 12, failed: 1 }],
+      recent_failures: [task12RunSummary()],
     } });
     if (pathname === "/api/app-versions/summary" && request.method() === "GET") return route.fulfill({ json: {
       current_version: "2.0.0", minimum_version: "1.0.0", supported_versions: ["2.0.0"], today_426: 0,
@@ -89,7 +90,18 @@ export async function installTask12Api(page: Page, state: Task12ApiState): Promi
     if (pathname === "/api/app-versions" && request.method() === "GET") {
       return route.fulfill({ json: { versions: state.versions } });
     }
+    if (pathname === "/api/app-versions" && request.method() === "POST") {
+      const body = JSON.parse(request.postData() ?? "{}");
+      const id = Math.max(0, ...state.versions.map((version) => Number(version.id) || 0)) + 1;
+      state.versions.push({ id, enabled: 1, ...body });
+      return route.fulfill({ status: 201, json: { ok: true, id } });
+    }
     const versionMatch = pathname.match(/^\/api\/app-versions\/(\d+)$/);
+    if (versionMatch && request.method() === "PUT") {
+      const body = JSON.parse(request.postData() ?? "{}");
+      state.versions = state.versions.map((version) => String(version.id) === versionMatch[1] ? { ...version, ...body, enabled: body.enabled === undefined ? version.enabled : body.enabled ? 1 : 0 } : version);
+      return route.fulfill({ json: { ok: true } });
+    }
     if (versionMatch && request.method() === "DELETE") {
       const status = state.mutationStatus.deleteVersion ?? 200;
       if (status !== 200) return errorResponse(route, status);
@@ -98,6 +110,12 @@ export async function installTask12Api(page: Page, state: Task12ApiState): Promi
     }
     if (pathname === "/api/users" && request.method() === "GET") {
       return route.fulfill({ json: { users: state.users } });
+    }
+    if (pathname === "/api/users" && request.method() === "POST") {
+      const body = JSON.parse(request.postData() ?? "{}");
+      const id = Math.max(0, ...state.users.map((user) => Number(user.id) || 0)) + 1;
+      state.users.push({ id, username: body.username, name: body.name || body.username, note: body.note || "", created_at: "2026-08-28", enabled: 1, banned: 0 });
+      return route.fulfill({ status: 201, json: { ok: true, id, username: body.username, name: body.name, token: "task13-created-token" } });
     }
     const rotateMatch = pathname.match(/^\/api\/users\/(\d+)\/rotate-token$/);
     if (rotateMatch && request.method() === "POST") {
@@ -112,7 +130,16 @@ export async function installTask12Api(page: Page, state: Task12ApiState): Promi
       state.users = state.users.filter((user) => String(user.id) !== userMatch[1]);
       return route.fulfill({ json: { ok: true } });
     }
-    if (userMatch && request.method() === "PUT") return route.fulfill({ json: { ok: true } });
+    if (userMatch && request.method() === "PUT") {
+      const body = JSON.parse(request.postData() ?? "{}");
+      state.users = state.users.map((user) => String(user.id) === userMatch[1] ? {
+        ...user,
+        ...(body.enabled === undefined ? {} : { enabled: body.enabled ? 1 : 0 }),
+        ...(body.banned === undefined ? {} : { banned: body.banned ? 1 : 0 }),
+        ...(body.note === undefined ? {} : { note: body.note }),
+      } : user);
+      return route.fulfill({ json: { ok: true } });
+    }
     if (pathname === "/api/online" && request.method() === "GET") {
       return route.fulfill({ json: { count: state.sessions.length, sessions: state.sessions } });
     }
@@ -123,10 +150,10 @@ export async function installTask12Api(page: Page, state: Task12ApiState): Promi
     }
     if (pathname === "/api/rom-logs/v2" && request.method() === "GET") return route.fulfill({ json: {
       items: [
-        { id: 1, user_name: "Alice", pd: "PD1", version: "1.0", status: 200, url: "https://example.test/rom.zip", failure_reason: null, detail_unavailable_reason: null },
-        { id: 4, user_name: "Alice Duplicate", pd: "PD1", version: "1.0", status: 200, url: "https://example.test/rom.zip", failure_reason: null, detail_unavailable_reason: null },
-        { id: 2, user_name: "Unsafe", pd: task12MaliciousText, version: "1.0", status: 500, url: "javascript:alert(1)", failure_reason: task12MaliciousText, detail_unavailable_reason: null },
-        { id: 3, user_name: "Credentialed", pd: "PD3", version: "1.0", status: 200, url: "https://user:password@example.test/private.zip", failure_reason: null, detail_unavailable_reason: null },
+        { id: 1, user_id: 7, user_name: "Alice", pd: "PD1", version: "1.0", status: 200, url: "https://example.test/rom.zip", failure_reason: null, detail_unavailable_reason: null, created_at_ms: 1_787_500_000_000 },
+        { id: 4, user_id: 7, user_name: "Alice Duplicate", pd: "PD1", version: "1.0", status: 200, url: "https://example.test/rom.zip", failure_reason: null, detail_unavailable_reason: null, created_at_ms: 1_787_500_001_000 },
+        { id: 2, user_id: 8, user_name: "Unsafe", pd: task12MaliciousText, version: "1.0", status: 500, url: "javascript:alert(1)", failure_reason: task12MaliciousText, detail_unavailable_reason: null, created_at_ms: 1_787_500_002_000 },
+        { id: 3, user_id: 8, user_name: "Credentialed", pd: "PD3", version: "1.0", status: 200, url: "https://user:password@example.test/private.zip", failure_reason: null, detail_unavailable_reason: null, created_at_ms: 1_787_500_003_000 },
       ],
       next_cursor: null,
     } });
@@ -242,9 +269,11 @@ function task12Event() {
 }
 
 function requestRecord(request: PlaywrightRequest, pathname: string): Task12RequestRecord {
+  const parsed = new URL(request.url());
   return {
     method: request.method(),
     pathname,
+    url: `${parsed.pathname}${parsed.search}`,
     headers: request.headers(),
     body: request.postData(),
   };

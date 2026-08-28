@@ -78,6 +78,7 @@ describe.each([
     expect(page.element.querySelector('[role="alert"]')).not.toBeNull();
 
     api[failingMethod].mockResolvedValueOnce(successFor(_name));
+    if (_name === "overview") api[failingMethod].mockResolvedValueOnce(successFor(_name));
     page.element.querySelector("button").click();
     await vi.waitFor(() => expect(page.element.getAttribute("data-page-state")).toBe("ready"));
     page.destroy();
@@ -121,7 +122,7 @@ describe("operational workspace contracts", () => {
     const external = new AbortController();
     const activation = page.activate({ view: _name }, external.signal);
 
-    await vi.waitFor(() => expect(apiMethod).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(apiMethod).toHaveBeenCalledTimes(_name === "overview" ? 2 : 1));
     const options = apiMethod.mock.calls[0].at(-1);
     expect(options.signal).not.toBe(external.signal);
     page.destroy();
@@ -145,7 +146,7 @@ describe("operational workspace contracts", () => {
     const page = createOverviewPage(ctx);
     await page.activate({ view: "overview" }, new AbortController().signal);
 
-    expect(ctx.api.getTraceOverview).toHaveBeenCalledOnce();
+    expect(ctx.api.getTraceOverview).toHaveBeenCalledTimes(2);
     expect(page.element.textContent).toContain("44");
     expect(page.element.textContent).toContain("失败");
   });
