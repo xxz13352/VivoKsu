@@ -9,7 +9,31 @@
  * + PBKDF2-SHA256 密码哈希 + 随机 session token + 状态变更请求校验 X-Requested-With(CSRF 兜底)。
  */
 
-import adminHtml from "./admin.html";
+import adminIndexHtml from "./admin/index.html";
+import adminStylesCss from "./admin/styles.css";
+import adminApiJs from "./admin/api.js";
+import adminAppJs from "./admin/app.js";
+import adminComponentsJs from "./admin/components.js";
+import adminRouterJs from "./admin/router.js";
+import adminAuditJs from "./admin/pages/audit.js";
+import adminOverviewJs from "./admin/pages/overview.js";
+import adminRomJs from "./admin/pages/rom.js";
+import adminSessionsJs from "./admin/pages/sessions.js";
+import adminUsersJs from "./admin/pages/users.js";
+import adminVersionsJs from "./admin/pages/versions.js";
+import {
+  ADMIN_RESPONSE_SECURITY_HEADERS,
+  exportTracesV2,
+  getAppVersionsSummaryV2,
+  getTraceEventV2,
+  getTraceOutputV2,
+  getTraceOverviewV2,
+  getTraceRunV2,
+  listRomLogsV2,
+  listTraceRunsV2,
+  listTraceUsersV2,
+  traceQueryErrorResponse,
+} from "./trace-v2-query";
 
 export interface Env {
   /** D1 绑定(nwflash-db) */
@@ -24,16 +48,27 @@ export interface Env {
 const SESSION_TTL_MS = 7 * 24 * 3600 * 1000; // 7 天
 const PBKDF2_ITERATIONS = 100_000;
 
-const SECURE_HEADERS: Record<string, string> = {
-  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-  "X-Content-Type-Options": "nosniff",
-  "X-Frame-Options": "DENY",
-  "Referrer-Policy": "no-referrer",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
-  "Content-Security-Policy":
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
-  "Cache-Control": "no-store",
-};
+const SECURE_HEADERS = ADMIN_RESPONSE_SECURITY_HEADERS;
+
+interface StaticAsset {
+  body: string;
+  contentType: "text/html; charset=utf-8" | "text/css; charset=utf-8" | "text/javascript; charset=utf-8";
+}
+
+const STATIC_ASSETS: ReadonlyMap<string, StaticAsset> = new Map([
+  ["/", { body: adminIndexHtml, contentType: "text/html; charset=utf-8" }],
+  ["/admin/styles.css", { body: adminStylesCss, contentType: "text/css; charset=utf-8" }],
+  ["/admin/app.js", { body: adminAppJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/api.js", { body: adminApiJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/router.js", { body: adminRouterJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/components.js", { body: adminComponentsJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/pages/audit.js", { body: adminAuditJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/pages/overview.js", { body: adminOverviewJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/pages/versions.js", { body: adminVersionsJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/pages/users.js", { body: adminUsersJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/pages/sessions.js", { body: adminSessionsJs, contentType: "text/javascript; charset=utf-8" }],
+  ["/admin/pages/rom.js", { body: adminRomJs, contentType: "text/javascript; charset=utf-8" }],
+]);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -42,18 +77,20 @@ export default {
     // 强制 HTTPS(Cloudflare 边缘通常已处理,双保险)
     const proto = request.headers.get("x-forwarded-proto");
     if (proto === "http") {
-      return Response.redirect(`https://${url.host}${url.pathname}${url.search}`, 301);
+      return new Response(null, {
+        status: 301,
+        headers: {
+          ...SECURE_HEADERS,
+          Location: `https://${url.host}${url.pathname}${url.search}`,
+        },
+      });
     }
 
     try {
-      await ensureAdminSeed(env);
+      const staticResponse = serveStaticRequest(request, url);
+      if (staticResponse !== null) return staticResponse;
 
-      // 页面
-      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
-        return new Response(adminHtml, {
-          headers: { "Content-Type": "text/html; charset=utf-8", ...SECURE_HEADERS },
-        });
-      }
+      await ensureAdminSeed(env);
 
       // API
       if (url.pathname.startsWith("/api/")) {
@@ -63,10 +100,32 @@ export default {
       return json({ error: "Not found" }, 404);
     } catch (e) {
       console.error("unhandled", e);
+      if (isFrozenAdminApiPath(url.pathname)) {
+        return traceQueryErrorResponse(request, 500, "TRACE_INTERNAL", "内部错误。");
+      }
       return json({ error: "内部错误。" }, 500);
     }
   },
 };
+
+function serveStaticRequest(request: Request, url: URL): Response | null {
+  const asset = STATIC_ASSETS.get(url.pathname);
+  if (asset !== undefined) {
+    if (request.method !== "GET") {
+      return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
+    }
+    return new Response(asset.body, {
+      headers: {
+        ...SECURE_HEADERS,
+        "Content-Type": asset.contentType,
+      },
+    });
+  }
+  if (!url.pathname.startsWith("/api/")) {
+    return json({ error: "Not found" }, 404);
+  }
+  return null;
+}
 
 /* ------------------------------------------------------------------ */
 /* 路由                                                                */
@@ -79,22 +138,36 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   // 登录 / 会话(免鉴权)
   if (method === "POST" && path === "/api/login") return login(request, env);
   if (method === "GET" && path === "/api/me") return me(request, env);
-  if (method === "POST" && path === "/api/logout") return logout(request, env);
 
-  // CSRF 兜底:所有状态变更请求必须带 X-Requested-With(与 admin.html 的 fetch 配套)。
+  // CSRF 兜底:所有状态变更请求必须带 X-Requested-With(与浏览器 API client 配套)。
   // 登录除外(跨站表单无法自定义该头,此处覆盖登录后的全部写操作)。
   if (method !== "GET" && request.headers.get("X-Requested-With") !== "XMLHttpRequest") {
+    if (isFrozenAdminApiPath(path)) {
+      return traceQueryErrorResponse(request, 403, "TRACE_FORBIDDEN", "请求缺少必要请求头。");
+    }
     return json({ error: "请求缺少必要请求头。" }, 403);
   }
 
+  // Logout is allowed for expired sessions, but remains a protected state-changing request.
+  if (method === "POST" && path === "/api/logout") return logout(request, env);
+
   // 以下全部需要管理员会话
   const admin = await requireAdmin(request, env);
-  if (admin instanceof Response) return admin; // 401
+  if (admin instanceof Response) {
+    if (isFrozenAdminApiPath(path)) {
+      return traceQueryErrorResponse(request, 401, "TRACE_UNAUTHORIZED", "未登录或会话已过期。");
+    }
+    return admin; // 401
+  }
 
   if (path === "/api/change-password" && method === "POST")
     return changePassword(request, admin, env);
 
   // Nwflash 版本控制(强制更新)
+  if (path === "/api/app-versions/summary") {
+    if (method === "GET") return getAppVersionsSummaryV2(request, env);
+    return traceQueryErrorResponse(request, 405, "TRACE_INVALID", "该接口只支持 GET。");
+  }
   if (path === "/api/app-versions" && method === "GET") return listAppVersions(env);
   if (path === "/api/app-versions" && method === "POST") return addAppVersion(request, env);
   if (path.startsWith("/api/app-versions/") && method === "PUT") return updateAppVersion(request, path, env);
@@ -116,10 +189,59 @@ async function handleApi(request: Request, url: URL, env: Env): Promise<Response
   if (path === "/api/online/kick" && method === "POST") return kickOnline(request, admin, env);
 
   // 使用日志(管理端)
+  if (path === "/api/usage-logs/v2/users" && method === "GET")
+    return listTraceUsersV2(request, url, env);
+  if (path === "/api/usage-logs/v2/runs" && method === "GET")
+    return listTraceRunsV2(request, url, env);
+  if (path === "/api/usage-logs/v2/overview" && method === "GET")
+    return getTraceOverviewV2(request, url, env);
+  if (path === "/api/usage-logs/v2/export" && method === "GET")
+    return exportTracesV2(request, url, admin, env);
+
+  const outputMatch = path.match(/^\/api\/usage-logs\/v2\/runs\/([^/]+)\/events\/([^/]+)\/output$/);
+  if (outputMatch && method === "GET") {
+    const segments = decodeTraceRouteSegments(request, outputMatch[1], outputMatch[2]);
+    if (segments instanceof Response) return segments;
+    return getTraceOutputV2(request, segments[0], segments[1], url, admin, env);
+  }
+  const eventMatch = path.match(/^\/api\/usage-logs\/v2\/runs\/([^/]+)\/events\/([^/]+)$/);
+  if (eventMatch && method === "GET") {
+    const segments = decodeTraceRouteSegments(request, eventMatch[1], eventMatch[2]);
+    if (segments instanceof Response) return segments;
+    return getTraceEventV2(request, segments[0], segments[1], env);
+  }
+  const runMatch = path.match(/^\/api\/usage-logs\/v2\/runs\/([^/]+)$/);
+  if (runMatch && method === "GET") {
+    const segments = decodeTraceRouteSegments(request, runMatch[1]);
+    if (segments instanceof Response) return segments;
+    return getTraceRunV2(request, segments[0], env);
+  }
+
+  if (path === "/api/rom-logs/v2" && method === "GET")
+    return listRomLogsV2(request, url, env);
+
   if (path === "/api/usage-logs/kinds" && method === "GET") return usageLogKinds(env);
   if (path === "/api/usage-logs" && method === "GET") return listUsageLogs(url, env);
 
+  if (isFrozenAdminApiPath(path)) {
+    return traceQueryErrorResponse(request, 404, "TRACE_INVALID", "接口不存在。");
+  }
   return json({ error: "Not found" }, 404);
+}
+
+function isFrozenAdminApiPath(path: string): boolean {
+  return path === "/api/usage-logs/v2"
+    || path.startsWith("/api/usage-logs/v2/")
+    || path === "/api/app-versions/summary"
+    || path === "/api/rom-logs/v2";
+}
+
+function decodeTraceRouteSegments(request: Request, ...encoded: string[]): string[] | Response {
+  try {
+    return encoded.map((segment) => decodeURIComponent(segment));
+  } catch {
+    return traceQueryErrorResponse(request, 400, "TRACE_INVALID", "路径参数编码无效。");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -141,7 +263,7 @@ async function ensureAdminSeed(env: Env) {
 }
 
 async function login(request: Request, env: Env): Promise<Response> {
-  const body = await request.json().catch(() => null);
+  const body = await readJsonObject(request);
   const username = body?.username as string;
   const password = body?.password as string;
   if (!username || !password) return json({ error: "缺少用户名或密码。" }, 400);
@@ -206,7 +328,7 @@ function getSessionToken(request: Request): string | null {
 }
 
 async function changePassword(request: Request, admin: AdminRow, env: Env): Promise<Response> {
-  const body = await request.json().catch(() => null);
+  const body = await readJsonObject(request);
   const newPassword = body?.newPassword as string;
   if (!newPassword || newPassword.length < 8) return json({ error: "新密码至少 8 位。" }, 400);
 
@@ -233,7 +355,7 @@ async function listAppVersions(env: Env): Promise<Response> {
 }
 
 async function addAppVersion(request: Request, env: Env): Promise<Response> {
-  const body = await request.json().catch(() => null);
+  const body = await readJsonObject(request);
   const version = (body?.version as string || "").trim();
   if (!version) return json({ error: "缺少版本号。" }, 400);
   const minVersion = (body?.min_version as string || "").trim() || "0.0.0";
@@ -252,7 +374,7 @@ async function addAppVersion(request: Request, env: Env): Promise<Response> {
 async function updateAppVersion(request: Request, path: string, env: Env): Promise<Response> {
   const id = Number(path.split("/")[3]);
   if (!Number.isFinite(id)) return json({ error: "无效 id。" }, 400);
-  const body = await request.json().catch(() => null);
+  const body = await readJsonObject(request);
 
   if (typeof body?.enabled === "boolean") {
     await env.DB.prepare("UPDATE app_versions SET enabled = ? WHERE id = ?")
@@ -296,7 +418,7 @@ async function listUsers(env: Env): Promise<Response> {
 }
 
 async function addUser(request: Request, env: Env): Promise<Response> {
-  const body = await request.json().catch(() => null);
+  const body = await readJsonObject(request);
   const username = (body?.username as string || "").trim();
   const name = (body?.name as string || "").trim() || username;
   const password = body?.password as string || "";
@@ -321,7 +443,7 @@ async function addUser(request: Request, env: Env): Promise<Response> {
 async function updateUser(request: Request, path: string, env: Env): Promise<Response> {
   const id = Number(path.split("/")[3]);
   if (!Number.isFinite(id)) return json({ error: "无效 id。" }, 400);
-  const body = await request.json().catch(() => null);
+  const body = await readJsonObject(request);
 
   if (typeof body?.enabled === "boolean") {
     await env.DB.prepare("UPDATE api_users SET enabled = ? WHERE id = ?")
@@ -425,7 +547,7 @@ async function onlineAdmin(env: Env): Promise<Response> {
 
 /** POST /api/online/kick —— 设 force_exit,客户端下一个心跳(≤5s)收到后退出进程。 */
 async function kickOnline(request: Request, admin: AdminRow, env: Env): Promise<Response> {
-  const body = await request.json().catch(() => null);
+  const body = await readJsonObject(request);
   const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
   const userId = Number(body?.userId);
   const reason = typeof body?.reason === "string" ? body.reason.slice(0, 200).trim() : "";
@@ -522,8 +644,15 @@ async function listUsageLogs(url: URL, env: Env): Promise<Response> {
 function json(obj: unknown, status: number, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...SECURE_HEADERS, ...extraHeaders },
+    headers: { ...extraHeaders, ...SECURE_HEADERS, "Content-Type": "application/json; charset=utf-8" },
   });
+}
+
+async function readJsonObject(request: Request): Promise<Record<string, unknown> | null> {
+  const value: unknown = await request.json().catch(() => null);
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function randomHex(bytes: number): string {
@@ -548,8 +677,8 @@ async function pbkdf2(password: string, saltHex: string): Promise<string> {
   return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function hexToBytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2);
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
+  const out: Uint8Array<ArrayBuffer> = new Uint8Array(new ArrayBuffer(hex.length / 2));
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
 }

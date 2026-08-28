@@ -8,13 +8,23 @@
     "predeploy": "wrangler secret list --format json | node -e \"let input='';process.stdin.on('data',chunk=>input+=chunk).on('end',()=>{const secrets=JSON.parse(input);if(!secrets.some(secret=>secret.name==='SESSION_SIGNING_PRIVATE_KEY_PKCS8')){console.error('Missing Cloudflare secret: SESSION_SIGNING_PRIVATE_KEY_PKCS8');process.exit(1)}})\"",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
-    "test": "vitest run test/security.test.ts",
+    "test": "vitest run test/security.test.ts test/trace-v2-contract.test.ts test/trace-v2-redaction.test.ts",
     "test:workerd": "vitest run --config vitest.workerd.config.ts",
-    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/index.ts src/security.ts && wrangler deploy --dry-run --outdir .wrangler/task-2-dry-run"
+    "test:admin:unit": "vitest run web/src/admin/tests --no-cache --coverage.enabled=false",
+    "test:admin:workerd": "vitest run --config vitest.workerd.config.ts test/admin-static.workerd.test.ts test/trace-v2-admin.workerd.test.ts --no-cache --coverage.enabled=false",
+    "test:admin:browser": "playwright test --config web/playwright.config.ts",
+    "test:admin:e2e": "npm run test:admin:browser",
+    "test:admin": "npm run test:admin:unit && npm run test:admin:workerd && npm run test:admin:browser",
+    "dry-run:api": "node scripts/wrangler-dry-run.mjs api",
+    "dry-run:web": "node scripts/wrangler-dry-run.mjs web",
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/index.ts src/security.ts src/trace-v2-contract.ts src/trace-v2-redaction.ts src/trace-v2-ingest.ts src/trace-v2-retention.ts && tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,WebWorker --types @cloudflare/workers-types --skipLibCheck src/trace-v2-contract.ts web/src/admin/text-modules.d.ts web/src/trace-v2-query.ts web/src/index.ts && npm run dry-run:api && npm run dry-run:web"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@cloudflare/vitest-plugin": "^1.0.0",
     "@cloudflare/workers-types": "^5.20260811.0",
+    "@playwright/test": "^1.62.1",
+    "jsdom": "^30.0.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11",
     "wrangler": "^4.122.0"

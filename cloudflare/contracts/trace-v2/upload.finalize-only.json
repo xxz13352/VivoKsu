@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "upload_id": "019d9c40-7b3c-7000-8000-000000003007",
+  "runs": [{
+    "run_id": "019d9c40-7b3c-7000-8000-000000003002",
+    "operation_kind": "fastboot_flash",
+    "title": "VIVO line flash",
+    "outcome": "success",
+    "device_serial": "9A7F23BC10D4",
+    "source_paths": ["C:\\Users\\Public\\Nwflash\\boot.img"],
+    "source_urls": [],
+    "client_version": "1.4.0",
+    "started_at_ms": 1787500000000,
+    "ended_at_ms": 1787500000100,
+    "duration_ms": 100,
+    "error_class": null,
+    "error_code": null,
+    "error_message": null,
+    "final_sequence": 1,
+    "trace_complete": true,
+    "trace_loss_reason": null
+  }],
+  "events": [],
+  "output_chunks": []
+}
