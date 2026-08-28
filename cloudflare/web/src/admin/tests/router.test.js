@@ -119,6 +119,36 @@ describe("admin query route", () => {
     expect(serializeRoute({ view: "rom", runId: "run-secret" })).toBe("?view=rom");
   });
 
+  it("round-trips only the bounded ROM filters and cursor", () => {
+    const route = {
+      view: "rom",
+      userId: "42",
+      pd: "PD2243",
+      version: "PD2243_A_14.0.18.1.W30",
+      status: "200",
+      q: "stable release",
+      cursor: "next:rom:42",
+      token: "must-not-appear",
+      output: "must-not-appear",
+    };
+    const encoded = serializeRoute(route);
+
+    expect(encoded).toBe(
+      "?view=rom&userId=42&pd=PD2243&version=PD2243_A_14.0.18.1.W30" +
+      "&status=200&q=stable+release&cursor=next%3Arom%3A42",
+    );
+    expect(parseRoute(encoded)).toEqual({
+      view: "rom",
+      userId: "42",
+      pd: "PD2243",
+      version: "PD2243_A_14.0.18.1.W30",
+      status: "200",
+      q: "stable release",
+      cursor: "next:rom:42",
+    });
+    expect(serializeRoute({ view: "rom", q: "apiToken=top-secret" })).toBe("?view=rom");
+  });
+
   it.each([
     ["unknown view", "?view=settings"],
     ["repeated view", "?view=audit&view=users"],

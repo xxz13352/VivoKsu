@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "admin-shell.spec.ts",
+  testMatch: "admin-*.spec.ts",
   fullyParallel: false,
   workers: 1,
   reporter: "line",

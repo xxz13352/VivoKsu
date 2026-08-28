@@ -27,6 +27,7 @@ const AUDIT_FIELDS = Object.freeze([
   "q",
   "cursor",
 ]);
+const ROM_FIELDS = Object.freeze(["userId", "pd", "version", "status", "q", "cursor"]);
 const LEVELS = new Set(["overview", "user", "run", "event", "command", "output"]);
 const STREAMS = new Set(["stdout", "stderr"]);
 const TOKEN_VALUE = /^[\p{L}\p{N}_.:@+/-]+$/u;
@@ -52,6 +53,8 @@ const FIELD_RULES = Object.freeze({
   status: value => boundedPattern(value, 32, TOKEN_VALUE),
   kind: value => boundedPattern(value, 64, TOKEN_VALUE),
   partition: value => boundedPattern(value, 64, TOKEN_VALUE),
+  pd: value => boundedPattern(value, 64, TOKEN_VALUE),
+  version: value => boundedPattern(value, 128, TOKEN_VALUE),
   errorCode: value => boundedPattern(value, 128, TOKEN_VALUE),
   q: value => boundedText(value, 256, { rejectSensitive: true }),
   cursor: value => boundedText(value, 512),
@@ -78,11 +81,11 @@ export function parseRoute(search) {
   if (!VIEWS.includes(requestedView)) return { ...DEFAULT_ROUTE };
 
   const route = { view: requestedView };
-  if (requestedView !== "audit") return route;
-
-  for (const field of AUDIT_FIELDS) route[field] = null;
-
-  for (const field of AUDIT_FIELDS) {
+  const fields = requestedView === "audit" ? AUDIT_FIELDS : requestedView === "rom" ? ROM_FIELDS : [];
+  if (requestedView === "audit") {
+    for (const field of AUDIT_FIELDS) route[field] = null;
+  }
+  for (const field of fields) {
     const rawValue = params.get(field);
     if (rawValue === null) continue;
     const value = FIELD_RULES[field](rawValue);
@@ -95,8 +98,9 @@ export function parseRoute(search) {
 export function serializeRoute(route) {
   const view = VIEWS.includes(route?.view) ? route.view : DEFAULT_ROUTE.view;
   const params = new URLSearchParams([["view", view]]);
-  if (view === "audit") {
-    for (const field of AUDIT_FIELDS) {
+  const fields = view === "audit" ? AUDIT_FIELDS : view === "rom" ? ROM_FIELDS : [];
+  if (fields.length > 0) {
+    for (const field of fields) {
       const rawValue = route?.[field];
       if (typeof rawValue !== "string") continue;
       const value = FIELD_RULES[field](rawValue);

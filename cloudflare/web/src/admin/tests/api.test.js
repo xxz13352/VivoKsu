@@ -189,13 +189,33 @@ describe("admin API client", () => {
       }, { status: 403 })),
     });
 
-    await expect(api.exportTrace()).rejects.toMatchObject({
+    await expect(api.request("/api/usage-logs/v2/export", { responseType: "text" })).rejects.toMatchObject({
       kind: "forbidden",
       status: 403,
       code: "TRACE_FORBIDDEN",
       requestId: "export-403",
       message: "禁止导出",
     });
+  });
+
+  it("builds a same-origin native export URL without buffering the NDJSON body", () => {
+    const fetchImpl = vi.fn();
+    const api = createApiClient({ fetchImpl });
+
+    expect(api.getTraceExportUrl({
+      userId: "42",
+      status: "failed",
+      partition: "super",
+      cursor: null,
+      stream: null,
+    })).toBe("/api/usage-logs/v2/export?userId=42&status=failed&partition=super");
+    try {
+      api.getTraceExportUrl({ q: "Authorization: Bearer top-secret" });
+      throw new Error("expected getTraceExportUrl to reject a sensitive filter");
+    } catch (error) {
+      expect(error).toMatchObject({ kind: "invalid_request", code: "ADMIN_INVALID_REQUEST" });
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("classifies malformed declared JSON as an invalid response", async () => {

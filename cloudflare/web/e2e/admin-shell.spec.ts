@@ -34,6 +34,73 @@ async function installApiFixtures(page: Page, state: { authenticated: boolean; l
         : { status: 401, json: { error: "会话已过期。" } });
       return;
     }
+    if (path === "/api/usage-logs/v2/overview") {
+      await route.fulfill({ json: {
+        totals: { api_users: 0, online_sessions: 0, operations: 0, failed: 0 },
+        trend: [],
+        recent_failures: [],
+      } });
+      return;
+    }
+    if (path === "/api/app-versions") {
+      await route.fulfill({ json: { versions: [] } });
+      return;
+    }
+    if (path === "/api/app-versions/summary") {
+      await route.fulfill({ json: {
+        current_version: null,
+        minimum_version: null,
+        supported_versions: [],
+        today_426: 0,
+      } });
+      return;
+    }
+    if (path === "/api/users") {
+      await route.fulfill({ json: { users: [] } });
+      return;
+    }
+    if (path === "/api/online") {
+      await route.fulfill({ json: { sessions: [], count: 0 } });
+      return;
+    }
+    if (path === "/api/rom-logs/v2") {
+      await route.fulfill({ json: { items: [], next_cursor: null } });
+      return;
+    }
+    if (path === "/api/usage-logs/v2/users") {
+      await route.fulfill({ json: { items: [], next_cursor: null } });
+      return;
+    }
+    const runMatch = path.match(/^\/api\/usage-logs\/v2\/runs\/(.+)$/);
+    if (runMatch && !path.includes("/events/")) {
+      const traceRef = decodeURIComponent(runMatch[1]);
+      const runId = traceRef.startsWith("v2:") ? traceRef.slice(3) : null;
+      await route.fulfill({ json: {
+        source_schema: 2,
+        detail_available: true,
+        detail_unavailable_reason: null,
+        run: {
+          source_schema: 2,
+          trace_ref: traceRef,
+          run_id: runId,
+          legacy_id: null,
+          user_id: 7,
+          username: "fixture-user",
+          user_name: "Fixture User",
+          operation_kind: "unknown",
+          title: "Fixture run",
+          outcome: "unknown",
+          client_version: "0.0.0",
+          started_at_ms: 0,
+          ended_at_ms: null,
+          duration_ms: null,
+          trace_complete: false,
+          trace_loss_reason: "fixture",
+        },
+        events: [],
+      } });
+      return;
+    }
     await route.fulfill({ status: 404, json: { error: "Unmocked API route" } });
   });
 }

@@ -175,11 +175,13 @@ export function createApiClient({ fetchImpl = globalThis.fetch, onUnauthorized =
       query,
       options,
     ),
-    exportTrace: (query = {}, options = {}) => request("/api/usage-logs/v2/export", {
-      ...options,
-      query,
-      responseType: "text",
-    }),
+    getTraceExportUrl: (query = {}) => {
+      try {
+        return buildApiUrl("/api/usage-logs/v2/export", query);
+      } catch {
+        throw invalidRequest();
+      }
+    },
     getRomLogs: (query = {}, options = {}) => get("/api/rom-logs/v2", query, options),
   });
 }

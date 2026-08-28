@@ -10,6 +10,7 @@ import {
   createCursorControls,
   createHistoryFocusReturn,
   createSafeElement,
+  isCurrentPageActivation,
   renderPageState,
   showPersistentAlert,
 } from "../components.js";
@@ -250,5 +251,20 @@ describe("history focus return", () => {
     window.dispatchEvent(new window.PopStateEvent("popstate", { state: { focusId: id, scrollY: 0 } }));
     await Promise.resolve();
     expect(window.document.activeElement).toBe(other);
+  });
+});
+
+describe("page activation guard", () => {
+  it("accepts only the current non-aborted page/controller pair", () => {
+    const page = {};
+    const otherPage = {};
+    const controller = new AbortController();
+    const otherController = new AbortController();
+
+    expect(isCurrentPageActivation(page, controller, page, controller)).toBe(true);
+    expect(isCurrentPageActivation(page, controller, otherPage, controller)).toBe(false);
+    expect(isCurrentPageActivation(page, controller, page, otherController)).toBe(false);
+    controller.abort();
+    expect(isCurrentPageActivation(page, controller, page, controller)).toBe(false);
   });
 });

@@ -90,6 +90,13 @@ export const ADMIN_MENU_ITEMS = Object.freeze([
   Object.freeze({ id: "rom", label: "ROM 查询" }),
 ]);
 
+export function isCurrentPageActivation(currentPage, currentController, page, controller) {
+  return currentPage === page
+    && currentController === controller
+    && controller instanceof AbortController
+    && !controller.signal.aborted;
+}
+
 const PAGE_STATE_DEFAULTS = Object.freeze({
   loading: Object.freeze({ title: "正在加载", message: "正在获取服务器状态。" }),
   empty: Object.freeze({ title: "暂无数据", message: "当前条件下没有可显示的记录。" }),

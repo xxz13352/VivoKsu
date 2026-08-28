@@ -4,10 +4,17 @@ import {
   ADMIN_MENU_ITEMS,
   announceStatus,
   createAdminMenu,
+  createConfirmationDialog,
   createElement,
-  renderPageState,
+  isCurrentPageActivation,
   showPersistentAlert,
 } from "./components.js";
+import { createAuditPage } from "./pages/audit.js";
+import { createOverviewPage } from "./pages/overview.js";
+import { createRomPage } from "./pages/rom.js";
+import { createSessionsPage } from "./pages/sessions.js";
+import { createUsersPage } from "./pages/users.js";
+import { createVersionsPage } from "./pages/versions.js";
 
 const VIEW_COPY = Object.freeze({
   overview: Object.freeze({ title: "概览", eyebrow: "SYSTEM OVERVIEW", description: "查看版本、用户、会话与结构化追踪的权威摘要。" }),
@@ -17,6 +24,14 @@ const VIEW_COPY = Object.freeze({
   audit: Object.freeze({ title: "操作审计", eyebrow: "TRACE EVIDENCE", description: "按用户、运行、事件、命令和输出逐级核对持久化证据。" }),
   rom: Object.freeze({ title: "ROM 查询", eyebrow: "ROM ACTIVITY", description: "检索 ROM 查询状态与服务端结果。" }),
 });
+const PAGE_FACTORIES = Object.freeze({
+  overview: createOverviewPage,
+  versions: createVersionsPage,
+  users: createUsersPage,
+  sessions: createSessionsPage,
+  audit: createAuditPage,
+  rom: createRomPage,
+});
 
 const root = document.getElementById("admin-app");
 let router = null;
@@ -24,6 +39,9 @@ let menu = null;
 let cleanup = [];
 let currentAdmin = null;
 let currentRoute = null;
+let currentPage = null;
+let currentPageController = null;
+const openDialogs = new Set();
 let statusCancel = () => {};
 
 const api = createApiClient({
@@ -42,6 +60,7 @@ function listen(target, type, handler, options) {
 }
 
 function teardown() {
+  clearCurrentPage();
   router?.destroy();
   router = null;
   menu?.destroy();
@@ -203,11 +222,13 @@ function showShell() {
     showLogin({ alert: "已安全退出。" });
   });
 
-  router = createRouter({ window, onRoute: (route) => renderRoute(route, page) });
+  const pageContext = createPageContext({ alerts, status });
+  router = createRouter({ window, onRoute: (route) => renderRoute(route, page, pageContext) });
   void router.start();
 }
 
-function renderRoute(route, page) {
+async function renderRoute(route, page, pageContext) {
+  clearCurrentPage();
   currentRoute = route;
   const copy = VIEW_COPY[route.view] ?? VIEW_COPY.overview;
   menu?.setActive(route.view);
@@ -217,26 +238,102 @@ function renderRoute(route, page) {
     "data-route-heading": "true",
     tabindex: "-1",
   }, copy.title);
-  const placeholder = createElement(document, "section", { className: "workspace-card" }, [
-    createElement(document, "h2", {}, "模块入口已就绪"),
-    createElement(document, "p", { className: "muted" }, "当前 Shell 只建立认证、路由与安全组件边界；数据工作区由后续模块接入稳定 API。"),
-  ]);
   const routeDetails = route.view === "audit" && route.level
     ? createElement(document, "p", { className: "route-context" }, `审计层级：${route.level}`)
     : null;
-  page.replaceChildren(
-    createElement(document, "div", { className: "workspace-heading" }, [
-      createElement(document, "p", { className: "eyebrow" }, copy.eyebrow),
-      heading,
-      createElement(document, "p", { className: "workspace-description" }, copy.description),
-      routeDetails,
-    ]),
-    placeholder,
-  );
+  const headingGroup = createElement(document, "div", { className: "workspace-heading" }, [
+    createElement(document, "p", { className: "eyebrow" }, copy.eyebrow),
+    heading,
+    createElement(document, "p", { className: "workspace-description" }, copy.description),
+    routeDetails,
+  ]);
+  const createPage = PAGE_FACTORIES[route.view] ?? PAGE_FACTORIES.overview;
+  const controller = new AbortController();
+  const pageInstance = createPage(pageContext);
+  currentPageController = controller;
+  currentPage = pageInstance;
+  page.replaceChildren(headingGroup, pageInstance.element);
+  try {
+    await pageInstance.activate(route, controller.signal);
+  } catch (error) {
+    if (error?.name !== "AbortError" && isCurrentPageActivation(
+      currentPage,
+      currentPageController,
+      pageInstance,
+      controller,
+    )) {
+      pageContext.alert(error?.message ?? "页面加载失败。", { title: "无法打开工作区" });
+    }
+  }
   return route;
 }
 
+function clearCurrentPage() {
+  currentPageController?.abort();
+  currentPageController = null;
+  clearOpenDialogs();
+  currentPage?.deactivate?.();
+  currentPage?.destroy?.();
+  currentPage = null;
+}
+
+function clearOpenDialogs() {
+  for (const dialog of openDialogs) dialog.destroy();
+  openDialogs.clear();
+}
+
+function createPageContext({ alerts, status }) {
+  return Object.freeze({
+    document,
+    window,
+    api,
+    navigate: (route, options) => router?.navigate(route, options),
+    announce: (message) => {
+      statusCancel();
+      statusCancel = announceStatus(status, message);
+    },
+    alert: (message, options = {}) => showPersistentAlert(alerts, {
+      message,
+      title: options.title ?? null,
+      kind: options.kind ?? "error",
+      dismissLabel: options.dismissLabel ?? "关闭",
+    }),
+    confirm: (options) => openConfirmation(options),
+  });
+}
+
+function openConfirmation(options = {}) {
+  let dialog;
+  dialog = createConfirmationDialog({
+    document,
+    title: options.title ?? "确认操作",
+    message: options.message ?? "请确认是否继续。",
+    confirmLabel: options.confirmLabel ?? "确认",
+    cancelLabel: options.cancelLabel ?? "取消",
+    onConfirm: async () => {
+      const result = await options.onConfirm?.();
+      window.setTimeout(() => {
+        dialog.destroy();
+        openDialogs.delete(dialog);
+      }, 0);
+      return result;
+    },
+    onCancel: () => {
+      options.onCancel?.();
+      window.queueMicrotask(() => {
+        dialog.destroy();
+        openDialogs.delete(dialog);
+      });
+    },
+  });
+  openDialogs.add(dialog);
+  root.append(dialog.element);
+  dialog.open(options.trigger ?? document.activeElement);
+  return dialog;
+}
+
 function showPasswordForm({ page, alerts, status }) {
+  clearCurrentPage();
   const password = createElement(document, "input", {
     id: "new-admin-password",
     type: "password",
@@ -265,7 +362,8 @@ function showPasswordForm({ page, alerts, status }) {
     createElement(document, "div", { className: "form-actions" }, [cancel, submit]),
   ]);
   page.replaceChildren(form);
-  listen(cancel, "click", () => renderRoute(currentRoute ?? { view: "overview" }, page));
+  const pageContext = createPageContext({ alerts, status });
+  listen(cancel, "click", () => void renderRoute(currentRoute ?? { view: "overview" }, page, pageContext));
   listen(form, "submit", async (event) => {
     event.preventDefault();
     alerts.replaceChildren();
