@@ -217,6 +217,14 @@ fn begin_build_identity() {
 }
 
 #[inline(always)]
+pub(crate) fn begin_trace_credential_sentinel() {
+    #[cfg(feature = "vmp-sdk")]
+    unsafe {
+        VMProtectBeginUltra(c"NWFlash.TraceCredentialSentinel".as_ptr())
+    }
+}
+
+#[inline(always)]
 pub(crate) fn end_marker() {
     #[cfg(feature = "vmp-sdk")]
     unsafe {

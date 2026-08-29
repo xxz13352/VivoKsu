@@ -8,6 +8,7 @@ mod operation;
 mod partition;
 mod quick_flash;
 mod safe_flash;
+mod trace;
 
 pub const APP_DISPLAY_NAME: &str = "奶蛙Flash";
 pub const APP_TECH_NAME: &str = "NWflash";
@@ -23,6 +24,7 @@ pub use operation::*;
 pub use partition::*;
 pub use quick_flash::*;
 pub use safe_flash::*;
+pub use trace::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProductIdentity {

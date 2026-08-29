@@ -2747,8 +2747,12 @@ dependencies = [
 name = "nwflash-domain"
 version = "1.0.1"
 dependencies = [
+ "getrandom 0.4.3",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]
@@ -2790,6 +2794,7 @@ version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
+ "nwflash-domain",
  "rand_core 0.6.4",
  "serde",
  "serde_json",

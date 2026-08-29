@@ -5,8 +5,10 @@
 
 mod decision;
 mod lease;
+mod trace_redaction;
 mod vmp;
 
 pub use decision::*;
 pub use lease::*;
+pub use trace_redaction::*;
 pub use vmp::*;
