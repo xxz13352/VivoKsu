@@ -1250,6 +1250,20 @@ fn terminate_process_tree(child: &mut process::Child) -> bool {
 }
 
 #[cfg(test)]
+fn production_source(source: &str) -> &str {
+    let mut search_from = 0;
+    while let Some(relative) = source[search_from..].find("#[cfg(test)]") {
+        let index = search_from + relative + "#[cfg(test)]".len();
+        let rest = source[index..].trim_start();
+        if rest.starts_with("mod ") || rest.starts_with("pub mod ") {
+            return &source[..search_from + relative];
+        }
+        search_from = index;
+    }
+    source
+}
+
+#[cfg(test)]
 fn collect_production_spawn_sites(crates_root: &Path) -> std::collections::BTreeMap<String, usize> {
     fn visit(root: &Path, directory: &Path, sites: &mut std::collections::BTreeMap<String, usize>) {
         let Ok(entries) = std::fs::read_dir(directory) else {
@@ -1274,10 +1288,7 @@ fn collect_production_spawn_sites(crates_root: &Path) -> std::collections::BTree
             let Ok(source) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let production = source
-                .split("\n#[cfg(test)]\nmod tests {")
-                .next()
-                .unwrap_or(&source);
+            let production = production_source(&source);
             let count = production
                 .lines()
                 .filter(|line| {
@@ -1352,10 +1363,7 @@ fn collect_unobserved_process_callers(
             let Ok(source) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let production = source
-                .split("\n#[cfg(test)]\nmod tests {")
-                .next()
-                .unwrap_or(&source);
+            let production = production_source(&source);
             let count = production
                 .lines()
                 .filter(|line| {
