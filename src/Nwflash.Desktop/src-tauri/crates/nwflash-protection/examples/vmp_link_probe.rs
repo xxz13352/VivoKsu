@@ -5,7 +5,7 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use nwflash_protection::{
     accept_signed_login_lease, admit_local_operation, build_identity_matches,
     classify_signed_heartbeat_lease, trace_credential_sentinel, verify_image_integrity,
-    LeaseBinding, LeaseClaims, LeaseKind, SignedEnvelope, TokenDigest, TraceCredentialScanner,
+    LeaseBinding, LeaseClaims, LeaseKind, SignedEnvelope, TokenDigest, TraceOutputSession,
     VmpIntegrityProbe,
 };
 
@@ -23,10 +23,15 @@ fn main() {
     let admission = admit_local_operation(&session, "layout-build", "layout-nonce", NOW);
     let integrity = verify_image_integrity(&VmpIntegrityProbe);
     let identity = build_identity_matches("layout-build", "layout-build");
-    let mut trace_scanner = TraceCredentialScanner::new();
-    trace_scanner.push(b"trace layout probe");
-    let redacted_trace = trace_scanner.finish().expect("static probe text must seal");
-    let trace_credential = trace_credential_sentinel(&redacted_trace);
+    let mut trace_reader = std::io::Cursor::new(b"trace layout probe".as_slice());
+    let trace_session = TraceOutputSession::from_reader(
+        nwflash_domain::TraceId::try_new_v7().expect("probe event id"),
+        nwflash_domain::TraceOutputStreamV2::Stdout,
+        &mut trace_reader,
+        &nwflash_protection::ExactSecretSet::empty(),
+    )
+    .expect("static probe text must seal");
+    let trace_credential = trace_credential_sentinel(&trace_session);
 
     black_box((
         session,

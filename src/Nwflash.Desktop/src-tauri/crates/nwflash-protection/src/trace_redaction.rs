@@ -1955,11 +1955,11 @@ impl TraceCredentialSentinel {
 
 #[inline(never)]
 #[export_name = "nwflash_protection_trace_credential_sentinel"]
-pub fn trace_credential_sentinel(redacted: &RedactedLogicalStream) -> TraceCredentialSentinel {
+pub fn trace_credential_sentinel(session: &TraceOutputSession) -> TraceCredentialSentinel {
     begin_trace_credential_sentinel();
     let sentinel = TraceCredentialSentinel {
-        redaction_count: redacted.summary().total(),
-        high_risk: redacted.summary().count(CredentialKind::HighRisk) > 0,
+        redaction_count: session.redaction_summary.total(),
+        high_risk: session.redaction_summary.count(CredentialKind::HighRisk) > 0,
     };
     end_marker();
     sentinel
@@ -2799,14 +2799,19 @@ mod tests {
 
     #[test]
     fn sealed_finalization_is_idempotent_and_sentinel_reports_only_counts() {
-        let mut scanner = TraceCredentialScanner::new();
-        scanner.push(b"token=token-sentinel-100007");
-        let redacted = scanner.finish().expect("bounded logical stream");
-        let sentinel = trace_credential_sentinel(&redacted);
+        let mut reader = std::io::Cursor::new(b"token=token-sentinel-100007".as_slice());
+        let session = TraceOutputSession::from_reader(
+            TraceId::try_new_v7().expect("event id"),
+            TraceOutputStreamV2::Stdout,
+            &mut reader,
+            &ExactSecretSet::empty(),
+        )
+        .expect("bounded logical stream");
+        let sentinel = trace_credential_sentinel(&session);
         assert_eq!(sentinel.redaction_count(), 1);
         assert!(!sentinel.high_risk());
         assert!(!format!("{sentinel:?}").contains("token-sentinel"));
-        assert_eq!(redacted.summary().count(CredentialKind::Token), 1);
+        assert_eq!(session.redaction_summary.count(CredentialKind::Token), 1);
 
         let storage_size = mem::size_of::<RedactedTraceText>();
         assert!(storage_size > 0);

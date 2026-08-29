@@ -135,7 +135,7 @@ Assert-Condition (@(Get-NwflashRequiredSdkImports).Count -eq 8) 'Adding the trac
 
 $linkProbeSource = Get-Content -LiteralPath (Join-Path $repo 'src\Nwflash.Desktop\src-tauri\crates\nwflash-protection\examples\vmp_link_probe.rs') -Raw
 Assert-Condition ($linkProbeSource.Contains('trace_credential_sentinel(')) 'The link probe does not call the trace credential sentinel leaf.'
-Assert-Condition ($linkProbeSource -match '(?s)\.finish\(\)\s*\.expect\("static probe text must seal"\)') 'The link probe does not use the sealed Wave1 logical-stream API.'
+Assert-Condition ($linkProbeSource -match '(?s)TraceOutputSession::from_reader\(') 'The link probe does not use the sealed Wave1 logical-stream API.'
 Assert-Condition ($linkProbeSource -match '(?s)black_box\s*\([^;]*trace_credential') 'The link probe does not keep the trace sentinel result live through black_box.'
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("nwflash-task8-contract-" + [Guid]::NewGuid().ToString('N'))
