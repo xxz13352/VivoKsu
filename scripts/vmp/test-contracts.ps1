@@ -68,6 +68,7 @@ try {
         nwflash_protection_admit_local_operation = 'Ultra'
         nwflash_protection_verify_image_integrity = 'Virtualization'
         nwflash_protection_build_identity_matches = 'Mutation'
+        nwflash_protection_trace_credential_sentinel = 'Ultra'
     }
     if (@($layoutResult.markers).Count -ne $expectedMarkers.Count) { throw 'Structured link result has the wrong marker count.' }
     foreach ($marker in @($layoutResult.markers)) {

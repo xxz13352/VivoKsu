@@ -68,6 +68,7 @@ this intent:
 | Local operation admission | Ultra |
 | Image CRC and integrity decision dispatch | Virtualization |
 | Build identity comparison | Mutation |
+| Trace credential sentinel | Ultra |
 
 Do not expand marker ranges to Tauri/WebView entry points, Tokio or async state
 machines, HTTP/TLS, adb/fastboot, drivers, child-process control, downloads,
@@ -76,16 +77,20 @@ labels and never contain passwords, tokens, paths, URLs, or device serials.
 
 ## Plan C trace-redaction release gate
 
-The current contract intentionally contains exactly the five implemented leaves
-above; it does not invent a sixth marker for code that does not yet exist. After
-Plan C integrates client trace spooling/HTTP/chunking, the final production
-release must first prove that the complete logical trace is synchronously
-redacted before any spool, HTTP, or chunk boundary. A fresh sensitive-surface
-review must then decide whether the pure synchronous redaction/credential
-sentinel leaf uses Ultra or Virtualization, update the exact marker contract,
-and rerun source reachability, MAP/dumpbin physical layout, SDK, runtime probe,
-and protected-package rejection gates. Passing this Task 8 five-leaf handoff is
-not authorization for a later Plan C production release.
+The exact source contract now reserves a sixth synchronous leaf,
+`nwflash_protection_trace_credential_sentinel`, named
+`NWFlash.TraceCredentialSentinel` and reviewed for Ultra mode. The leaf may
+summarize only already-redacted state; its region must not include raw trace
+text, spooling, HTTP, chunking, async/Tokio work, or third-party code.
+
+This repository-side gate is not evidence that the currently checked-out Rust
+source contains the leaf, that a release PE contains its physical region, or
+that VMProtect has processed it. Plan C may proceed to a protected release only
+after the sealed logical-stream redaction implementation is integrated and the
+fresh source-reachability review, six-symbol MAP/dumpbin layout, unchanged
+eight-import SDK contract, compiler-log/marker review, protected runtime probe,
+CRC, signing, package, and installed smoke gates all pass. A PowerShell fixture
+pass alone is not release authorization.
 
 Enable Memory Protection, Import Protection, and Packing for the protected
 release. Virtual-machine denial remains disabled: debugger and VM detections
@@ -109,7 +114,7 @@ under Cargo's ignored `target/release/examples` directory, and then uses x64
 
 - the final PE has exactly one `VMProtectSDK64.dll` import block containing the
   eight required symbols and no additional VMProtect import;
-- each of the five stable leaf symbols occurs exactly once in the MAP; and
+- each of the six stable leaf symbols occurs exactly once in the MAP; and
 - each physical leaf disassembly region contains exactly one expected Begin
   mode followed by exactly one `VMProtectEnd`.
 

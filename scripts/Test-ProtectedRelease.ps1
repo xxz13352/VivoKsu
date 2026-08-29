@@ -96,6 +96,48 @@ function New-MarkerReviewFixture {
     }
 }
 
+function New-MarkerLayoutFixture {
+    param(
+        [Parameter(Mandatory)][string]$MapPath,
+        [Parameter(Mandatory)][string]$DisassemblyPath,
+        [switch]$TraceSentinelReturnsEarly
+    )
+    $mapLines = [Collections.Generic.List[string]]::new()
+    $disassemblyLines = [Collections.Generic.List[string]]::new()
+    $index = 1
+    foreach ($marker in Get-NwflashProtectedMarkers) {
+        $mapLines.Add((' 0001:{0:X8} {1} 0000000000000000 f probe.obj' -f $index, $marker.symbol))
+        $disassemblyLines.Add("$($marker.symbol):")
+        $disassemblyLines.Add("  call VMProtectBegin$($marker.mode)")
+        if ($TraceSentinelReturnsEarly -and $marker.name -eq 'NWFlash.TraceCredentialSentinel') {
+            $disassemblyLines.Add('  ret')
+        }
+        $disassemblyLines.Add('  nop')
+        $disassemblyLines.Add('  call VMProtectEnd')
+        $disassemblyLines.Add('  ret')
+        $index++
+    }
+    [IO.File]::WriteAllLines($MapPath, $mapLines)
+    [IO.File]::WriteAllLines($DisassemblyPath, $disassemblyLines)
+}
+
+$protectedMarkers = @(Get-NwflashProtectedMarkers)
+$traceSentinelMarkers = @($protectedMarkers | Where-Object {
+    [string]$_.symbol -eq 'nwflash_protection_trace_credential_sentinel'
+})
+Assert-Condition ($protectedMarkers.Count -eq 6) 'Protected release contract must contain exactly six stable leaf markers.'
+Assert-Condition ($traceSentinelMarkers.Count -eq 1) 'Protected release contract must contain exactly one trace credential sentinel leaf.'
+Assert-Condition (
+    [string]$traceSentinelMarkers[0].name -eq 'NWFlash.TraceCredentialSentinel' -and
+    [string]$traceSentinelMarkers[0].mode -eq 'Ultra'
+) 'Trace credential sentinel must use the reviewed name and Ultra mode.'
+Assert-Condition (@(Get-NwflashRequiredSdkImports).Count -eq 8) 'Adding the trace sentinel must not expand the exact SDK import set.'
+
+$linkProbeSource = Get-Content -LiteralPath (Join-Path $repo 'src\Nwflash.Desktop\src-tauri\crates\nwflash-protection\examples\vmp_link_probe.rs') -Raw
+Assert-Condition ($linkProbeSource.Contains('trace_credential_sentinel(')) 'The link probe does not call the trace credential sentinel leaf.'
+Assert-Condition ($linkProbeSource -match '(?s)\.finish\(\)\s*\.expect\("static probe text must seal"\)') 'The link probe does not use the sealed Wave1 logical-stream API.'
+Assert-Condition ($linkProbeSource -match '(?s)black_box\s*\([^;]*trace_credential') 'The link probe does not keep the trace sentinel result live through black_box.'
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("nwflash-task8-contract-" + [Guid]::NewGuid().ToString('N'))
 $priorKey = $env:NWFLASH_SESSION_VERIFY_KEY_B64
 $priorBuildId = $env:NWFLASH_BUILD_ID
@@ -119,6 +161,22 @@ try {
     $compilerLog = Join-Path $operatorRoot 'vmprotect-compiler.log'
     New-Amd64PeFixture -Path $sourceExe -Tail 1
     [IO.File]::WriteAllBytes($sourcePdb, [byte[]](1, 2, 3, 4))
+    [IO.File]::WriteAllText($sourceMap, 'fixture marker layout')
+
+    $layoutDisassembly = Join-Path $testRoot 'layout-disassembly.txt'
+    $fakeDumpbin = Join-Path $testRoot 'fake-dumpbin.ps1'
+    [IO.File]::WriteAllText($fakeDumpbin, @'
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+Get-Content -LiteralPath (Join-Path $PSScriptRoot 'layout-disassembly.txt')
+exit 0
+'@)
+    New-MarkerLayoutFixture -MapPath $sourceMap -DisassemblyPath $layoutDisassembly
+    $layoutFixtureResult = Assert-DesktopMarkerLayout -Executable $sourceExe -MapPath $sourceMap -DumpbinPath $fakeDumpbin
+    Assert-Condition ($layoutFixtureResult.verified -and $layoutFixtureResult.marker_count -eq 6) 'Six-leaf physical marker fixture did not pass.'
+    New-MarkerLayoutFixture -MapPath $sourceMap -DisassemblyPath $layoutDisassembly -TraceSentinelReturnsEarly
+    Assert-ThrowsLike {
+        Assert-DesktopMarkerLayout -Executable $sourceExe -MapPath $sourceMap -DumpbinPath $fakeDumpbin
+    } '*returns before VMProtectEnd*' 'Marker layout accepted an early return inside the trace sentinel region.'
     [IO.File]::WriteAllText($sourceMap, 'fixture marker layout')
 
     $env:NWFLASH_SESSION_VERIFY_KEY_B64 = [Convert]::ToBase64String([byte[]](0..31))
@@ -380,6 +438,12 @@ try {
     Assert-Condition ((Get-Item -LiteralPath $preparedPath).IsReadOnly) 'prepared.json must be immutable.'
     Assert-Condition ($prepared.state -eq 'prepared') 'Prepare emitted the wrong state.'
     Assert-Condition ($null -eq $prepared.previous_evidence_sha256) 'Prepared state must not invent prior evidence.'
+    Assert-Condition (@($prepared.markers).Count -eq 6) 'Prepared evidence did not bind the exact six-leaf marker set.'
+    Assert-Condition (@($prepared.markers | Where-Object {
+        [string]$_.symbol -eq 'nwflash_protection_trace_credential_sentinel' -and
+        [string]$_.name -eq 'NWFlash.TraceCredentialSentinel' -and
+        [string]$_.mode -eq 'Ultra'
+    }).Count -eq 1) 'Prepared evidence did not bind the trace sentinel symbol, name, and mode.'
     Assert-Condition ($prepared.input_exe.sha256 -eq (Get-Sha256Hex $prepared.input_exe.path)) 'Prepared EXE hash does not bind the staged snapshot.'
     Assert-Condition ($prepared.input_map.marker_layout_verified) 'Prepared evidence omitted desktop MAP proof.'
     Assert-Condition ($pdbValidationPairs.Count -eq 1 -and $pdbValidationPairs[0].exe -eq [string]$prepared.input_exe.path -and $pdbValidationPairs[0].pdb -eq [string]$prepared.input_pdb.path) 'PDB identity was not checked exactly once on the staged EXE/PDB pair.'
@@ -402,6 +466,18 @@ try {
     } '*must differ from the unprotected input*' 'Accept allowed unchanged protected bytes.'
 
     New-Amd64PeFixture -Path $protectedOutput -Tail 2
+    New-MarkerReviewFixture -Prepared $prepared -PreparedHash $preparedHash -CompilerLogHash $compilerLogHash `
+        -ProtectedOutputHash (Get-Sha256Hex $protectedOutput) |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
+
+    $reviewWithoutTraceSentinel = Get-Content -Raw -LiteralPath $reviewPath | ConvertFrom-Json -AsHashtable
+    $reviewWithoutTraceSentinel.markers = @($reviewWithoutTraceSentinel.markers | Where-Object {
+        [string]$_.name -ne 'NWFlash.TraceCredentialSentinel'
+    })
+    $reviewWithoutTraceSentinel | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
+    Assert-ThrowsLike {
+        Invoke-AcceptManualOutputCore -PreparedManifest $preparedPath -MarkerReviewPath $reviewPath -Operations $operations
+    } '*exact marker set*' 'Accept authorized a marker review that omitted the trace credential sentinel.'
     New-MarkerReviewFixture -Prepared $prepared -PreparedHash $preparedHash -CompilerLogHash $compilerLogHash `
         -ProtectedOutputHash (Get-Sha256Hex $protectedOutput) |
         ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
