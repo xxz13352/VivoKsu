@@ -4,8 +4,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey};
 use nwflash_protection::{
     accept_signed_login_lease, admit_local_operation, build_identity_matches,
-    classify_signed_heartbeat_lease, verify_image_integrity, LeaseBinding, LeaseClaims, LeaseKind,
-    SignedEnvelope, TokenDigest, VmpIntegrityProbe,
+    classify_signed_heartbeat_lease, trace_credential_sentinel, verify_image_integrity,
+    LeaseBinding, LeaseClaims, LeaseKind, SignedEnvelope, TokenDigest, TraceCredentialScanner,
+    VmpIntegrityProbe,
 };
 
 const NOW: i64 = 1_725_000_000;
@@ -22,8 +23,19 @@ fn main() {
     let admission = admit_local_operation(&session, "layout-build", "layout-nonce", NOW);
     let integrity = verify_image_integrity(&VmpIntegrityProbe);
     let identity = build_identity_matches("layout-build", "layout-build");
+    let mut trace_scanner = TraceCredentialScanner::new();
+    trace_scanner.push(b"trace layout probe");
+    let redacted_trace = trace_scanner.finish().expect("static probe text must seal");
+    let trace_credential = trace_credential_sentinel(&redacted_trace);
 
-    black_box((session, heartbeat, admission, integrity, identity));
+    black_box((
+        session,
+        heartbeat,
+        admission,
+        integrity,
+        identity,
+        trace_credential,
+    ));
 }
 
 fn binding() -> LeaseBinding {

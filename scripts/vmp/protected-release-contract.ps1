@@ -12,6 +12,7 @@ function Get-NwflashProtectedMarkers {
         [pscustomobject]@{ symbol = 'nwflash_protection_admit_local_operation'; name = 'NWFlash.OperationAdmission'; mode = 'Ultra' }
         [pscustomobject]@{ symbol = 'nwflash_protection_verify_image_integrity'; name = 'NWFlash.ImageIntegrityDispatch'; mode = 'Virtualization' }
         [pscustomobject]@{ symbol = 'nwflash_protection_build_identity_matches'; name = 'NWFlash.BuildIdentity'; mode = 'Mutation' }
+        [pscustomobject]@{ symbol = 'nwflash_protection_trace_credential_sentinel'; name = 'NWFlash.TraceCredentialSentinel'; mode = 'Ultra' }
     )
 }
 
@@ -508,6 +509,10 @@ function Assert-DesktopMarkerLayout {
         $end = [regex]::Matches($region, '(?im)\bcall\s+(?:qword ptr \[__imp_)?VMProtectEnd\]?\s*$')
         if ($begin.Count -ne 1 -or $begin[0].Groups[1].Value -ne $marker.mode -or $end.Count -ne 1 -or $begin[0].Index -ge $end[0].Index) {
             throw "Marker region $($marker.symbol) does not contain exactly Begin$($marker.mode) followed by End."
+        }
+        $protectedBody = $region.Substring($begin[0].Index, $end[0].Index - $begin[0].Index)
+        if ($protectedBody -match '(?im)\bret[nq]?\b') {
+            throw "Marker region $($marker.symbol) returns before VMProtectEnd."
         }
     }
     [pscustomobject]@{ verified = $true; marker_count = @(Get-NwflashProtectedMarkers).Count }
