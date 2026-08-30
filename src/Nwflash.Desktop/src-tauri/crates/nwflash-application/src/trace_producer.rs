@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 
 use nwflash_domain::{OperationKind, TraceId};
-use nwflash_protection::SealedTraceUpload;
+use nwflash_protection::{SealedTraceUpload, SentinelAttestedTraceUpload};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceAuthorization {
@@ -31,6 +31,8 @@ pub enum TraceProducerError {
     SequenceGap,
     #[error("trace sequence limit reached")]
     SequenceLimit,
+    #[error("trace upload lacks a valid credential sentinel receipt")]
+    UnattestedUpload,
     #[error("trace sink rejected the mutation")]
     Sink,
 }
@@ -111,7 +113,7 @@ pub trait TraceMetadataSink: Send + Sync {
         &self,
         run_id: TraceId,
         sequence: u64,
-        upload: SealedTraceUpload,
+        upload: SentinelAttestedTraceUpload,
     ) -> Result<(), TraceProducerError>;
     fn terminalize(
         &self,
@@ -140,7 +142,7 @@ where
         &self,
         run_id: TraceId,
         sequence: u64,
-        upload: SealedTraceUpload,
+        upload: SentinelAttestedTraceUpload,
     ) -> Result<(), TraceProducerError> {
         (**self).append_upload(run_id, sequence, upload)
     }
@@ -294,6 +296,8 @@ where
         upload: SealedTraceUpload,
     ) -> Result<(), TraceProducerError> {
         self.ensure_current()?;
+        let upload = SentinelAttestedTraceUpload::try_from(upload)
+            .map_err(|_| TraceProducerError::UnattestedUpload)?;
         let mut state = self.state.lock().expect("trace state lock");
         if state.terminal {
             return Err(TraceProducerError::AlreadyTerminal);
@@ -368,8 +372,8 @@ mod tests {
     use super::*;
     use std::{io::Cursor, sync::Mutex};
 
-    use nwflash_domain::TraceOutputStreamV2;
-    use nwflash_protection::{ExactSecretSet, TraceOutputSession};
+    use nwflash_domain::{TraceOutcomeV2, TraceOutputStreamV2};
+    use nwflash_protection::{ExactSecretSet, RedactedTraceRun, TraceOutputSession, TraceRunText};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum SinkCall {
@@ -418,7 +422,7 @@ mod tests {
             &self,
             run_id: TraceId,
             sequence: u64,
-            _upload: SealedTraceUpload,
+            _upload: SentinelAttestedTraceUpload,
         ) -> Result<(), TraceProducerError> {
             self.calls
                 .lock()
@@ -491,6 +495,38 @@ mod tests {
         .into_iter()
         .next()
         .expect("one sealed upload")
+    }
+
+    fn unattested_upload() -> SealedTraceUpload {
+        let run = RedactedTraceRun::try_new(
+            TraceRunText {
+                run_id: TraceId::try_new_v7().expect("run UUIDv7"),
+                operation_kind: "discovering",
+                title: "unattested fixture",
+                outcome: TraceOutcomeV2::Running,
+                device_serial: None,
+                source_paths: &[],
+                source_urls: &[],
+                client_version: "test",
+                started_at_ms: 1,
+                ended_at_ms: None,
+                duration_ms: None,
+                error_class: None,
+                error_code: None,
+                error_message: None,
+                final_sequence: None,
+                trace_complete: false,
+                trace_loss_reason: None,
+            },
+            &ExactSecretSet::empty(),
+        )
+        .expect("redacted run fixture");
+        SealedTraceUpload::new(
+            TraceId::try_new_v7().expect("upload UUIDv7"),
+            vec![run],
+            Vec::new(),
+        )
+        .expect("unattested upload fixture")
     }
 
     #[tokio::test]
@@ -647,6 +683,44 @@ mod tests {
             Err(TraceProducerError::SequenceGap)
         ));
         assert_eq!(run.next_sequence(), 2);
+    }
+
+    #[tokio::test]
+    async fn facade_rejects_upload_when_no_credential_sentinel_ran() {
+        let sink = Arc::new(RecordingSink::default());
+        let run = producer(
+            Some(identity(1)),
+            Ok(TraceAuthorization::Allowed),
+            sink.clone(),
+        )
+        .start(OperationKind::Discovering)
+        .await
+        .unwrap();
+
+        let result = run.append_upload(1, unattested_upload());
+
+        assert!(matches!(result, Err(TraceProducerError::UnattestedUpload)));
+        assert_eq!(run.next_sequence(), 1, "rejection consumed sequence state");
+
+        assert_eq!(run.reserve_sequence(1).unwrap(), 1);
+        let reserved_result = run.append_upload(1, unattested_upload());
+        assert!(matches!(
+            reserved_result,
+            Err(TraceProducerError::UnattestedUpload)
+        ));
+        assert_eq!(run.next_sequence(), 2, "rejection rewound reserved state");
+        assert!(matches!(
+            run.finalize(TraceTerminalOutcome::Success),
+            Err(TraceProducerError::SequenceGap)
+        ));
+        assert!(
+            sink.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| !matches!(call, SinkCall::Upload(_, _))),
+            "rejected upload reached the sink"
+        );
     }
 
     #[tokio::test]
