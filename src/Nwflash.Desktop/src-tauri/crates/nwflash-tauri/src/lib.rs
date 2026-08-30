@@ -894,10 +894,13 @@ impl AppState {
                 if should_compensate_device_refresh(was_device_busy, is_busy) {
                     let app_handle = app_handle.clone();
                     let device_runtime = device_runtime.clone();
+                    let coordinator = coordinator.clone();
                     spawn(async move {
-                        let update =
-                            commands::device::automatic_device_refresh(&device_runtime, false)
-                                .await;
+                        let update = commands::device::automatic_device_refresh_guarded(
+                            &device_runtime,
+                            &coordinator,
+                        )
+                        .await;
                         if update.should_emit {
                             let _ = app_handle.emit("device:snapshot", update.snapshot);
                         }
@@ -973,7 +976,7 @@ impl AppState {
             loop {
                 sleep(Duration::from_secs(3)).await;
                 let update =
-                    commands::device::automatic_device_refresh(&runtime, coordinator.is_busy())
+                    commands::device::automatic_device_refresh_guarded(&runtime, &coordinator)
                         .await;
                 let _ = commands::mirror::reconcile_after_device_update(
                     &mirror_runtime,
