@@ -173,6 +173,13 @@ function Assert-MarkerLayout {
         if ($protectedBody -match '(?im)\bret[nq]?\b') {
             throw "$($leaf.Symbol) returns before VMProtectEnd."
         }
+        if ($leaf.Symbol -eq 'nwflash_protection_trace_credential_sentinel') {
+            $innerStart = $beginCalls[0].Index + $beginCalls[0].Length
+            $innerBody = $region.Substring($innerStart, $endCalls[0].Index - $innerStart)
+            if ($innerBody -match '(?im)\bcall\b') {
+                throw "$($leaf.Symbol) must not call helpers inside the Ultra marker region."
+            }
+        }
         $verified += [pscustomobject]@{ symbol = $leaf.Symbol; mode = $leaf.Mode; begin_count = 1; end_count = 1; verified = $true }
     }
     $verified

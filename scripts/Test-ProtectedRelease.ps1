@@ -100,7 +100,8 @@ function New-MarkerLayoutFixture {
     param(
         [Parameter(Mandatory)][string]$MapPath,
         [Parameter(Mandatory)][string]$DisassemblyPath,
-        [switch]$TraceSentinelReturnsEarly
+        [switch]$TraceSentinelReturnsEarly,
+        [switch]$TraceSentinelCallsHelper
     )
     $mapLines = [Collections.Generic.List[string]]::new()
     $disassemblyLines = [Collections.Generic.List[string]]::new()
@@ -111,6 +112,9 @@ function New-MarkerLayoutFixture {
         $disassemblyLines.Add("  call VMProtectBegin$($marker.mode)")
         if ($TraceSentinelReturnsEarly -and $marker.name -eq 'NWFlash.TraceCredentialSentinel') {
             $disassemblyLines.Add('  ret')
+        }
+        if ($TraceSentinelCallsHelper -and $marker.name -eq 'NWFlash.TraceCredentialSentinel') {
+            $disassemblyLines.Add('  call forbidden_helper')
         }
         $disassemblyLines.Add('  nop')
         $disassemblyLines.Add('  call VMProtectEnd')
@@ -136,6 +140,7 @@ Assert-Condition (@(Get-NwflashRequiredSdkImports).Count -eq 8) 'Adding the trac
 $linkProbeSource = Get-Content -LiteralPath (Join-Path $repo 'src\Nwflash.Desktop\src-tauri\crates\nwflash-protection\examples\vmp_link_probe.rs') -Raw
 Assert-Condition ($linkProbeSource.Contains('trace_credential_sentinel(')) 'The link probe does not call the trace credential sentinel leaf.'
 Assert-Condition ($linkProbeSource -match '(?s)TraceOutputSession::from_reader\(') 'The link probe does not use the sealed Wave1 logical-stream API.'
+Assert-Condition ($linkProbeSource.Contains('credential_sentinel_input()')) 'The link probe bypasses the fixed-size sentinel input boundary.'
 Assert-Condition ($linkProbeSource -match '(?s)black_box\s*\([^;]*trace_credential') 'The link probe does not keep the trace sentinel result live through black_box.'
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("nwflash-task8-contract-" + [Guid]::NewGuid().ToString('N'))
@@ -177,6 +182,10 @@ exit 0
     Assert-ThrowsLike {
         Assert-DesktopMarkerLayout -Executable $sourceExe -MapPath $sourceMap -DumpbinPath $fakeDumpbin
     } '*returns before VMProtectEnd*' 'Marker layout accepted an early return inside the trace sentinel region.'
+    New-MarkerLayoutFixture -MapPath $sourceMap -DisassemblyPath $layoutDisassembly -TraceSentinelCallsHelper
+    Assert-ThrowsLike {
+        Assert-DesktopMarkerLayout -Executable $sourceExe -MapPath $sourceMap -DumpbinPath $fakeDumpbin
+    } '*must not call helpers*' 'Marker layout accepted a helper call inside the trace sentinel region.'
     [IO.File]::WriteAllText($sourceMap, 'fixture marker layout')
 
     $env:NWFLASH_SESSION_VERIFY_KEY_B64 = [Convert]::ToBase64String([byte[]](0..31))

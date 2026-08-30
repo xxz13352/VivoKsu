@@ -514,6 +514,13 @@ function Assert-DesktopMarkerLayout {
         if ($protectedBody -match '(?im)\bret[nq]?\b') {
             throw "Marker region $($marker.symbol) returns before VMProtectEnd."
         }
+        if ($marker.symbol -eq 'nwflash_protection_trace_credential_sentinel') {
+            $innerStart = $begin[0].Index + $begin[0].Length
+            $innerBody = $region.Substring($innerStart, $end[0].Index - $innerStart)
+            if ($innerBody -match '(?im)\bcall\b') {
+                throw "Marker region $($marker.symbol) must not call helpers inside the Ultra marker region."
+            }
+        }
     }
     [pscustomobject]@{ verified = $true; marker_count = @(Get-NwflashProtectedMarkers).Count }
 }

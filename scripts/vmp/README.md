@@ -77,20 +77,28 @@ labels and never contain passwords, tokens, paths, URLs, or device serials.
 
 ## Plan C trace-redaction release gate
 
-The exact source contract now reserves a sixth synchronous leaf,
+The source/API gate contains the sixth synchronous leaf,
 `nwflash_protection_trace_credential_sentinel`, named
-`NWFlash.TraceCredentialSentinel` and reviewed for Ultra mode. The leaf may
-summarize only already-redacted state; its region must not include raw trace
-text, spooling, HTTP, chunking, async/Tokio work, or third-party code.
+`NWFlash.TraceCredentialSentinel` and reviewed for Ultra mode. A real
+`TraceOutputSession` forms each concrete bounded upload first, hashes its
+canonical already-redacted body outside the marker, and synchronously asks the
+leaf to mint an opaque safe-Rust receipt bound to that upload ID, digest, and
+length. Receiptless or mismatched uploads cannot emit a public wire body, pass
+the producer facade, or enter its sink trait.
 
-This repository-side gate is not evidence that the currently checked-out Rust
-source contains the leaf, that a release PE contains its physical region, or
-that VMProtect has processed it. Plan C may proceed to a protected release only
-after the sealed logical-stream redaction implementation is integrated and the
-fresh source-reachability review, six-symbol MAP/dumpbin layout, unchanged
-eight-import SDK contract, compiler-log/marker review, protected runtime probe,
-CRC, signing, package, and installed smoke gates all pass. A PowerShell fixture
-pass alone is not release authorization.
+The leaf input contains only fixed-size identities, counts, and risk state. Its
+region excludes raw or redacted trace text, JSON/serialization, spooling, HTTP,
+disk, chunking, async/Tokio work, and third-party implementations. This is
+source/API gate evidence only: Tauri production wrappers still select the
+discarding observer instead of the `nwflash-windows` observation interface,
+and the durable spool has no concrete adapter to this producer facade.
+It also does not prove that a release PE contains the physical leaf or that
+VMProtect Lite has processed it. Plan C may proceed to a protected release only
+after that adapter is integrated and a fresh source-reachability review,
+six-symbol MAP/dumpbin layout, unchanged eight-import SDK contract,
+compiler-log/marker review, protected runtime probe, CRC, signing, package, and
+installed smoke gates all pass. A PowerShell fixture pass alone is not release
+authorization.
 
 Enable Memory Protection, Import Protection, and Packing for the protected
 release. Virtual-machine denial remains disabled: debugger and VM detections
