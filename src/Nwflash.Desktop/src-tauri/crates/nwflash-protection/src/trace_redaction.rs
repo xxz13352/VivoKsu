@@ -934,6 +934,17 @@ pub struct SealedTraceUpload {
     output_chunks: Vec<RedactedOutputChunk>,
 }
 
+/// Non-text identity metadata used to bind a sealed event manifest to the
+/// producer run and event sequence that will persist it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealedTraceEventBinding {
+    pub event_id: TraceId,
+    pub run_id: TraceId,
+    pub sequence: u64,
+    pub stdout_chunks: u64,
+    pub stderr_chunks: u64,
+}
+
 impl SealedTraceUpload {
     pub fn new(
         upload_id: TraceId,
@@ -1021,6 +1032,43 @@ impl SealedTraceUpload {
 
     pub fn output_chunks(&self) -> &[RedactedOutputChunk] {
         &self.output_chunks
+    }
+
+    /// Event batches must never smuggle run-level records through the event
+    /// sequencing path. The count exposes no redacted text.
+    pub const fn run_count(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// Returns the stable logical event identities represented by this sealed
+    /// attempt. Application-level sequencing uses this safe metadata to ensure
+    /// one event sequence cannot mix attempts from different events.
+    pub fn event_ids(&self) -> Vec<TraceId> {
+        let mut event_ids = self
+            .events
+            .iter()
+            .map(RedactedTraceEvent::event_id)
+            .chain(self.output_chunks.iter().map(RedactedOutputChunk::event_id))
+            .collect::<Vec<_>>();
+        event_ids.sort_unstable();
+        event_ids.dedup();
+        event_ids
+    }
+
+    /// Returns event manifest bindings without exposing any redacted text.
+    /// Output-only continuation attempts intentionally return no bindings; a
+    /// complete event batch must include exactly one manifest-bearing attempt.
+    pub fn event_bindings(&self) -> Vec<SealedTraceEventBinding> {
+        self.events
+            .iter()
+            .map(|event| SealedTraceEventBinding {
+                event_id: event.event_id,
+                run_id: event.run_id,
+                sequence: event.sequence,
+                stdout_chunks: event.stdout_chunks,
+                stderr_chunks: event.stderr_chunks,
+            })
+            .collect()
     }
 
     pub fn to_json_body(&self) -> Result<Zeroizing<Vec<u8>>, TraceRedactionError> {
