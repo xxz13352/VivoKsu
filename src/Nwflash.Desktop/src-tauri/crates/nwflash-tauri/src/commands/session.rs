@@ -27,18 +27,20 @@ pub async fn session_stop(state: State<'_, AppState>) -> Result<SessionState, St
     session_stop_inner(&state).await
 }
 
-async fn session_stop_inner(state: &AppState) -> Result<SessionState, String> {
-    let generation = state.session_lifecycle.generation().await;
-    let idle_lease = state
-        .operation_coordinator
-        .try_acquire_idle()
+pub(super) async fn session_stop_inner(state: &AppState) -> Result<SessionState, String> {
+    let (idle_lease, generation) = state
+        .acquire_session_closeout()
+        .await
         .map_err(|_| OPERATION_IN_PROGRESS_MESSAGE.to_string())?;
     state
         .session_lifecycle
         .stop()
         .await
         .map_err(|error| error.to_string())?;
-    state.usage_reporter.flush().await;
+    state
+        .usage_reporter
+        .flush_and_close_session(generation.as_deref())
+        .await;
     state.revoke_root_capabilities(&idle_lease);
     {
         let mut token = state
