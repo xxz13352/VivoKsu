@@ -66,6 +66,7 @@ fn is_generic_version(value: &str) -> bool {
     lower.contains("release-keys") || lower == "unknown" || lower == "not found"
 }
 
+#[cfg(test)]
 pub(crate) fn identity_refresh_is_blocked(
     admission: OperationAdmissionState,
     operation: OperationKind,
