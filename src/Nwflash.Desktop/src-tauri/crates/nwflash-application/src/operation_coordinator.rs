@@ -1,7 +1,9 @@
 //! Operation orchestration primitives for NWflash.
 
 use std::{
+    cell::Cell,
     future::Future,
+    panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard,
@@ -24,6 +26,11 @@ use nwflash_domain::{
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(100);
 static OPERATION_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    static RUNNING_DISPATCH_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static RUNNING_DISPATCH_VIOLATED: Cell<bool> = const { Cell::new(false) };
+}
+
 #[derive(Debug, Error)]
 pub enum OperationCoordinatorError {
     #[error("已有任务正在进行中，请等待其完成或先取消。")]
@@ -34,6 +41,10 @@ pub enum OperationCoordinatorError {
     ExitPending,
     #[error("应用正在终止，无法开始新操作。")]
     Terminating,
+    #[error("操作派发凭据已失效。")]
+    StaleDispatchAuthority,
+    #[error("同步进程派发异常，协调器已安全终止。")]
+    DispatchPanicked,
     #[error("{0}")]
     Denied(String),
     #[error("运行被用户取消。")]
@@ -54,6 +65,7 @@ pub enum OperationAdmissionState {
 struct AdmissionGateState {
     state: OperationAdmissionState,
     disposed: bool,
+    active_operation_id: Option<String>,
 }
 
 struct AdmissionGate {
@@ -62,9 +74,107 @@ struct AdmissionGate {
 
 impl AdmissionGate {
     fn lock(&self) -> StdMutexGuard<'_, AdmissionGateState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        if RUNNING_DISPATCH_ACTIVE.with(Cell::get) {
+            RUNNING_DISPATCH_VIOLATED.with(|violation| violation.set(true));
+            panic!("operation coordinator admission reentry during synchronous dispatch");
+        }
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.state = OperationAdmissionState::Terminating;
+                state.disposed = true;
+                state.active_operation_id = None;
+                self.state.clear_poison();
+                state
+            }
+        }
+    }
+
+    fn with_running_dispatch(
+        &self,
+        authority: DispatchAuthority<'_>,
+        dispatch: impl FnOnce(),
+    ) -> Result<(), OperationCoordinatorError> {
+        let mut admission = self.lock();
+        ensure_running(&admission)?;
+        match authority {
+            DispatchAuthority::Idle if admission.active_operation_id.is_some() => {
+                return Err(OperationCoordinatorError::InProgress);
+            }
+            DispatchAuthority::Active(operation_id)
+                if admission.active_operation_id.as_deref() != Some(operation_id) =>
+            {
+                return Err(OperationCoordinatorError::StaleDispatchAuthority);
+            }
+            DispatchAuthority::Idle | DispatchAuthority::Active(_) => {}
+        }
+
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let _scope = RunningDispatchScope::enter();
+            dispatch();
+        }));
+        let dispatch_violated =
+            RUNNING_DISPATCH_VIOLATED.with(|violation| violation.replace(false));
+        if outcome.is_err() || dispatch_violated {
+            admission.state = OperationAdmissionState::Terminating;
+            admission.disposed = true;
+            admission.active_operation_id = None;
+            return Err(OperationCoordinatorError::DispatchPanicked);
+        }
+        Ok(())
+    }
+
+    fn activate_operation(
+        self: &Arc<Self>,
+        operation_id: String,
+        cancellation: &CancellationToken,
+    ) -> Result<ActiveDispatchLease, OperationCoordinatorError> {
+        let mut admission = self.lock();
+        ensure_running(&admission)?;
+        if cancellation.is_cancelled() {
+            return Err(OperationCoordinatorError::Canceled);
+        }
+        if admission.active_operation_id.is_some() {
+            return Err(OperationCoordinatorError::InProgress);
+        }
+
+        admission.active_operation_id = Some(operation_id.clone());
+        Ok(ActiveDispatchLease {
+            admission: self.clone(),
+            operation_id,
+        })
+    }
+
+    fn revoke_and_cancel(&self, cancellation: &CancellationToken) {
+        let mut admission = self.lock();
+        admission.active_operation_id = None;
+        cancellation.cancel();
+    }
+}
+
+enum DispatchAuthority<'a> {
+    Idle,
+    Active(&'a str),
+}
+
+struct RunningDispatchScope;
+
+impl RunningDispatchScope {
+    fn enter() -> Self {
+        let already_active = RUNNING_DISPATCH_ACTIVE.with(|active| active.replace(true));
+        if already_active {
+            RUNNING_DISPATCH_VIOLATED.with(|violation| violation.set(true));
+            panic!("nested synchronous process dispatch");
+        }
+        RUNNING_DISPATCH_VIOLATED.with(|violation| violation.set(false));
+        Self
+    }
+}
+
+impl Drop for RunningDispatchScope {
+    fn drop(&mut self) {
+        RUNNING_DISPATCH_ACTIVE.with(|active| active.set(false));
     }
 }
 
@@ -73,6 +183,46 @@ impl AdmissionGate {
 #[must_use = "dropping the idle lease releases operation admission"]
 pub struct OperationIdleLease {
     _permit: OwnedSemaphorePermit,
+    admission: Arc<AdmissionGate>,
+}
+
+impl OperationIdleLease {
+    /// Runs an eager synchronous dispatch while this lease proves the
+    /// operation semaphore is idle.
+    ///
+    /// The closure must perform the final synchronous side effect and return
+    /// `()`. An async block cannot be returned from this API. Do not call back
+    /// into the coordinator from the closure.
+    ///
+    /// ```compile_fail
+    /// # use nwflash_application::OperationIdleLease;
+    /// fn cannot_defer_dispatch(idle: &OperationIdleLease) {
+    ///     let _future = idle
+    ///         .with_running_dispatch(|| async { /* deferred spawn */ })
+    ///         .unwrap();
+    /// }
+    /// ```
+    pub fn with_running_dispatch(
+        &self,
+        dispatch: impl FnOnce(),
+    ) -> Result<(), OperationCoordinatorError> {
+        self.admission
+            .with_running_dispatch(DispatchAuthority::Idle, dispatch)
+    }
+}
+
+struct ActiveDispatchLease {
+    admission: Arc<AdmissionGate>,
+    operation_id: String,
+}
+
+impl Drop for ActiveDispatchLease {
+    fn drop(&mut self) {
+        let mut admission = self.admission.lock();
+        if admission.active_operation_id.as_deref() == Some(self.operation_id.as_str()) {
+            admission.active_operation_id = None;
+        }
+    }
 }
 
 fn public_operation_failure_message(error: &DomainError) -> &'static str {
@@ -151,6 +301,7 @@ struct StageUpdate {
 pub struct OperationContext {
     operation_id: String,
     state: Arc<OperationCoordinatorState>,
+    admission: Arc<AdmissionGate>,
 }
 
 impl OperationContext {
@@ -218,6 +369,28 @@ impl OperationContext {
     pub fn operation_id(&self) -> &str {
         &self.operation_id
     }
+
+    /// Runs the final eager synchronous dispatch for this active operation.
+    ///
+    /// The operation ID is checked under the same admission mutex used by the
+    /// exit transition. A cloned context becomes unusable as soon as its
+    /// `run_async` invocation finishes or is dropped.
+    ///
+    /// ```compile_fail
+    /// # use nwflash_application::OperationContext;
+    /// fn cannot_defer_dispatch(context: &OperationContext) {
+    ///     let _future = context
+    ///         .with_running_dispatch(|| async { /* deferred spawn */ })
+    ///         .unwrap();
+    /// }
+    /// ```
+    pub fn with_running_dispatch(
+        &self,
+        dispatch: impl FnOnce(),
+    ) -> Result<(), OperationCoordinatorError> {
+        self.admission
+            .with_running_dispatch(DispatchAuthority::Active(&self.operation_id), dispatch)
+    }
 }
 
 #[derive(Clone)]
@@ -261,6 +434,7 @@ impl OperationCoordinator {
                 state: StdMutex::new(AdmissionGateState {
                     state: OperationAdmissionState::Running,
                     disposed: false,
+                    active_operation_id: None,
                 }),
             }),
             semaphore: Arc::new(Semaphore::new(1)),
@@ -291,7 +465,10 @@ impl OperationCoordinator {
                 .map_err(|_| OperationCoordinatorError::InProgress)?
         };
 
-        Ok(OperationIdleLease { _permit: permit })
+        Ok(OperationIdleLease {
+            _permit: permit,
+            admission: self.admission.clone(),
+        })
     }
 
     pub fn admission_state(&self) -> OperationAdmissionState {
@@ -313,7 +490,10 @@ impl OperationCoordinator {
             .acquire_owned()
             .await
             .expect("operation coordinator never closes its idle semaphore");
-        OperationIdleLease { _permit: permit }
+        OperationIdleLease {
+            _permit: permit,
+            admission: self.admission.clone(),
+        }
     }
 
     pub fn begin_terminating(
@@ -395,22 +575,19 @@ impl OperationCoordinator {
         let started_at = epoch_seconds_now();
         let started_at_instant = Instant::now();
 
-        let admission_error = {
-            let admission = self.admission.lock();
-            match ensure_running(&admission) {
-                Ok(()) => {
-                    self.is_busy.store(true, Ordering::Release);
-                    self.state
-                        .set_running(&title, kind, operation_id.clone(), true);
-                    None
-                }
-                Err(error) => Some(error),
+        let active_dispatch_lease = match self
+            .admission
+            .activate_operation(operation_id.clone(), &cancellation)
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.finish_denied_admission(permit).await;
+                return Err(error);
             }
         };
-        if let Some(error) = admission_error {
-            self.finish_denied_admission(permit).await;
-            return Err(error);
-        }
+        self.is_busy.store(true, Ordering::Release);
+        self.state
+            .set_running(&title, kind, operation_id.clone(), true);
         self.state.log(
             OperationLogLevel::Info,
             title.clone(),
@@ -420,9 +597,11 @@ impl OperationCoordinator {
         let context = OperationContext {
             operation_id: operation_id.clone(),
             state: self.state.clone(),
+            admission: self.admission.clone(),
         };
 
         let outcome = operation(context, cancellation.clone()).await;
+        drop(active_dispatch_lease);
 
         let usage_status = match &outcome {
             Ok(_) => {
@@ -486,7 +665,7 @@ impl OperationCoordinator {
     pub async fn cancel_current(&self) {
         let current = self.state.current_gate.lock().await;
         if let Some(token) = current.as_ref() {
-            token.cancel();
+            self.admission.revoke_and_cancel(token);
         }
     }
 
@@ -748,6 +927,12 @@ pub fn result_to_domain_error(error: OperationCoordinatorError) -> DomainError {
         OperationCoordinatorError::Terminating => {
             DomainError::InvalidOperation("应用正在终止，无法开始新操作。".to_string())
         }
+        OperationCoordinatorError::StaleDispatchAuthority => {
+            DomainError::InvalidOperation("操作派发凭据已失效。".to_string())
+        }
+        OperationCoordinatorError::DispatchPanicked => {
+            DomainError::Internal("同步进程派发异常，协调器已安全终止。".to_string())
+        }
         OperationCoordinatorError::Denied(message) => DomainError::AuthorizationDenied(message),
         OperationCoordinatorError::Canceled => {
             DomainError::UserCancelled("运行被用户取消".to_string())
@@ -800,5 +985,62 @@ mod tests {
 
         assert!(matches!(result, Err(OperationCoordinatorError::Failed(_))));
         assert!(coordinator.state.current_gate.lock().await.is_none());
+    }
+
+    #[test]
+    fn poisoned_admission_gate_fails_closed_and_revokes_active_authority() {
+        let coordinator = OperationCoordinator::default();
+        let admission = coordinator.admission.clone();
+
+        let poison = std::thread::spawn(move || {
+            let mut state = admission.state.lock().unwrap();
+            state.active_operation_id = Some("poisoned-operation".to_string());
+            panic!("synthetic admission gate poison");
+        })
+        .join();
+        assert!(
+            poison.is_err(),
+            "test thread should poison the admission gate"
+        );
+
+        assert_eq!(
+            coordinator.admission_state(),
+            OperationAdmissionState::Terminating
+        );
+        let recovered = coordinator
+            .admission
+            .state
+            .lock()
+            .expect("fail-closed recovery should clear mutex poison");
+        assert!(recovered.disposed);
+        assert!(recovered.active_operation_id.is_none());
+        drop(recovered);
+        assert!(matches!(
+            coordinator.try_acquire_idle(),
+            Err(OperationCoordinatorError::Disposed)
+        ));
+    }
+
+    #[test]
+    fn canceled_token_cannot_install_active_dispatch_authority() {
+        let coordinator = OperationCoordinator::default();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let activation = coordinator
+            .admission
+            .activate_operation("canceled-operation".to_string(), &cancellation);
+
+        assert!(matches!(
+            activation,
+            Err(OperationCoordinatorError::Canceled)
+        ));
+        assert!(coordinator
+            .admission
+            .state
+            .lock()
+            .unwrap()
+            .active_operation_id
+            .is_none());
     }
 }

@@ -1,8 +1,9 @@
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        mpsc, Arc,
     },
+    thread,
     time::Duration,
 };
 
@@ -54,6 +55,26 @@ impl UsageEntryRecorder {
             .iter()
             .map(|entry| entry.event_id.clone())
             .collect()
+    }
+}
+
+struct BlockingUsageReporter {
+    entered: std::sync::Mutex<Option<mpsc::Sender<()>>>,
+    release: std::sync::Mutex<mpsc::Receiver<()>>,
+}
+
+impl UsageReporter for BlockingUsageReporter {
+    fn record(&self, _entry: UsageLogEntry) {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            entered
+                .send(())
+                .expect("test should observe usage cleanup entry");
+        }
+        self.release
+            .lock()
+            .unwrap()
+            .recv()
+            .expect("test should release usage cleanup");
     }
 }
 
@@ -212,6 +233,397 @@ async fn exit_pending_rejects_before_permission_or_operation_body() {
     ));
     assert_eq!(gate.calls.load(Ordering::SeqCst), 0);
     assert_eq!(body_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn exit_pending_linearizes_before_dispatch_and_prevents_the_closure() {
+    let coordinator = OperationCoordinator::default();
+    let idle = coordinator
+        .try_acquire_idle()
+        .expect("running idle coordinator should issue dispatch authority");
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let dispatch_count_for_thread = dispatch_count.clone();
+    let (release_dispatch_tx, release_dispatch_rx) = mpsc::channel();
+
+    let dispatch = thread::spawn(move || {
+        release_dispatch_rx
+            .recv()
+            .expect("test should release the waiting dispatch");
+        idle.with_running_dispatch(|| {
+            dispatch_count_for_thread.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+
+    assert_eq!(
+        coordinator.request_exit_pending(),
+        OperationAdmissionState::ExitPending
+    );
+    release_dispatch_tx
+        .send(())
+        .expect("dispatch waiter should still be alive");
+
+    assert!(matches!(
+        dispatch.join().expect("dispatch thread should join"),
+        Err(OperationCoordinatorError::ExitPending)
+    ));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dispatch_linearizes_before_exit_pending_and_runs_the_closure_once() {
+    let coordinator = OperationCoordinator::default();
+    let idle = coordinator
+        .try_acquire_idle()
+        .expect("running idle coordinator should issue dispatch authority");
+    let exit_coordinator = coordinator.clone();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let dispatch_count_for_thread = dispatch_count.clone();
+    let (dispatch_entered_tx, dispatch_entered_rx) = mpsc::channel();
+    let (release_dispatch_tx, release_dispatch_rx) = mpsc::channel();
+    let (exit_about_to_call_tx, exit_about_to_call_rx) = mpsc::channel();
+    let (exit_completed_tx, exit_completed_rx) = mpsc::channel();
+
+    let dispatch = thread::spawn(move || {
+        idle.with_running_dispatch(|| {
+            dispatch_count_for_thread.fetch_add(1, Ordering::SeqCst);
+            dispatch_entered_tx
+                .send(())
+                .expect("exit thread should wait for dispatch entry");
+            release_dispatch_rx
+                .recv()
+                .expect("test should release the guarded dispatch");
+        })
+    });
+
+    dispatch_entered_rx
+        .recv()
+        .expect("dispatch closure should enter");
+    let exit = thread::spawn(move || {
+        exit_about_to_call_tx
+            .send(())
+            .expect("test should observe the exit attempt");
+        let state = exit_coordinator.request_exit_pending();
+        exit_completed_tx
+            .send(state)
+            .expect("test should observe exit completion");
+    });
+
+    exit_about_to_call_rx
+        .recv()
+        .expect("exit thread should reach the transition call");
+    assert!(
+        exit_completed_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err(),
+        "exit transition must remain blocked while dispatch holds the gate"
+    );
+    release_dispatch_tx
+        .send(())
+        .expect("guarded dispatch should still be alive");
+    dispatch
+        .join()
+        .expect("dispatch thread should join")
+        .expect("running dispatch should be admitted");
+    let exit_state = exit_completed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("exit transition should complete after dispatch release");
+    exit.join().expect("exit thread should join");
+    assert_eq!(exit_state, OperationAdmissionState::ExitPending);
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn disposed_coordinator_rejects_dispatch_without_calling_the_closure() {
+    let coordinator = OperationCoordinator::default();
+    let idle = coordinator
+        .try_acquire_idle()
+        .expect("running idle coordinator should issue dispatch authority");
+    let dispatch_count = AtomicUsize::new(0);
+    coordinator.dispose();
+
+    let result = idle.with_running_dispatch(|| {
+        dispatch_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert!(matches!(result, Err(OperationCoordinatorError::Disposed)));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dispatch_panic_fails_closed_and_prevents_a_second_dispatch() {
+    let coordinator = OperationCoordinator::default();
+    let idle = coordinator
+        .try_acquire_idle()
+        .expect("running idle coordinator should issue dispatch authority");
+    let dispatch_count = AtomicUsize::new(0);
+
+    let first = idle.with_running_dispatch(|| {
+        dispatch_count.fetch_add(1, Ordering::SeqCst);
+        panic!("synthetic process dispatcher panic");
+    });
+    let second = idle.with_running_dispatch(|| {
+        dispatch_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert!(matches!(
+        first,
+        Err(OperationCoordinatorError::DispatchPanicked)
+    ));
+    assert!(matches!(second, Err(OperationCoordinatorError::Disposed)));
+    assert_eq!(
+        coordinator.admission_state(),
+        OperationAdmissionState::Terminating
+    );
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn dispatch_reentry_fails_closed_instead_of_deadlocking() {
+    let coordinator = OperationCoordinator::default();
+    let idle = coordinator
+        .try_acquire_idle()
+        .expect("running idle coordinator should issue dispatch authority");
+    let coordinator_for_dispatch = coordinator.clone();
+
+    let result = idle.with_running_dispatch(|| {
+        let _ = coordinator_for_dispatch.request_exit_pending();
+    });
+
+    assert!(matches!(
+        result,
+        Err(OperationCoordinatorError::DispatchPanicked)
+    ));
+    assert_eq!(
+        coordinator.admission_state(),
+        OperationAdmissionState::Terminating
+    );
+}
+
+#[test]
+fn swallowed_dispatch_reentry_still_fails_closed() {
+    let coordinator = OperationCoordinator::default();
+    let idle = coordinator
+        .try_acquire_idle()
+        .expect("running idle coordinator should issue dispatch authority");
+    let coordinator_for_dispatch = coordinator.clone();
+
+    let result = idle.with_running_dispatch(|| {
+        let inner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = coordinator_for_dispatch.request_exit_pending();
+        }));
+        assert!(
+            inner.is_err(),
+            "reentry should panic before taking the gate"
+        );
+    });
+
+    assert!(matches!(
+        result,
+        Err(OperationCoordinatorError::DispatchPanicked)
+    ));
+    assert_eq!(
+        coordinator.admission_state(),
+        OperationAdmissionState::Terminating
+    );
+    assert!(matches!(
+        coordinator.try_acquire_idle(),
+        Err(OperationCoordinatorError::Disposed)
+    ));
+}
+
+#[tokio::test]
+async fn operation_context_dispatch_authority_expires_with_its_operation() {
+    let coordinator = OperationCoordinator::default();
+    let captured_context = Arc::new(std::sync::Mutex::new(None));
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let captured_for_run = captured_context.clone();
+    let dispatch_count_for_run = dispatch_count.clone();
+
+    coordinator
+        .run_async(
+            OperationKind::Flashing,
+            "dispatch-authority",
+            move |context, _| {
+                *captured_for_run.lock().unwrap() = Some(context.clone());
+                async move {
+                    context
+                        .with_running_dispatch(|| {
+                            dispatch_count_for_run.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .map_err(|error| DomainError::Internal(error.to_string()))?;
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("active context should dispatch once");
+
+    let stale_context = captured_context
+        .lock()
+        .unwrap()
+        .take()
+        .expect("operation should expose its context to the test");
+    let stale = stale_context.with_running_dispatch(|| {
+        dispatch_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert!(matches!(
+        stale,
+        Err(OperationCoordinatorError::StaleDispatchAuthority)
+    ));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn operation_context_dispatch_authority_expires_when_run_future_is_dropped() {
+    let coordinator = OperationCoordinator::default();
+    let captured_context = Arc::new(std::sync::Mutex::new(None));
+    let captured_for_run = captured_context.clone();
+    let (body_started_tx, body_started_rx) = tokio::sync::oneshot::channel();
+    let coordinator_for_run = coordinator.clone();
+
+    let operation = tokio::spawn(async move {
+        coordinator_for_run
+            .run_async(
+                OperationKind::Flashing,
+                "dropped-dispatch-authority",
+                move |context, _| {
+                    *captured_for_run.lock().unwrap() = Some(context);
+                    async move {
+                        let _ = body_started_tx.send(());
+                        std::future::pending::<Result<(), DomainError>>().await
+                    }
+                },
+            )
+            .await
+    });
+
+    body_started_rx
+        .await
+        .expect("operation body should start before its future is dropped");
+    operation.abort();
+    assert!(operation
+        .await
+        .expect_err("aborted operation task should not complete")
+        .is_cancelled());
+
+    let stale_context = captured_context
+        .lock()
+        .unwrap()
+        .take()
+        .expect("operation should expose its context before being dropped");
+    let dispatch_count = AtomicUsize::new(0);
+    let stale = stale_context.with_running_dispatch(|| {
+        dispatch_count.fetch_add(1, Ordering::SeqCst);
+    });
+
+    assert!(matches!(
+        stale,
+        Err(OperationCoordinatorError::StaleDispatchAuthority)
+    ));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+    let idle = coordinator
+        .try_acquire_idle()
+        .expect("dropping run_async should release operation admission");
+    drop(idle);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operation_context_dispatch_authority_expires_before_usage_cleanup() {
+    let (usage_entered_tx, usage_entered_rx) = mpsc::channel();
+    let (usage_release_tx, usage_release_rx) = mpsc::channel();
+    let usage = Arc::new(BlockingUsageReporter {
+        entered: std::sync::Mutex::new(Some(usage_entered_tx)),
+        release: std::sync::Mutex::new(usage_release_rx),
+    });
+    let coordinator = OperationCoordinator::new(None, None, Some(usage), None, None);
+    let captured_context = Arc::new(std::sync::Mutex::new(None));
+    let captured_for_run = captured_context.clone();
+    let coordinator_for_run = coordinator.clone();
+
+    let operation = tokio::spawn(async move {
+        coordinator_for_run
+            .run_async(
+                OperationKind::Flashing,
+                "dispatch-cleanup-expiry",
+                move |context, _| {
+                    *captured_for_run.lock().unwrap() = Some(context);
+                    async { Ok(()) }
+                },
+            )
+            .await
+    });
+
+    usage_entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("operation should reach usage cleanup after its future returns");
+    let stale_context = captured_context
+        .lock()
+        .unwrap()
+        .take()
+        .expect("operation should expose its context before returning");
+    let dispatch_count = AtomicUsize::new(0);
+    let stale = stale_context.with_running_dispatch(|| {
+        dispatch_count.fetch_add(1, Ordering::SeqCst);
+    });
+    usage_release_tx
+        .send(())
+        .expect("blocked usage cleanup should still be alive");
+    operation
+        .await
+        .expect("operation task should join")
+        .expect("operation should finish successfully");
+
+    assert!(matches!(
+        stale,
+        Err(OperationCoordinatorError::StaleDispatchAuthority)
+    ));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancel_current_revokes_dispatch_before_the_body_observes_cancellation() {
+    let coordinator = OperationCoordinator::default();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let dispatch_count_for_run = dispatch_count.clone();
+    let (body_started_tx, body_started_rx) = tokio::sync::oneshot::channel();
+    let (dispatch_result_tx, dispatch_result_rx) = tokio::sync::oneshot::channel();
+    let coordinator_for_run = coordinator.clone();
+
+    let operation = tokio::spawn(async move {
+        coordinator_for_run
+            .run_async(
+                OperationKind::Flashing,
+                "cancel-dispatch-authority",
+                move |context, cancellation| async move {
+                    let _ = body_started_tx.send(());
+                    cancellation.cancelled().await;
+                    let dispatch = context.with_running_dispatch(|| {
+                        dispatch_count_for_run.fetch_add(1, Ordering::SeqCst);
+                    });
+                    let _ = dispatch_result_tx.send(matches!(
+                        dispatch,
+                        Err(OperationCoordinatorError::StaleDispatchAuthority)
+                    ));
+                    Err(DomainError::UserCancelled("test cancellation".to_string()))
+                },
+            )
+            .await
+    });
+
+    body_started_rx
+        .await
+        .expect("operation body should start before cancellation");
+    coordinator.cancel_current().await;
+
+    assert!(dispatch_result_rx
+        .await
+        .expect("operation body should report its dispatch result"));
+    assert!(matches!(
+        operation.await.expect("operation task should join"),
+        Err(OperationCoordinatorError::Canceled)
+    ));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -935,4 +1347,10 @@ async fn run_async_records_usage_status_for_each_outcome() {
 fn result_to_domain_error_maps_all_branches() {
     let canceled = result_to_domain_error(OperationCoordinatorError::Canceled);
     assert!(matches!(canceled, DomainError::UserCancelled(_)));
+
+    let stale = result_to_domain_error(OperationCoordinatorError::StaleDispatchAuthority);
+    assert!(matches!(stale, DomainError::InvalidOperation(_)));
+
+    let dispatch_panicked = result_to_domain_error(OperationCoordinatorError::DispatchPanicked);
+    assert!(matches!(dispatch_panicked, DomainError::Internal(_)));
 }
