@@ -4,9 +4,9 @@ use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
-use nwflash_protection::SignedEnvelope;
+use nwflash_protection::{SentinelAttestedTraceUpload, SignedEnvelope};
 use reqwest::{
-    header::{HeaderMap, HeaderValue, AUTHORIZATION},
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
     Client, Method, Response, StatusCode,
 };
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
@@ -18,6 +18,9 @@ use zeroize::{Zeroize, Zeroizing};
 use nwflash_domain::UsageLogEntry;
 
 use crate::pinned_tls::{classify_reqwest_error, ApiTlsPolicy, PinnedApiClient, PinsetClaims};
+use crate::trace_http::{
+    map_client_error, TraceHttpError, TraceHttpResult, ZeroizingTraceRequestBody,
+};
 use crate::{ProcessIdentity, SecretToken};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.nwflash.cc.cd";
@@ -463,6 +466,10 @@ impl CloudflareClient {
             // HttpClient default timeout.
             http: Client::builder()
                 .timeout(Duration::from_secs(30))
+                // Upload attempts are single-use protection capabilities. Keep
+                // protocol NACK replay under the spool/reseal state machine.
+                .retry(reqwest::retry::never())
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("HTTP client should build"),
             pinned: None,
@@ -798,6 +805,40 @@ impl CloudflareClient {
         let response = request.send().await.map_err(classify_reqwest_error)?;
         self.ensure_integrity_response(&response)?;
 
+        Ok(response)
+    }
+
+    pub(crate) async fn send_trace_upload_v2(
+        &self,
+        token: &SecretToken,
+        upload: SentinelAttestedTraceUpload,
+    ) -> TraceHttpResult<Response> {
+        self.ensure_integrity_ready().map_err(map_client_error)?;
+        if !token.is_header_safe() {
+            return Err(TraceHttpError::InvalidCredential);
+        }
+
+        let body = ZeroizingTraceRequestBody::from_attested(&upload)
+            .map_err(|_| TraceHttpError::InvalidSealedBody)?;
+        let request_token = token.request_scope();
+        let response = self
+            .http
+            .post(self.url(nwflash_domain::TRACE_UPLOAD_ENDPOINT_V2))
+            .headers(
+                self.default_headers(Some(request_token.as_str()))
+                    .map_err(|_| TraceHttpError::InvalidCredential)?,
+            )
+            .header(CONTENT_TYPE, "application/json")
+            // reqwest must own a reusable Bytes allocation while the request is
+            // in flight. The protection and adapter buffers are zeroized; this
+            // transport-owned copy is released after send and is never logged.
+            .body(body.as_slice().to_vec())
+            .send()
+            .await
+            .map_err(classify_reqwest_error)
+            .map_err(map_client_error)?;
+        self.ensure_integrity_response(&response)
+            .map_err(map_client_error)?;
         Ok(response)
     }
 
