@@ -15,6 +15,7 @@ mod root;
 mod root_ota;
 mod safe_flash;
 mod session_lifecycle;
+mod trace_producer;
 
 pub use command_spec::*;
 pub use device_info::*;
@@ -31,3 +32,4 @@ pub use root::*;
 pub use root_ota::*;
 pub use safe_flash::*;
 pub use session_lifecycle::*;
+pub use trace_producer::*;
