@@ -6,7 +6,9 @@ use nwflash_application::{
 };
 use nwflash_domain::{
     DeviceConnectionState, DeviceRefreshMode, DeviceSnapshot, DomainError, OperationKind,
+    OperationLogLevel,
 };
+use nwflash_infrastructure::OperationLogStore;
 use nwflash_windows::{
     process::{run_command, run_command_with_cancel},
     DeviceTransport, PlatformDeviceDiscovery, PlatformTools, ProcessCommand,
@@ -156,6 +158,7 @@ pub fn build_reboot_command_for_connection(
     command.map_err(|error| error.to_string())
 }
 
+#[allow(dead_code)]
 pub async fn automatic_device_refresh(
     runtime: &DeviceRuntime,
     is_device_busy: bool,
@@ -190,11 +193,18 @@ pub async fn automatic_device_refresh_with_admission(
     runtime.apply_snapshot(snapshot, false, DeviceRefreshMode::Automatic)
 }
 
-pub async fn automatic_device_refresh_guarded(
+pub async fn automatic_device_refresh_guarded_with_log(
     runtime: &DeviceRuntime,
     coordinator: &nwflash_application::OperationCoordinator,
+    operation_log_store: Option<&OperationLogStore>,
 ) -> DeviceSnapshotUpdate {
     let Ok(_idle) = coordinator.try_acquire_idle() else {
+        let operation = coordinator.state().await.kind;
+        let reason = device_refresh_block_reason(coordinator.admission_state(), operation)
+            .unwrap_or("denied:busy");
+        if let Some(log) = operation_log_store {
+            record_refresh_gate(log, "设备自动刷新", reason);
+        }
         return DeviceSnapshotUpdate {
             snapshot: runtime.snapshot(),
             should_emit: false,
@@ -227,6 +237,18 @@ pub(crate) fn device_refresh_block_reason(
         }
         OperationAdmissionState::Running => None,
     }
+}
+
+pub(crate) fn record_refresh_gate(
+    operation_log_store: &OperationLogStore,
+    operation: &'static str,
+    reason: &'static str,
+) {
+    operation_log_store.write(
+        OperationLogLevel::Warning,
+        format!("{operation}已跳过（{reason}）。"),
+        None,
+    );
 }
 
 pub(crate) async fn discover_current_device() -> Result<DeviceSnapshot, String> {
@@ -285,10 +307,19 @@ pub async fn device_refresh(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<DeviceSnapshot, String> {
-    let _idle = state
-        .operation_coordinator
-        .try_acquire_idle()
-        .map_err(|error| error.to_string())?;
+    let operation = state.operation_coordinator.state().await.kind;
+    let admission = state.operation_coordinator.admission_state();
+    if let Some(reason) = device_refresh_block_reason(admission, operation) {
+        record_refresh_gate(&state.operation_log_store, "设备刷新", reason);
+        return Err(format!("设备刷新已跳过（{reason}）。"));
+    }
+    let _idle = match state.operation_coordinator.try_acquire_idle() {
+        Ok(lease) => lease,
+        Err(error) => {
+            record_refresh_gate(&state.operation_log_store, "设备刷新", "denied:busy");
+            return Err(error.to_string());
+        }
+    };
     let snapshot = discover_current_device().await?;
 
     let update = state.device_runtime.apply_snapshot(
@@ -537,5 +568,20 @@ mod tests {
             OperationAdmissionState::Running,
             OperationKind::Idle,
         ));
+    }
+
+    #[test]
+    fn refresh_gate_records_only_a_safe_denied_or_skipped_reason() {
+        let log = OperationLogStore::new(None, 10);
+
+        record_refresh_gate(&log, "设备刷新", "skipped:exit_pending");
+
+        let entries = log.snapshot();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, OperationLogLevel::Warning);
+        assert_eq!(
+            entries[0].message,
+            "设备刷新已跳过（skipped:exit_pending）。"
+        );
     }
 }
