@@ -1,6 +1,6 @@
 use std::{
     path::Path,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
 };
 
@@ -109,6 +109,9 @@ impl MirrorRuntime {
         state.child = None;
         let mut command = Command::new(plan.program);
         command.args(plan.args).envs(plan.environment);
+        // scrcpy output is not a trace sink yet; never inherit raw child output
+        // into the desktop console while the sealed observer adapter is pending.
+        command.stdout(Stdio::null()).stderr(Stdio::null());
         if let Some(directory) = plan.working_directory {
             command.current_dir(directory);
         }
