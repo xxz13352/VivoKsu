@@ -19,6 +19,7 @@ pub mod root_patch;
 pub mod root_resources;
 pub mod scrcpy_provisioner;
 mod session_security;
+pub mod trace_http;
 pub mod trace_spool;
 pub mod trace_uploader;
 pub mod usage_reporter;
@@ -78,6 +79,10 @@ pub use root_resources::{
 };
 pub use scrcpy_provisioner::{ScrcpyProvisionError, ScrcpyProvisioner};
 pub use session_security::{compiled_build_id, ProcessIdentity, SecretToken};
+pub use trace_http::{
+    TraceHttpAck, TraceHttpApiError, TraceHttpError, TraceHttpOutcome, TraceHttpResult,
+    TraceHttpUpdateRequired, TraceSafeId, TraceSafeRejectedItem,
+};
 pub use vendor_boot::resolve_vendor_boot_module_directories;
 pub use version_client::{VersionCheckResult, VersionClient};
 pub use vivo_firmware::{
