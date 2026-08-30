@@ -199,6 +199,7 @@ fn needs_payload_dumper(kind: RemoteFirmwareKind) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn root_ota_check_is_blocked(
     admission: OperationAdmissionState,
     operation: OperationKind,
@@ -262,12 +263,30 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
     let _idle = match state.operation_coordinator.try_acquire_idle() {
         Ok(lease) => lease,
         Err(_) => {
+            crate::commands::device::record_refresh_gate(
+                &state.operation_log_store,
+                "ROOT OTA 检测",
+                "denied:busy",
+            );
             return Ok(RootOtaCheckDto {
                 available: false,
                 label: None,
-            })
+            });
         }
     };
+    let operation = state.operation_coordinator.state().await.kind;
+    let admission = state.operation_coordinator.admission_state();
+    if let Some(reason) = root_ota_check_block_reason(admission, operation) {
+        crate::commands::device::record_refresh_gate(
+            &state.operation_log_store,
+            "ROOT OTA 检测",
+            reason,
+        );
+        return Ok(RootOtaCheckDto {
+            available: false,
+            label: None,
+        });
+    }
     let lease = match state.session_capabilities.capture() {
         Ok(lease) => lease,
         Err(_) => {
