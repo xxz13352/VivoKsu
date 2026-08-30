@@ -8,6 +8,7 @@
 use nwflash_domain::UsageLogEntry;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
@@ -218,7 +219,14 @@ fn persist(path: &Path, pending: &[QueuedEntry]) -> Result<(), LegacyUsageReport
     }
     let bytes = serde_json::to_vec(pending)?;
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, bytes)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(temporary, path)?;
     Ok(())
 }
