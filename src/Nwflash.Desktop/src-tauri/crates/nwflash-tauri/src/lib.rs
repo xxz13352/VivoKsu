@@ -860,6 +860,7 @@ impl AppState {
     pub fn bind_operation_events(&self, app_handle: AppHandle<Wry>) {
         let coordinator = self.operation_coordinator.clone();
         let device_runtime = self.device_runtime.clone();
+        let operation_log_store = self.operation_log_store.clone();
         spawn(async move {
             let mut receiver = coordinator.subscribe_state();
             let mut was_device_busy = false;
@@ -894,11 +895,13 @@ impl AppState {
                 if should_compensate_device_refresh(was_device_busy, is_busy) {
                     let app_handle = app_handle.clone();
                     let device_runtime = device_runtime.clone();
-                    let coordinator = coordinator.clone();
+                    let coordinator_for_refresh = coordinator.clone();
+                    let operation_log_store = operation_log_store.clone();
                     spawn(async move {
-                        let update = commands::device::automatic_device_refresh_guarded(
+                        let update = commands::device::automatic_device_refresh_guarded_with_log(
                             &device_runtime,
-                            &coordinator,
+                            &coordinator_for_refresh,
+                            Some(&operation_log_store),
                         )
                         .await;
                         if update.should_emit {
@@ -972,12 +975,16 @@ impl AppState {
         let coordinator = self.operation_coordinator.clone();
         let runtime = self.device_runtime.clone();
         let mirror_runtime = self.mirror_runtime.clone();
+        let operation_log_store = self.operation_log_store.clone();
         spawn(async move {
             loop {
                 sleep(Duration::from_secs(3)).await;
-                let update =
-                    commands::device::automatic_device_refresh_guarded(&runtime, &coordinator)
-                        .await;
+                let update = commands::device::automatic_device_refresh_guarded_with_log(
+                    &runtime,
+                    &coordinator,
+                    Some(&operation_log_store),
+                )
+                .await;
                 let _ = commands::mirror::reconcile_after_device_update(
                     &mirror_runtime,
                     &runtime,
