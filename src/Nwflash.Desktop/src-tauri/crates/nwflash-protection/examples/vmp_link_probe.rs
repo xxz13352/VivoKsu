@@ -31,7 +31,8 @@ fn main() {
         &nwflash_protection::ExactSecretSet::empty(),
     )
     .expect("static probe text must seal");
-    let trace_credential = trace_credential_sentinel(&trace_session);
+    let trace_input = trace_session.credential_sentinel_input();
+    let trace_credential = trace_credential_sentinel(&trace_input);
 
     black_box((
         session,

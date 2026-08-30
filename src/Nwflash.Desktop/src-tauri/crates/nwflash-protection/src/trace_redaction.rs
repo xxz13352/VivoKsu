@@ -8,6 +8,7 @@ use nwflash_domain::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{begin_trace_credential_sentinel, end_marker};
@@ -291,8 +292,10 @@ impl fmt::Debug for RedactedOutputChunk {
 /// text fragments.  A caller therefore cannot independently seal the two halves
 /// of a credential and later join them into a trace upload.
 pub struct TraceOutputSession {
+    event_id: TraceId,
     output_chunks: Vec<RedactedOutputChunk>,
     redaction_summary: RedactionSummary,
+    sentinel_identity: [u8; 32],
 }
 
 impl TraceOutputSession {
@@ -336,10 +339,32 @@ impl TraceOutputSession {
         let logical_stream = scanner.finish()?;
         let redaction_summary = logical_stream.summary().clone();
         let output_chunks = logical_stream.into_output_chunks(event_id, stream, 0)?;
+        let sentinel_identity =
+            trace_session_identity(event_id, stream, &output_chunks, &redaction_summary);
         Ok(Self {
+            event_id,
             output_chunks,
             redaction_summary,
+            sentinel_identity,
         })
+    }
+
+    /// Returns a fixed-size, text-free view for explicit link/layout probes.
+    /// Production upload receipts are minted internally after each concrete
+    /// upload body has been formed and bound to its own identity.
+    pub fn credential_sentinel_input(&self) -> TraceCredentialSentinelInput {
+        TraceCredentialSentinelInput {
+            session_identity: self.sentinel_identity,
+            upload_id: self.event_id,
+            body_sha256: self.sentinel_identity,
+            body_len: self
+                .output_chunks
+                .iter()
+                .map(RedactedOutputChunk::byte_count)
+                .sum(),
+            redaction_count: self.redaction_summary.total(),
+            high_risk: self.redaction_summary.count(CredentialKind::HighRisk) > 0,
+        }
     }
 
     /// Partitions one complete logical stream into independently bounded wire
@@ -349,14 +374,16 @@ impl TraceOutputSession {
         if self.output_chunks.is_empty() {
             return Err(TraceRedactionError::EmptyUpload);
         }
-        partition_output_chunks(self.output_chunks, None)?
+        let sentinel = TraceCredentialSentinelContext::from_session(&self);
+        let attempts = partition_output_chunks(self.output_chunks, None)?
             .into_iter()
             .map(|chunks| {
                 let upload_id =
                     TraceId::try_new_v7().map_err(|_| TraceRedactionError::IdGeneration)?;
                 SealedTraceUpload::from_output_chunks(upload_id, chunks)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        attest_upload_attempts(attempts, &sentinel)
     }
 
     /// Seals the event manifest and splits its complete stream across bounded
@@ -367,8 +394,10 @@ impl TraceOutputSession {
         input: TraceEventText<'_>,
         secrets: &ExactSecretSet,
     ) -> Result<Vec<SealedTraceUpload>, TraceRedactionError> {
+        let sentinel = TraceCredentialSentinelContext::from_session(&self);
         let event = RedactedTraceEvent::from_session(input, secrets, self)?;
-        SealedTraceUpload::from_event_attempts(event)
+        let attempts = SealedTraceUpload::from_event_attempts(event)?;
+        attest_upload_attempts(attempts, &sentinel)
     }
 }
 
@@ -376,6 +405,7 @@ impl fmt::Debug for TraceOutputSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TraceOutputSession")
+            .field("event_id", &self.event_id)
             .field("output_chunk_count", &self.output_chunks.len())
             .finish()
     }
@@ -932,6 +962,8 @@ pub struct SealedTraceUpload {
     runs: Vec<RedactedTraceRun>,
     events: Vec<RedactedTraceEvent>,
     output_chunks: Vec<RedactedOutputChunk>,
+    credential_sentinel_session_identity: Option<[u8; 32]>,
+    credential_sentinel_receipt: Option<TraceCredentialSentinelReceipt>,
 }
 
 /// Non-text identity metadata used to bind a sealed event manifest to the
@@ -973,6 +1005,8 @@ impl SealedTraceUpload {
             runs,
             events,
             output_chunks,
+            credential_sentinel_session_identity: None,
+            credential_sentinel_receipt: None,
         })
     }
 
@@ -1002,6 +1036,8 @@ impl SealedTraceUpload {
             runs: Vec::new(),
             events: Vec::new(),
             output_chunks,
+            credential_sentinel_session_identity: None,
+            credential_sentinel_receipt: None,
         })
     }
 
@@ -1015,7 +1051,7 @@ impl SealedTraceUpload {
         let first_upload_id =
             TraceId::try_new_v7().map_err(|_| TraceRedactionError::IdGeneration)?;
         let first = Self::new(first_upload_id, Vec::new(), vec![event])?;
-        first.to_json_body()?;
+        first.unattested_json_body()?;
 
         let mut attempts = vec![first];
         for chunks in groups {
@@ -1072,12 +1108,52 @@ impl SealedTraceUpload {
     }
 
     pub fn to_json_body(&self) -> Result<Zeroizing<Vec<u8>>, TraceRedactionError> {
+        let body = self.unattested_json_body()?;
+        self.verify_credential_sentinel_receipt(&body)?;
+        Ok(body)
+    }
+
+    fn unattested_json_body(&self) -> Result<Zeroizing<Vec<u8>>, TraceRedactionError> {
         sealed_upload_body(
             self.upload_id,
             &self.runs,
             &self.events,
             &self.output_chunks,
         )
+    }
+
+    fn attach_credential_sentinel_receipt(
+        &mut self,
+        context: &TraceCredentialSentinelContext,
+    ) -> Result<(), TraceRedactionError> {
+        let body = self.unattested_json_body()?;
+        let input = context.for_upload(self.upload_id, &body)?;
+        let receipt = trace_credential_sentinel(&input);
+        self.credential_sentinel_session_identity = Some(context.session_identity);
+        self.credential_sentinel_receipt = Some(receipt);
+        Ok(())
+    }
+
+    fn verify_credential_sentinel_receipt(&self, body: &[u8]) -> Result<(), TraceRedactionError> {
+        let receipt = self
+            .credential_sentinel_receipt
+            .as_ref()
+            .ok_or(TraceRedactionError::CredentialSentinelRequired)?;
+        let session_identity = self
+            .credential_sentinel_session_identity
+            .as_ref()
+            .ok_or(TraceRedactionError::CredentialSentinelInvalid)?;
+        let body_len =
+            u64::try_from(body.len()).map_err(|_| TraceRedactionError::RequestTooLarge)?;
+        let body_sha256: [u8; 32] = Sha256::digest(body).into();
+        if !bool::from(receipt.session_identity.ct_eq(session_identity))
+            || receipt.upload_id != self.upload_id
+            || receipt.body_len != body_len
+            || !bool::from(receipt.body_sha256.ct_eq(&body_sha256))
+        {
+            return Err(TraceRedactionError::CredentialSentinelInvalid);
+        }
+        Ok(())
     }
 
     pub fn write_json<W: Write>(&self, writer: &mut W) -> Result<usize, TraceRedactionError> {
@@ -1097,7 +1173,63 @@ impl fmt::Debug for SealedTraceUpload {
             .field("run_count", &self.runs.len())
             .field("event_count", &self.events.len())
             .field("output_chunk_count", &self.output_chunks.len())
+            .field(
+                "credential_sentinel_attested",
+                &self.credential_sentinel_receipt.is_some(),
+            )
             .finish()
+    }
+}
+
+/// A fail-closed capability accepted by producer sinks. Safe Rust callers can
+/// obtain it only by converting a concrete upload whose private receipt still
+/// matches that upload's ID and canonical body.
+///
+/// ```compile_fail
+/// use nwflash_protection::{SealedTraceUpload, SentinelAttestedTraceUpload};
+/// # fn bypass(upload: SealedTraceUpload) {
+/// let _ = SentinelAttestedTraceUpload { upload };
+/// # }
+/// ```
+pub struct SentinelAttestedTraceUpload {
+    upload: SealedTraceUpload,
+}
+
+impl TryFrom<SealedTraceUpload> for SentinelAttestedTraceUpload {
+    type Error = TraceRedactionError;
+
+    fn try_from(upload: SealedTraceUpload) -> Result<Self, Self::Error> {
+        let body = upload.unattested_json_body()?;
+        upload.verify_credential_sentinel_receipt(&body)?;
+        Ok(Self { upload })
+    }
+}
+
+impl SentinelAttestedTraceUpload {
+    pub const fn upload_id(&self) -> TraceId {
+        self.upload.upload_id()
+    }
+
+    pub fn output_chunks(&self) -> &[RedactedOutputChunk] {
+        self.upload.output_chunks()
+    }
+
+    pub fn to_json_body(&self) -> Result<Zeroizing<Vec<u8>>, TraceRedactionError> {
+        self.upload.to_json_body()
+    }
+
+    pub fn write_json<W: Write>(&self, writer: &mut W) -> Result<usize, TraceRedactionError> {
+        self.upload.write_json(writer)
+    }
+}
+
+impl fmt::Debug for SentinelAttestedTraceUpload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SentinelAttestedTraceUpload")
+            .field("upload_id", &self.upload.upload_id)
+            .field("output_chunk_count", &self.upload.output_chunks.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -1777,6 +1909,8 @@ pub enum TraceRedactionError {
     InvalidChunkIndex,
     IdGeneration,
     EmptyUpload,
+    CredentialSentinelRequired,
+    CredentialSentinelInvalid,
     RequestTooLarge,
     JsonEncoding,
     SinkWrite,
@@ -1985,32 +2119,145 @@ fn cli_flag_kind(value: &str) -> Option<CredentialKind> {
         .and_then(credential_kind)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TraceCredentialSentinel {
+pub struct TraceCredentialSentinelInput {
+    session_identity: [u8; 32],
+    upload_id: TraceId,
+    body_sha256: [u8; 32],
+    body_len: u64,
     redaction_count: u64,
     high_risk: bool,
 }
 
-impl TraceCredentialSentinel {
-    pub const fn redaction_count(self) -> u64 {
+/// Opaque safe-Rust evidence minted by the trace credential sentinel leaf.
+/// Its fields are private and it intentionally has no copying, formatting, or
+/// serialization traits.
+///
+/// ```compile_fail
+/// use nwflash_protection::TraceCredentialSentinelReceipt;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<TraceCredentialSentinelReceipt>();
+/// ```
+///
+/// ```compile_fail
+/// use nwflash_protection::TraceCredentialSentinelReceipt;
+/// fn requires_debug<T: std::fmt::Debug>() {}
+/// requires_debug::<TraceCredentialSentinelReceipt>();
+/// ```
+///
+/// ```compile_fail
+/// use nwflash_protection::TraceCredentialSentinelReceipt;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<TraceCredentialSentinelReceipt>();
+/// ```
+pub struct TraceCredentialSentinelReceipt {
+    session_identity: [u8; 32],
+    upload_id: TraceId,
+    body_sha256: [u8; 32],
+    body_len: u64,
+    redaction_count: u64,
+    high_risk: bool,
+    _proof: TraceCredentialSentinelProof,
+}
+
+struct TraceCredentialSentinelProof;
+
+pub type TraceCredentialSentinel = TraceCredentialSentinelReceipt;
+
+impl TraceCredentialSentinelReceipt {
+    pub const fn redaction_count(&self) -> u64 {
         self.redaction_count
     }
 
-    pub const fn high_risk(self) -> bool {
+    pub const fn high_risk(&self) -> bool {
         self.high_risk
     }
 }
 
+struct TraceCredentialSentinelContext {
+    session_identity: [u8; 32],
+    redaction_count: u64,
+    high_risk: bool,
+}
+
+impl TraceCredentialSentinelContext {
+    fn from_session(session: &TraceOutputSession) -> Self {
+        Self {
+            session_identity: session.sentinel_identity,
+            redaction_count: session.redaction_summary.total(),
+            high_risk: session.redaction_summary.count(CredentialKind::HighRisk) > 0,
+        }
+    }
+
+    fn for_upload(
+        &self,
+        upload_id: TraceId,
+        body: &[u8],
+    ) -> Result<TraceCredentialSentinelInput, TraceRedactionError> {
+        Ok(TraceCredentialSentinelInput {
+            session_identity: self.session_identity,
+            upload_id,
+            body_sha256: Sha256::digest(body).into(),
+            body_len: u64::try_from(body.len())
+                .map_err(|_| TraceRedactionError::RequestTooLarge)?,
+            redaction_count: self.redaction_count,
+            high_risk: self.high_risk,
+        })
+    }
+}
+
+fn trace_session_identity(
+    event_id: TraceId,
+    stream: TraceOutputStreamV2,
+    chunks: &[RedactedOutputChunk],
+    summary: &RedactionSummary,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"NWFlash.TraceCredentialSentinel.Session.v1\0");
+    digest.update(event_id.as_uuid().as_bytes());
+    digest.update([match stream {
+        TraceOutputStreamV2::Stdout => 0,
+        TraceOutputStreamV2::Stderr => 1,
+    }]);
+    for kind in CredentialKind::ALL {
+        digest.update(summary.count(kind).to_be_bytes());
+    }
+    for chunk in chunks {
+        digest.update(chunk.chunk_id.as_uuid().as_bytes());
+        digest.update(chunk.event_id.as_uuid().as_bytes());
+        digest.update(chunk.chunk_index.to_be_bytes());
+        digest.update(chunk.byte_count.to_be_bytes());
+        digest.update(chunk.sha256.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn attest_upload_attempts(
+    mut attempts: Vec<SealedTraceUpload>,
+    context: &TraceCredentialSentinelContext,
+) -> Result<Vec<SealedTraceUpload>, TraceRedactionError> {
+    for upload in &mut attempts {
+        upload.attach_credential_sentinel_receipt(context)?;
+    }
+    Ok(attempts)
+}
+
 #[inline(never)]
 #[export_name = "nwflash_protection_trace_credential_sentinel"]
-pub fn trace_credential_sentinel(session: &TraceOutputSession) -> TraceCredentialSentinel {
+pub fn trace_credential_sentinel(
+    input: &TraceCredentialSentinelInput,
+) -> TraceCredentialSentinelReceipt {
     begin_trace_credential_sentinel();
-    let sentinel = TraceCredentialSentinel {
-        redaction_count: session.redaction_summary.total(),
-        high_risk: session.redaction_summary.count(CredentialKind::HighRisk) > 0,
+    let receipt = TraceCredentialSentinelReceipt {
+        session_identity: input.session_identity,
+        upload_id: input.upload_id,
+        body_sha256: input.body_sha256,
+        body_len: input.body_len,
+        redaction_count: input.redaction_count,
+        high_risk: input.high_risk,
+        _proof: TraceCredentialSentinelProof,
     };
     end_marker();
-    sentinel
+    receipt
 }
 
 struct PrivateKeyBegin {
@@ -2855,14 +3102,106 @@ mod tests {
             &ExactSecretSet::empty(),
         )
         .expect("bounded logical stream");
-        let sentinel = trace_credential_sentinel(&session);
+        let input = session.credential_sentinel_input();
+        let sentinel = trace_credential_sentinel(&input);
         assert_eq!(sentinel.redaction_count(), 1);
         assert!(!sentinel.high_risk());
-        assert!(!format!("{sentinel:?}").contains("token-sentinel"));
         assert_eq!(session.redaction_summary.count(CredentialKind::Token), 1);
 
         let storage_size = mem::size_of::<RedactedTraceText>();
         assert!(storage_size > 0);
+        assert!(!mem::needs_drop::<TraceCredentialSentinelInput>());
+        assert!(!mem::needs_drop::<TraceCredentialSentinelReceipt>());
+        assert!(mem::size_of::<TraceCredentialSentinelInput>() <= 128);
+        assert!(mem::size_of::<TraceCredentialSentinelReceipt>() <= 128);
+    }
+
+    #[test]
+    fn receiptless_upload_cannot_emit_a_wire_body() {
+        let mut reader = std::io::Cursor::new(b"safe output".as_slice());
+        let session = TraceOutputSession::from_reader(
+            TraceId::try_new_v7().expect("event id"),
+            TraceOutputStreamV2::Stdout,
+            &mut reader,
+            &ExactSecretSet::empty(),
+        )
+        .expect("bounded logical stream");
+        let raw = SealedTraceUpload::from_output_chunks(
+            TraceId::try_new_v7().expect("upload id"),
+            session.output_chunks,
+        )
+        .expect("receiptless fixture");
+
+        assert!(matches!(
+            raw.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelRequired)
+        ));
+        let mut sink = Vec::new();
+        assert!(matches!(
+            raw.write_json(&mut sink),
+            Err(TraceRedactionError::CredentialSentinelRequired)
+        ));
+        assert!(sink.is_empty());
+    }
+
+    #[test]
+    fn receipt_is_bound_to_one_concrete_upload_body() {
+        fn sealed(value: &'static [u8]) -> SealedTraceUpload {
+            let mut reader = std::io::Cursor::new(value);
+            TraceOutputSession::from_reader(
+                TraceId::try_new_v7().expect("event id"),
+                TraceOutputStreamV2::Stdout,
+                &mut reader,
+                &ExactSecretSet::empty(),
+            )
+            .expect("bounded logical stream")
+            .into_upload_attempts()
+            .expect("attested upload")
+            .into_iter()
+            .next()
+            .expect("one upload")
+        }
+
+        let mut first = sealed(b"first safe output");
+        let mut second = sealed(b"second safe output");
+        assert!(first.to_json_body().is_ok());
+        assert!(second.to_json_body().is_ok());
+
+        std::mem::swap(&mut first.output_chunks, &mut second.output_chunks);
+        assert!(matches!(
+            first.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
+        assert!(matches!(
+            second.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
+        std::mem::swap(&mut first.output_chunks, &mut second.output_chunks);
+        assert!(first.to_json_body().is_ok());
+        assert!(second.to_json_body().is_ok());
+
+        let first_session_identity = first.credential_sentinel_session_identity;
+        first.credential_sentinel_session_identity = Some([0xA5; 32]);
+        assert!(matches!(
+            first.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
+        first.credential_sentinel_session_identity = first_session_identity;
+        assert!(first.to_json_body().is_ok());
+
+        std::mem::swap(
+            &mut first.credential_sentinel_receipt,
+            &mut second.credential_sentinel_receipt,
+        );
+
+        assert!(matches!(
+            first.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
+        assert!(matches!(
+            second.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
     }
 
     #[test]
@@ -3287,8 +3626,10 @@ mod tests {
                 && chunk.chunk_index() == index as u64
         }));
         for attempt in attempts {
+            let attested = SentinelAttestedTraceUpload::try_from(attempt)
+                .expect("every complete-stream attempt must carry a valid receipt");
             assert!(
-                attempt.to_json_body().expect("bounded JSON").len() <= TRACE_UPLOAD_MAX_BODY_BYTES
+                attested.to_json_body().expect("bounded JSON").len() <= TRACE_UPLOAD_MAX_BODY_BYTES
             );
         }
     }
@@ -3387,8 +3728,10 @@ mod tests {
         assert!(first.contains(&event_id.to_string()));
         assert!(later.contains(&event_id.to_string()));
         for attempt in attempts {
+            let attested = SentinelAttestedTraceUpload::try_from(attempt)
+                .expect("every event attempt must carry a valid receipt");
             assert!(
-                attempt.to_json_body().expect("bounded JSON").len() <= TRACE_UPLOAD_MAX_BODY_BYTES
+                attested.to_json_body().expect("bounded JSON").len() <= TRACE_UPLOAD_MAX_BODY_BYTES
             );
         }
     }
@@ -3536,7 +3879,9 @@ mod tests {
             vec![event],
         )
         .expect("sealed upload");
-        let body = upload.to_json_body().expect("bounded body");
+        let body = upload
+            .unattested_json_body()
+            .expect("bounded internal body");
         let body = std::str::from_utf8(&body).expect("JSON UTF-8");
         for secret in ["wire-secret", "stream-upload-secret", "exact-upload-secret"] {
             assert!(!body.contains(secret), "sealed body leaked {secret}");
@@ -3544,5 +3889,9 @@ mod tests {
         assert!(body.contains("\"runs\":[{"));
         assert!(body.contains("\"events\":[{"));
         assert!(body.contains("\"output_chunks\":[{"));
+        assert!(matches!(
+            upload.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelRequired)
+        ));
     }
 }
