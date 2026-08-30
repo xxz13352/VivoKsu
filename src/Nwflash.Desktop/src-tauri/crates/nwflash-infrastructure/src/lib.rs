@@ -21,6 +21,7 @@ pub mod scrcpy_provisioner;
 mod session_security;
 pub mod trace_spool;
 pub mod trace_uploader;
+pub mod usage_reporter;
 pub mod vendor_boot;
 pub mod version_client;
 pub mod vivo_firmware;
