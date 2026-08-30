@@ -278,7 +278,12 @@ pub async fn mirror_start(state: State<'_, AppState>) -> Result<MirrorStatusDto,
 
 #[tauri::command]
 pub async fn mirror_stop(state: State<'_, AppState>) -> Result<MirrorStatusDto, String> {
+    let was_mirroring = state.mirror_runtime.status().is_mirroring;
     state.mirror_runtime.stop();
+    if was_mirroring {
+        let idle = state.operation_coordinator.wait_until_idle().await;
+        drop(idle);
+    }
     Ok(state.mirror_runtime.status())
 }
 

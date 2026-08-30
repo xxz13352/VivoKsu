@@ -260,6 +260,19 @@ fn publish_extracted_root_images(
 /// 检测服务器 OTA 并把链接缓存到 Rust 内存。无设备/未登录/查询失败 → 静默不可用。
 #[tauri::command]
 pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDto, String> {
+    let operation = state.operation_coordinator.state().await.kind;
+    let admission = state.operation_coordinator.admission_state();
+    if let Some(reason) = root_ota_check_block_reason(admission, operation) {
+        crate::commands::device::record_refresh_gate(
+            &state.operation_log_store,
+            "ROOT OTA 检测",
+            reason,
+        );
+        return Ok(RootOtaCheckDto {
+            available: false,
+            label: None,
+        });
+    }
     let _idle = match state.operation_coordinator.try_acquire_idle() {
         Ok(lease) => lease,
         Err(_) => {
@@ -274,19 +287,6 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
             });
         }
     };
-    let operation = state.operation_coordinator.state().await.kind;
-    let admission = state.operation_coordinator.admission_state();
-    if let Some(reason) = root_ota_check_block_reason(admission, operation) {
-        crate::commands::device::record_refresh_gate(
-            &state.operation_log_store,
-            "ROOT OTA 检测",
-            reason,
-        );
-        return Ok(RootOtaCheckDto {
-            available: false,
-            label: None,
-        });
-    }
     let lease = match state.session_capabilities.capture() {
         Ok(lease) => lease,
         Err(_) => {
