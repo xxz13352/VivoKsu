@@ -4,9 +4,9 @@ use std::{
 };
 
 use nwflash_application::{
-    HeartbeatInput, OperationAuthorization, OperationCoordinator, OperationIdleLease,
-    OperationLogger, OperationPermissionGate, SessionIntegrityReason, SessionLifecycle,
-    SessionTerminalClass, SessionTerminalDecision, SessionTerminalReason,
+    HeartbeatInput, OperationAuthorization, OperationCoordinator, OperationCoordinatorError,
+    OperationIdleLease, OperationLogger, OperationPermissionGate, SessionIntegrityReason,
+    SessionLifecycle, SessionTerminalClass, SessionTerminalDecision, SessionTerminalReason,
 };
 use nwflash_domain::{DomainError, OperationKind};
 use nwflash_infrastructure::{
@@ -645,6 +645,14 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
 }
 
 impl AppState {
+    pub(crate) async fn acquire_session_closeout(
+        &self,
+    ) -> Result<(OperationIdleLease, Option<String>), OperationCoordinatorError> {
+        let idle = self.operation_coordinator.try_acquire_idle()?;
+        let generation = self.session_lifecycle.generation().await;
+        Ok((idle, generation))
+    }
+
     pub fn try_new() -> Result<Self, CloudflareError> {
         let client = CloudflareClient::new_default()?;
         Self::try_with_client(client)
@@ -712,7 +720,11 @@ impl AppState {
             entries: operation_log_store.clone(),
         });
         let usage_reporter =
-            usage_reporter::UsageLogReporter::new(client.clone(), session_token.clone());
+            usage_reporter::UsageLogReporter::new(client.clone()).map_err(|_| {
+                CloudflareError::Transport(
+                    "本地 V1 使用日志兼容队列不可用，已拒绝启动。".to_string(),
+                )
+            })?;
         let remote_permission_gate = Arc::new(CloudflareOperationPermissionGate::new(
             client.clone(),
             session_token.clone(),
