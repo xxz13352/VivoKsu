@@ -65,7 +65,12 @@ pub enum OperationAdmissionState {
 struct AdmissionGateState {
     state: OperationAdmissionState,
     disposed: bool,
-    active_operation_id: Option<String>,
+    active_dispatch: Option<ActiveDispatchAuthority>,
+}
+
+struct ActiveDispatchAuthority {
+    operation_id: String,
+    cancellation: CancellationToken,
 }
 
 struct AdmissionGate {
@@ -84,7 +89,7 @@ impl AdmissionGate {
                 let mut state = poisoned.into_inner();
                 state.state = OperationAdmissionState::Terminating;
                 state.disposed = true;
-                state.active_operation_id = None;
+                state.active_dispatch = None;
                 self.state.clear_poison();
                 state
             }
@@ -99,15 +104,20 @@ impl AdmissionGate {
         let mut admission = self.lock();
         ensure_running(&admission)?;
         match authority {
-            DispatchAuthority::Idle if admission.active_operation_id.is_some() => {
+            DispatchAuthority::Idle if admission.active_dispatch.is_some() => {
                 return Err(OperationCoordinatorError::InProgress);
             }
-            DispatchAuthority::Active(operation_id)
-                if admission.active_operation_id.as_deref() != Some(operation_id) =>
-            {
-                return Err(OperationCoordinatorError::StaleDispatchAuthority);
+            DispatchAuthority::Active(operation_id) => {
+                let Some(active_dispatch) = admission.active_dispatch.as_ref() else {
+                    return Err(OperationCoordinatorError::StaleDispatchAuthority);
+                };
+                if active_dispatch.operation_id != operation_id
+                    || active_dispatch.cancellation.is_cancelled()
+                {
+                    return Err(OperationCoordinatorError::StaleDispatchAuthority);
+                }
             }
-            DispatchAuthority::Idle | DispatchAuthority::Active(_) => {}
+            DispatchAuthority::Idle => {}
         }
 
         let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -119,7 +129,7 @@ impl AdmissionGate {
         if outcome.is_err() || dispatch_violated {
             admission.state = OperationAdmissionState::Terminating;
             admission.disposed = true;
-            admission.active_operation_id = None;
+            admission.active_dispatch = None;
             return Err(OperationCoordinatorError::DispatchPanicked);
         }
         Ok(())
@@ -135,11 +145,14 @@ impl AdmissionGate {
         if cancellation.is_cancelled() {
             return Err(OperationCoordinatorError::Canceled);
         }
-        if admission.active_operation_id.is_some() {
+        if admission.active_dispatch.is_some() {
             return Err(OperationCoordinatorError::InProgress);
         }
 
-        admission.active_operation_id = Some(operation_id.clone());
+        admission.active_dispatch = Some(ActiveDispatchAuthority {
+            operation_id: operation_id.clone(),
+            cancellation: cancellation.clone(),
+        });
         Ok(ActiveDispatchLease {
             admission: self.clone(),
             operation_id,
@@ -148,7 +161,7 @@ impl AdmissionGate {
 
     fn revoke_and_cancel(&self, cancellation: &CancellationToken) {
         let mut admission = self.lock();
-        admission.active_operation_id = None;
+        admission.active_dispatch = None;
         cancellation.cancel();
     }
 }
@@ -219,8 +232,12 @@ struct ActiveDispatchLease {
 impl Drop for ActiveDispatchLease {
     fn drop(&mut self) {
         let mut admission = self.admission.lock();
-        if admission.active_operation_id.as_deref() == Some(self.operation_id.as_str()) {
-            admission.active_operation_id = None;
+        if admission
+            .active_dispatch
+            .as_ref()
+            .is_some_and(|authority| authority.operation_id == self.operation_id)
+        {
+            admission.active_dispatch = None;
         }
     }
 }
@@ -434,7 +451,7 @@ impl OperationCoordinator {
                 state: StdMutex::new(AdmissionGateState {
                     state: OperationAdmissionState::Running,
                     disposed: false,
-                    active_operation_id: None,
+                    active_dispatch: None,
                 }),
             }),
             semaphore: Arc::new(Semaphore::new(1)),
@@ -994,7 +1011,10 @@ mod tests {
 
         let poison = std::thread::spawn(move || {
             let mut state = admission.state.lock().unwrap();
-            state.active_operation_id = Some("poisoned-operation".to_string());
+            state.active_dispatch = Some(ActiveDispatchAuthority {
+                operation_id: "poisoned-operation".to_string(),
+                cancellation: CancellationToken::new(),
+            });
             panic!("synthetic admission gate poison");
         })
         .join();
@@ -1013,7 +1033,7 @@ mod tests {
             .lock()
             .expect("fail-closed recovery should clear mutex poison");
         assert!(recovered.disposed);
-        assert!(recovered.active_operation_id.is_none());
+        assert!(recovered.active_dispatch.is_none());
         drop(recovered);
         assert!(matches!(
             coordinator.try_acquire_idle(),
@@ -1040,7 +1060,7 @@ mod tests {
             .state
             .lock()
             .unwrap()
-            .active_operation_id
+            .active_dispatch
             .is_none());
     }
 }
