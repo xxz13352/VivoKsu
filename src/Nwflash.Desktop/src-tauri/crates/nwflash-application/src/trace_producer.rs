@@ -7,7 +7,7 @@ use nwflash_domain::{
     OperationKind, TraceId, TraceOutputStreamV2, TRACE_RUN_MAX_EVENT_STORAGE_BYTES,
     TRACE_UPLOAD_MAX_OUTPUT_CHUNKS,
 };
-use nwflash_protection::SealedTraceUpload;
+use nwflash_protection::{SealedTraceUpload, SentinelAttestedTraceUpload};
 
 const MAX_TRACE_EVENT_OUTPUT_CHUNKS: usize = TRACE_UPLOAD_MAX_OUTPUT_CHUNKS * 2;
 const MAX_TRACE_EVENT_UPLOAD_ATTEMPTS: usize = MAX_TRACE_EVENT_OUTPUT_CHUNKS + 1;
@@ -200,7 +200,7 @@ pub trait TraceMetadataSink: Send + Sync {
         &self,
         run: &TraceRunOpen,
         sequence: u64,
-        uploads: &[SealedTraceUpload],
+        uploads: &[SentinelAttestedTraceUpload],
     ) -> Result<(), TraceProducerError>;
     /// Before returning, including on a diagnostic error, the sink must either
     /// persist this terminal state or durably enqueue its recovery. This keeps
@@ -241,7 +241,7 @@ where
         &self,
         run: &TraceRunOpen,
         sequence: u64,
-        uploads: &[SealedTraceUpload],
+        uploads: &[SentinelAttestedTraceUpload],
     ) -> Result<(), TraceProducerError> {
         (**self).append_upload_attempts(run, sequence, uploads)
     }
@@ -440,7 +440,7 @@ where
     pub fn append_upload(
         &self,
         sequence: u64,
-        upload: &SealedTraceUpload,
+        upload: &SentinelAttestedTraceUpload,
     ) -> Result<(), TraceProducerError> {
         self.append_upload_attempts(sequence, std::slice::from_ref(upload))
     }
@@ -448,7 +448,7 @@ where
     pub fn append_upload_attempts(
         &self,
         sequence: u64,
-        uploads: &[SealedTraceUpload],
+        uploads: &[SentinelAttestedTraceUpload],
     ) -> Result<(), TraceProducerError> {
         if sequence > nwflash_domain::TRACE_RUN_MAX_EVENTS as u64 {
             return Err(TraceProducerError::SequenceLimit);
@@ -490,7 +490,7 @@ where
     fn validate_upload_attempts(
         &self,
         sequence: u64,
-        uploads: &[SealedTraceUpload],
+        uploads: &[SentinelAttestedTraceUpload],
     ) -> Result<(), TraceProducerError> {
         if uploads.is_empty() {
             return Err(TraceProducerError::EmptyUploadBatch);
@@ -500,7 +500,7 @@ where
         }
         let upload_ids = uploads
             .iter()
-            .map(SealedTraceUpload::upload_id)
+            .map(SentinelAttestedTraceUpload::upload_id)
             .collect::<BTreeSet<_>>();
         if upload_ids.len() != uploads.len() {
             return Err(TraceProducerError::DuplicateUploadAttempt);
@@ -510,7 +510,7 @@ where
         }
         let event_ids = uploads
             .iter()
-            .flat_map(SealedTraceUpload::event_ids)
+            .flat_map(SentinelAttestedTraceUpload::event_ids)
             .collect::<BTreeSet<_>>();
         if event_ids.len() != 1 {
             return Err(TraceProducerError::MixedEventAttempts);
@@ -716,7 +716,7 @@ mod tests {
             &self,
             run: &TraceRunOpen,
             sequence: u64,
-            uploads: &[SealedTraceUpload],
+            uploads: &[SentinelAttestedTraceUpload],
         ) -> Result<(), TraceProducerError> {
             self.calls.lock().unwrap().push(SinkCall::UploadBatch(
                 SinkOwner::from(run),
@@ -862,7 +862,7 @@ mod tests {
             &self,
             run: &TraceRunOpen,
             sequence: u64,
-            uploads: &[SealedTraceUpload],
+            uploads: &[SentinelAttestedTraceUpload],
         ) -> Result<(), TraceProducerError> {
             self.calls.lock().unwrap().push(SinkCall::UploadBatch(
                 SinkOwner::from(run),
@@ -932,12 +932,14 @@ mod tests {
             &self,
             run: &TraceRunOpen,
             sequence: u64,
-            uploads: &[SealedTraceUpload],
+            uploads: &[SentinelAttestedTraceUpload],
         ) -> Result<(), TraceProducerError> {
-            self.attempted_upload_ids
-                .lock()
-                .unwrap()
-                .push(uploads.iter().map(SealedTraceUpload::upload_id).collect());
+            self.attempted_upload_ids.lock().unwrap().push(
+                uploads
+                    .iter()
+                    .map(SentinelAttestedTraceUpload::upload_id)
+                    .collect(),
+            );
             if self
                 .fail_next
                 .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -1009,10 +1011,14 @@ mod tests {
         }
     }
 
-    fn sealed_upload(run_id: TraceId, sequence: u64) -> SealedTraceUpload {
+    fn attest(upload: SealedTraceUpload) -> SentinelAttestedTraceUpload {
+        SentinelAttestedTraceUpload::from_sealed_upload(upload).expect("sentinel-attested upload")
+    }
+
+    fn sealed_upload(run_id: TraceId, sequence: u64) -> SentinelAttestedTraceUpload {
         let event_id = TraceId::try_new_v7().expect("event UUIDv7");
         let mut reader = Cursor::new(b"safe trace output\n".to_vec());
-        TraceOutputSession::from_reader(
+        let upload = TraceOutputSession::from_reader(
             event_id,
             TraceOutputStreamV2::Stdout,
             &mut reader,
@@ -1026,10 +1032,11 @@ mod tests {
         .expect("bounded sealed upload")
         .into_iter()
         .next()
-        .expect("one sealed upload")
+        .expect("one sealed upload");
+        attest(upload)
     }
 
-    fn sealed_upload_attempts_for(event_id: TraceId) -> Vec<SealedTraceUpload> {
+    fn sealed_upload_attempts_for(event_id: TraceId) -> Vec<SentinelAttestedTraceUpload> {
         let line = format!(
             "{}\n",
             "\t".repeat(nwflash_domain::TRACE_OUTPUT_MAX_BYTES - 1)
@@ -1045,20 +1052,20 @@ mod tests {
         .into_upload_attempts()
         .expect("bounded sealed uploads");
         assert!(attempts.len() > 1);
-        attempts
+        attempts.into_iter().map(attest).collect()
     }
 
     fn sealed_event_upload_attempts(
         run_id: TraceId,
         sequence: u64,
         event_id: TraceId,
-    ) -> Vec<SealedTraceUpload> {
+    ) -> Vec<SentinelAttestedTraceUpload> {
         let line = format!(
             "{}\n",
             "\t".repeat(nwflash_domain::TRACE_OUTPUT_MAX_BYTES - 1)
         );
         let mut reader = Cursor::new(line.repeat(40).into_bytes());
-        TraceOutputSession::from_reader(
+        let attempts = TraceOutputSession::from_reader(
             event_id,
             TraceOutputStreamV2::Stdout,
             &mut reader,
@@ -1069,7 +1076,8 @@ mod tests {
             event_text(event_id, run_id, sequence),
             &ExactSecretSet::empty(),
         )
-        .expect("bounded sealed event uploads")
+        .expect("bounded sealed event uploads");
+        attempts.into_iter().map(attest).collect()
     }
 
     fn manifest_only_upload(
@@ -1077,7 +1085,7 @@ mod tests {
         event_id: TraceId,
         run_id: TraceId,
         sequence: u64,
-    ) -> SealedTraceUpload {
+    ) -> SentinelAttestedTraceUpload {
         let event = RedactedTraceEvent::try_new(
             event_text(event_id, run_id, sequence),
             &ExactSecretSet::empty(),
@@ -1085,11 +1093,13 @@ mod tests {
             None,
         )
         .expect("redacted event manifest");
-        SealedTraceUpload::new(upload_id, Vec::new(), vec![event])
-            .expect("bounded manifest-only upload")
+        attest(
+            SealedTraceUpload::new(upload_id, Vec::new(), vec![event])
+                .expect("bounded manifest-only upload"),
+        )
     }
 
-    fn run_only_upload(upload_id: TraceId, run_id: TraceId) -> SealedTraceUpload {
+    fn run_only_upload(upload_id: TraceId, run_id: TraceId) -> SentinelAttestedTraceUpload {
         let run = RedactedTraceRun::try_new(
             TraceRunText {
                 run_id,
@@ -1113,7 +1123,10 @@ mod tests {
             &ExactSecretSet::empty(),
         )
         .expect("redacted run metadata");
-        SealedTraceUpload::new(upload_id, vec![run], Vec::new()).expect("bounded run-only upload")
+        attest(
+            SealedTraceUpload::new(upload_id, vec![run], Vec::new())
+                .expect("bounded run-only upload"),
+        )
     }
 
     #[tokio::test]
@@ -1654,7 +1667,7 @@ mod tests {
         );
         let upload_ids = attempts
             .iter()
-            .map(SealedTraceUpload::upload_id)
+            .map(SentinelAttestedTraceUpload::upload_id)
             .collect::<Vec<_>>();
         assert!(matches!(
             run.append_upload_attempts(1, &attempts),
@@ -1675,7 +1688,7 @@ mod tests {
         assert_eq!(
             attempts
                 .iter()
-                .map(SealedTraceUpload::upload_id)
+                .map(SentinelAttestedTraceUpload::upload_id)
                 .collect::<Vec<_>>(),
             upload_ids
         );
