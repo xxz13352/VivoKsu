@@ -16,7 +16,7 @@ const RETRY_BASE_MS: u64 = 1_000;
 #[allow(dead_code, reason = "Wave 3 concrete emitter integration seam")]
 const RETRY_MAX_MS: u64 = 5 * 60 * 1_000;
 #[allow(dead_code, reason = "Wave 3 concrete emitter integration seam")]
-const SERVER_UNACKED_DELAY_MS: u64 = 1_000;
+pub(crate) const SERVER_UNACKED_DELAY_MS: u64 = 1_000;
 #[allow(dead_code, reason = "Wave 3 concrete emitter integration seam")]
 const MAX_INJECTED_JITTER_MS: u64 = 1_000;
 
@@ -87,7 +87,7 @@ impl ValidatedTraceAck {
 }
 
 #[allow(dead_code, reason = "Wave 3 concrete emitter integration seam")]
-fn validate_success_ack(
+pub(crate) fn validate_success_ack(
     dispatched: &[TraceItemKey],
     ack: &TraceUploadAck,
 ) -> Result<ValidatedTraceAck, AckValidationError> {
@@ -463,30 +463,27 @@ impl TraceUploader {
             return self.manual_intervention(store, handle, 200);
         };
 
-        let accepted = store.apply_accepted_cas(handle, validated.accepted())?;
-        let remediation = if validated.credential_rejected().is_empty() {
-            Vec::new()
-        } else {
-            store.mark_needs_remediation(handle, validated.credential_rejected())?
-        };
-        store.retire_attempt_and_mark_reseal_cas(
+        let transition = store.apply_validated_ack_cas(
             handle,
+            validated.accepted(),
+            validated.rejected(),
+            validated.unacknowledged(),
+            validated.credential_rejected(),
             now_ms.saturating_add(SERVER_UNACKED_DELAY_MS),
-            ResealReason::ServerUnacked,
         )?;
 
-        if !remediation.is_empty() {
+        if !transition.remediation().is_empty() {
             return Ok(UploadTickOutcome::RemediationRequired(Box::new(
                 RemediationInstruction {
                     inflight_handle: handle.clone(),
                     owner: handle.owner().clone(),
-                    items: remediation,
+                    items: transition.remediation().to_vec(),
                 },
             )));
         }
         Ok(UploadTickOutcome::Uploaded {
-            accepted: accepted.matched_items(),
-            stale: accepted.stale_items(),
+            accepted: transition.accepted().matched_items(),
+            stale: transition.accepted().stale_items(),
         })
     }
 
@@ -516,17 +513,15 @@ impl TraceUploader {
         let Ok(validated) = validate_success_ack(&dispatched, &details_ack) else {
             return self.manual_intervention(store, handle, 422);
         };
-        let remediation = if validated.credential_rejected().is_empty() {
-            Vec::new()
-        } else {
-            store.mark_needs_remediation(handle, validated.credential_rejected())?
-        };
-        store.retire_attempt_and_mark_reseal_cas(
+        let transition = store.apply_validated_ack_cas(
             handle,
+            validated.accepted(),
+            validated.rejected(),
+            validated.unacknowledged(),
+            validated.credential_rejected(),
             now_ms.saturating_add(SERVER_UNACKED_DELAY_MS),
-            ResealReason::ServerUnacked,
         )?;
-        if remediation.is_empty() {
+        if transition.remediation().is_empty() {
             Ok(UploadTickOutcome::Backoff {
                 retry_at_ms: now_ms.saturating_add(SERVER_UNACKED_DELAY_MS),
             })
@@ -535,7 +530,7 @@ impl TraceUploader {
                 RemediationInstruction {
                     inflight_handle: handle.clone(),
                     owner: handle.owner().clone(),
-                    items: remediation,
+                    items: transition.remediation().to_vec(),
                 },
             )))
         }
