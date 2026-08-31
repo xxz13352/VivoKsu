@@ -627,6 +627,36 @@ async fn cancel_current_revokes_dispatch_before_the_body_observes_cancellation()
 }
 
 #[tokio::test]
+async fn operation_self_cancellation_revokes_dispatch_authority() {
+    let coordinator = OperationCoordinator::default();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let dispatch_count_for_run = dispatch_count.clone();
+
+    let result = coordinator
+        .run_async(
+            OperationKind::Flashing,
+            "self-cancel-dispatch-authority",
+            move |context, cancellation| async move {
+                cancellation.cancel();
+                let dispatch = context.with_running_dispatch(|| {
+                    dispatch_count_for_run.fetch_add(1, Ordering::SeqCst);
+                });
+                assert!(matches!(
+                    dispatch,
+                    Err(OperationCoordinatorError::StaleDispatchAuthority)
+                ));
+                Err(DomainError::UserCancelled(
+                    "test self cancellation".to_string(),
+                ))
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(OperationCoordinatorError::Canceled)));
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn exit_pending_during_permission_wait_rechecks_before_operation_body() {
     let gate = BlockingPermissionGate::default();
     let authorization_entered = gate.entered.notified();
