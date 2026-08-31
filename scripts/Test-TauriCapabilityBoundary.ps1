@@ -41,7 +41,12 @@ function Assert-WdioGraph {
 $productionTarget = Join-Path ([IO.Path]::GetTempPath()) ('nwflash-capability-prod-' + [Guid]::NewGuid().ToString('N'))
 $e2eTarget = Join-Path ([IO.Path]::GetTempPath()) ('nwflash-capability-e2e-' + [Guid]::NewGuid().ToString('N'))
 $priorTarget = $env:CARGO_TARGET_DIR
+$priorBuildId = $env:NWFLASH_BUILD_ID
 try {
+    # Release probes distinguish an unavailable VMProtect runtime (43) from a
+    # missing compiled build identity (46). Supply a deterministic test build
+    # ID so this boundary exercises the intended unavailable-runtime branch.
+    $env:NWFLASH_BUILD_ID = 'capability-boundary:1'
     Assert-WdioGraph
     Assert-WdioGraph -E2E
     Invoke-Checked -Description 'Frontend production build' -Command { npm --prefix $desktop run build }
@@ -96,6 +101,7 @@ try {
 }
 finally {
     if ($null -eq $priorTarget) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue } else { $env:CARGO_TARGET_DIR = $priorTarget }
+    if ($null -eq $priorBuildId) { Remove-Item Env:NWFLASH_BUILD_ID -ErrorAction SilentlyContinue } else { $env:NWFLASH_BUILD_ID = $priorBuildId }
     foreach ($entry in @(
         @{ Root = $productionTarget; Prefix = 'nwflash-capability-prod-' },
         @{ Root = $e2eTarget; Prefix = 'nwflash-capability-e2e-' }
