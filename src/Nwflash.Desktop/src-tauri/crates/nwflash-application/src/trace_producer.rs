@@ -7,7 +7,7 @@ use nwflash_domain::{
     OperationKind, TraceId, TraceOutputStreamV2, TRACE_RUN_MAX_EVENT_STORAGE_BYTES,
     TRACE_UPLOAD_MAX_OUTPUT_CHUNKS,
 };
-use nwflash_protection::{SealedTraceUpload, SentinelAttestedTraceUpload};
+use nwflash_protection::SentinelAttestedTraceUpload;
 
 const MAX_TRACE_EVENT_OUTPUT_CHUNKS: usize = TRACE_UPLOAD_MAX_OUTPUT_CHUNKS * 2;
 const MAX_TRACE_EVENT_UPLOAD_ATTEMPTS: usize = MAX_TRACE_EVENT_OUTPUT_CHUNKS + 1;
@@ -607,8 +607,8 @@ mod tests {
         TraceEventKindV2, TraceEventStatusV2, TraceOutcomeV2, TraceOutputStreamV2,
     };
     use nwflash_protection::{
-        ExactSecretSet, RedactedTraceEvent, RedactedTraceRun, TraceEventText, TraceOutputSession,
-        TraceRunText,
+        ExactSecretSet, RedactedTraceEvent, RedactedTraceRun, SealedTraceUpload, TraceEventText,
+        TraceOutputSession, TraceRunText,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq)]
