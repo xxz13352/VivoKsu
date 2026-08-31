@@ -957,6 +957,141 @@ struct SealedChunkWire<'a> {
 ///     Vec::new(),
 /// );
 /// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SealedTraceMetadataEntity {
+    Run,
+    Event,
+    OutputChunk,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SealedTraceMetadataKey {
+    entity: SealedTraceMetadataEntity,
+    item_id: TraceId,
+}
+
+impl SealedTraceMetadataKey {
+    pub const fn entity(&self) -> SealedTraceMetadataEntity {
+        self.entity
+    }
+
+    pub const fn item_id(&self) -> TraceId {
+        self.item_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedTraceMetadataItem {
+    key: SealedTraceMetadataKey,
+    trace_id: TraceId,
+    parent: Option<SealedTraceMetadataKey>,
+    created_at_ms: u64,
+}
+
+impl SealedTraceMetadataItem {
+    pub fn key(&self) -> &SealedTraceMetadataKey {
+        &self.key
+    }
+
+    pub const fn entity(&self) -> SealedTraceMetadataEntity {
+        self.key.entity
+    }
+
+    pub const fn item_id(&self) -> TraceId {
+        self.key.item_id
+    }
+
+    pub const fn trace_id(&self) -> TraceId {
+        self.trace_id
+    }
+
+    pub fn parent(&self) -> Option<&SealedTraceMetadataKey> {
+        self.parent.as_ref()
+    }
+
+    pub const fn created_at_ms(&self) -> u64 {
+        self.created_at_ms
+    }
+}
+
+/// Opaque, text-free metadata derived inside protection from the exact sealed
+/// wire body. There is deliberately no public constructor.
+///
+/// ```compile_fail
+/// use nwflash_protection::SealedTraceMetadataView;
+///
+/// // External callers cannot forge a metadata proof because every field is private.
+/// let _ = SealedTraceMetadataView {
+///     upload_id: todo!(),
+///     body_sha256: [0; 32],
+///     body_len: 0,
+///     run_count: 0,
+///     event_count: 0,
+///     chunk_count: 0,
+///     items: vec![],
+/// };
+/// ```
+pub struct SealedTraceMetadataView {
+    upload_id: TraceId,
+    body_sha256: [u8; 32],
+    body_len: usize,
+    run_count: usize,
+    event_count: usize,
+    chunk_count: usize,
+    items: Vec<SealedTraceMetadataItem>,
+}
+
+impl SealedTraceMetadataView {
+    pub const fn upload_id(&self) -> TraceId {
+        self.upload_id
+    }
+
+    pub const fn body_sha256(&self) -> &[u8; 32] {
+        &self.body_sha256
+    }
+
+    pub const fn body_len(&self) -> usize {
+        self.body_len
+    }
+
+    pub const fn run_count(&self) -> usize {
+        self.run_count
+    }
+
+    pub const fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    pub const fn chunk_count(&self) -> usize {
+        self.chunk_count
+    }
+
+    pub fn items(&self) -> &[SealedTraceMetadataItem] {
+        &self.items
+    }
+}
+
+impl fmt::Debug for SealedTraceMetadataView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SealedTraceMetadataView")
+            .field("upload_id", &self.upload_id)
+            .field("body_sha256", &"[opaque]")
+            .field("body_len", &self.body_len)
+            .field("run_count", &self.run_count)
+            .field("event_count", &self.event_count)
+            .field("chunk_count", &self.chunk_count)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SealedChunkTraceContext {
+    event_id: TraceId,
+    run_id: TraceId,
+    created_at_ms: u64,
+}
+
 pub struct SealedTraceUpload {
     upload_id: TraceId,
     runs: Vec<RedactedTraceRun>,
@@ -964,6 +1099,7 @@ pub struct SealedTraceUpload {
     output_chunks: Vec<RedactedOutputChunk>,
     credential_sentinel_session_identity: Option<[u8; 32]>,
     credential_sentinel_receipt: Option<TraceCredentialSentinelReceipt>,
+    chunk_contexts: Vec<Option<SealedChunkTraceContext>>,
 }
 
 /// Non-text identity metadata used to bind a sealed event manifest to the
@@ -994,7 +1130,17 @@ impl SealedTraceUpload {
             return Err(TraceRedactionError::TooManyOutputChunks);
         }
         let mut output_chunks = Vec::with_capacity(output_count);
+        let mut chunk_contexts = Vec::with_capacity(output_count);
         for event in &mut events {
+            let context = SealedChunkTraceContext {
+                event_id: event.event_id,
+                run_id: event.run_id,
+                created_at_ms: event.started_at_ms,
+            };
+            chunk_contexts.extend(std::iter::repeat_n(
+                Some(context),
+                event.output_chunks.len(),
+            ));
             output_chunks.append(&mut event.output_chunks);
         }
         if runs.is_empty() && events.is_empty() && output_chunks.is_empty() {
@@ -1007,6 +1153,7 @@ impl SealedTraceUpload {
             output_chunks,
             credential_sentinel_session_identity: None,
             credential_sentinel_receipt: None,
+            chunk_contexts,
         })
     }
 
@@ -1025,6 +1172,14 @@ impl SealedTraceUpload {
         upload_id: TraceId,
         output_chunks: Vec<RedactedOutputChunk>,
     ) -> Result<Self, TraceRedactionError> {
+        Self::from_output_chunks_with_context(upload_id, output_chunks, None)
+    }
+
+    fn from_output_chunks_with_context(
+        upload_id: TraceId,
+        output_chunks: Vec<RedactedOutputChunk>,
+        context: Option<SealedChunkTraceContext>,
+    ) -> Result<Self, TraceRedactionError> {
         if output_chunks.is_empty() {
             return Err(TraceRedactionError::EmptyUpload);
         }
@@ -1035,6 +1190,7 @@ impl SealedTraceUpload {
             upload_id,
             runs: Vec::new(),
             events: Vec::new(),
+            chunk_contexts: vec![context; output_chunks.len()],
             output_chunks,
             credential_sentinel_session_identity: None,
             credential_sentinel_receipt: None,
@@ -1044,6 +1200,11 @@ impl SealedTraceUpload {
     fn from_event_attempts(
         mut event: RedactedTraceEvent,
     ) -> Result<Vec<Self>, TraceRedactionError> {
+        let context = SealedChunkTraceContext {
+            event_id: event.event_id,
+            run_id: event.run_id,
+            created_at_ms: event.started_at_ms,
+        };
         let chunks = std::mem::take(&mut event.output_chunks);
         let mut groups = partition_output_chunks(chunks, Some(&event))?.into_iter();
         event.output_chunks = groups.next().unwrap_or_default();
@@ -1056,7 +1217,7 @@ impl SealedTraceUpload {
         let mut attempts = vec![first];
         for chunks in groups {
             let upload_id = TraceId::try_new_v7().map_err(|_| TraceRedactionError::IdGeneration)?;
-            let attempt = Self::from_output_chunks(upload_id, chunks)?;
+            let attempt = Self::from_output_chunks_with_context(upload_id, chunks, Some(context))?;
             attempts.push(attempt);
         }
         Ok(attempts)
@@ -1107,6 +1268,65 @@ impl SealedTraceUpload {
             .collect()
     }
 
+    fn metadata_view(&self) -> Result<SealedTraceMetadataView, TraceRedactionError> {
+        if self.chunk_contexts.len() != self.output_chunks.len()
+            || self.chunk_contexts.iter().any(Option::is_none)
+        {
+            return Err(TraceRedactionError::MissingTraceContext);
+        }
+        let body = self.to_json_body()?;
+        let mut items =
+            Vec::with_capacity(self.runs.len() + self.events.len() + self.output_chunks.len());
+        items.extend(self.runs.iter().map(|run| SealedTraceMetadataItem {
+            key: SealedTraceMetadataKey {
+                entity: SealedTraceMetadataEntity::Run,
+                item_id: run.run_id,
+            },
+            trace_id: run.run_id,
+            parent: None,
+            created_at_ms: run.started_at_ms,
+        }));
+        items.extend(self.events.iter().map(|event| SealedTraceMetadataItem {
+            key: SealedTraceMetadataKey {
+                entity: SealedTraceMetadataEntity::Event,
+                item_id: event.event_id,
+            },
+            trace_id: event.run_id,
+            parent: Some(SealedTraceMetadataKey {
+                entity: SealedTraceMetadataEntity::Run,
+                item_id: event.run_id,
+            }),
+            created_at_ms: event.started_at_ms,
+        }));
+        for (chunk, context) in self.output_chunks.iter().zip(&self.chunk_contexts) {
+            let context = context.ok_or(TraceRedactionError::MissingTraceContext)?;
+            if context.event_id != chunk.event_id {
+                return Err(TraceRedactionError::MissingTraceContext);
+            }
+            items.push(SealedTraceMetadataItem {
+                key: SealedTraceMetadataKey {
+                    entity: SealedTraceMetadataEntity::OutputChunk,
+                    item_id: chunk.chunk_id,
+                },
+                trace_id: context.run_id,
+                parent: Some(SealedTraceMetadataKey {
+                    entity: SealedTraceMetadataEntity::Event,
+                    item_id: context.event_id,
+                }),
+                created_at_ms: context.created_at_ms,
+            });
+        }
+        Ok(SealedTraceMetadataView {
+            upload_id: self.upload_id,
+            body_sha256: Sha256::digest(&body).into(),
+            body_len: body.len(),
+            run_count: self.runs.len(),
+            event_count: self.events.len(),
+            chunk_count: self.output_chunks.len(),
+            items,
+        })
+    }
+
     pub fn to_json_body(&self) -> Result<Zeroizing<Vec<u8>>, TraceRedactionError> {
         let body = self.unattested_json_body()?;
         self.verify_credential_sentinel_receipt(&body)?;
@@ -1150,6 +1370,7 @@ impl SealedTraceUpload {
             || receipt.upload_id != self.upload_id
             || receipt.body_len != body_len
             || !bool::from(receipt.body_sha256.ct_eq(&body_sha256))
+            || receipt.high_risk
         {
             return Err(TraceRedactionError::CredentialSentinelInvalid);
         }
@@ -1212,6 +1433,10 @@ impl SentinelAttestedTraceUpload {
 
     pub fn output_chunks(&self) -> &[RedactedOutputChunk] {
         self.upload.output_chunks()
+    }
+
+    pub fn metadata_view(&self) -> Result<SealedTraceMetadataView, TraceRedactionError> {
+        self.upload.metadata_view()
     }
 
     pub fn to_json_body(&self) -> Result<Zeroizing<Vec<u8>>, TraceRedactionError> {
@@ -1917,6 +2142,7 @@ pub enum TraceRedactionError {
     SourceRead,
     HighRisk,
     Contract,
+    MissingTraceContext,
 }
 
 /// Redacts a complete structured command before it can enter the trace spool.
@@ -2851,8 +3077,6 @@ fn is_bearer_byte(byte: u8) -> bool {
 mod tests {
     use std::mem;
 
-    use zeroize::Zeroize as _;
-
     use super::*;
 
     struct BudgetedInfiniteReader {
@@ -3200,6 +3424,37 @@ mod tests {
         ));
         assert!(matches!(
             second.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
+    }
+
+    #[test]
+    fn high_risk_receipt_cannot_become_an_attested_upload() {
+        let mut reader = std::io::Cursor::new(b"safe output".as_slice());
+        let mut upload = TraceOutputSession::from_reader(
+            TraceId::try_new_v7().expect("event id"),
+            TraceOutputStreamV2::Stdout,
+            &mut reader,
+            &ExactSecretSet::empty(),
+        )
+        .expect("bounded logical stream")
+        .into_upload_attempts()
+        .expect("sealed upload")
+        .into_iter()
+        .next()
+        .expect("one upload");
+        upload
+            .credential_sentinel_receipt
+            .as_mut()
+            .expect("receipt")
+            .high_risk = true;
+
+        assert!(matches!(
+            upload.to_json_body(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
+        assert!(matches!(
+            SentinelAttestedTraceUpload::try_from(upload),
             Err(TraceRedactionError::CredentialSentinelInvalid)
         ));
     }
@@ -3892,6 +4147,90 @@ mod tests {
         assert!(matches!(
             upload.to_json_body(),
             Err(TraceRedactionError::CredentialSentinelRequired)
+        ));
+    }
+
+    #[test]
+    fn metadata_view_keeps_event_run_context_across_later_chunk_attempts() {
+        let run_id = TraceId::try_new_v7().expect("UUIDv7");
+        let event_id = TraceId::try_new_v7().expect("UUIDv7");
+        let safe_line = b"safe output line\n";
+        let large_output = std::iter::repeat_n(safe_line.as_slice(), 90_000)
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut output = io::Cursor::new(large_output);
+        let attempts = TraceOutputSession::from_reader(
+            event_id,
+            TraceOutputStreamV2::Stdout,
+            &mut output,
+            &ExactSecretSet::empty(),
+        )
+        .expect("complete logical stream")
+        .into_event_upload_attempts(
+            TraceEventText {
+                event_id,
+                run_id,
+                sequence: 1,
+                kind: TraceEventKindV2::Command,
+                step_name: "flash",
+                partition_name: None,
+                status: TraceEventStatusV2::Success,
+                started_at_ms: 17,
+                ended_at_ms: Some(18),
+                duration_ms: Some(1),
+                command: None,
+                exit_code: Some(0),
+                verification: None,
+                device_state: None,
+                retry_safe: Some(true),
+                remedies: &[],
+                error_class: None,
+                error_code: None,
+                error_message: None,
+            },
+            &ExactSecretSet::empty(),
+        )
+        .expect("bounded attempts");
+        assert!(attempts.len() >= 2, "fixture must create a later attempt");
+
+        let later = attempts.last().expect("later chunk attempt");
+        let view = later.metadata_view().expect("sealed metadata view");
+        assert_eq!(view.run_count(), 0);
+        assert_eq!(view.event_count(), 0);
+        assert!(view.chunk_count() > 0);
+        assert!(view.body_len() <= TRACE_UPLOAD_MAX_BODY_BYTES);
+        assert_ne!(view.body_sha256(), &[0; 32]);
+        for item in view.items() {
+            assert_eq!(item.entity(), SealedTraceMetadataEntity::OutputChunk);
+            assert_eq!(item.trace_id(), run_id);
+            assert_eq!(item.created_at_ms(), 17);
+            let parent = item.parent().expect("chunk parent event");
+            assert_eq!(parent.entity(), SealedTraceMetadataEntity::Event);
+            assert_eq!(parent.item_id(), event_id);
+        }
+    }
+
+    #[test]
+    fn unscoped_output_attempt_cannot_claim_durable_trace_metadata() {
+        let event_id = TraceId::try_new_v7().expect("UUIDv7");
+        let mut output = io::Cursor::new(b"safe output\n");
+        let attempt = TraceOutputSession::from_reader(
+            event_id,
+            TraceOutputStreamV2::Stdout,
+            &mut output,
+            &ExactSecretSet::empty(),
+        )
+        .expect("complete stream")
+        .into_upload_attempts()
+        .expect("bounded upload")
+        .into_iter()
+        .next()
+        .expect("one attempt");
+
+        assert!(matches!(
+            attempt.metadata_view(),
+            Err(TraceRedactionError::MissingTraceContext)
         ));
     }
 }

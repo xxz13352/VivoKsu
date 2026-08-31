@@ -19,6 +19,7 @@ pub mod root_patch;
 pub mod root_resources;
 pub mod scrcpy_provisioner;
 mod session_security;
+mod trace_facade;
 pub mod trace_http;
 pub mod trace_spool;
 pub mod trace_uploader;

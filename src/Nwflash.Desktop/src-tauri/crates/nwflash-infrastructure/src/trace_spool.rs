@@ -74,7 +74,6 @@ impl std::fmt::Debug for TraceOwnerGeneration {
 #[derive(Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct ProtectionSealedUploadId([u8; 32]);
 impl ProtectionSealedUploadId {
-    #[cfg(test)]
     pub(crate) fn from_digest(value: [u8; 32]) -> Self {
         Self(value)
     }
@@ -88,7 +87,6 @@ impl std::fmt::Debug for ProtectionSealedUploadId {
 #[derive(Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct ProtectionClientVersionHash([u8; 32]);
 impl ProtectionClientVersionHash {
-    #[cfg(test)]
     pub(crate) fn from_digest(value: [u8; 32]) -> Self {
         Self(value)
     }
@@ -261,6 +259,22 @@ impl CasMutationResult {
     }
     pub fn stale_items(&self) -> usize {
         self.stale_items
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedAckMutationResult {
+    accepted: CasMutationResult,
+    remediation: Vec<TraceItemKey>,
+}
+
+impl ValidatedAckMutationResult {
+    pub(crate) fn accepted(&self) -> &CasMutationResult {
+        &self.accepted
+    }
+
+    pub(crate) fn remediation(&self) -> &[TraceItemKey] {
+        &self.remediation
     }
 }
 
@@ -1010,6 +1024,17 @@ impl TraceSpoolStore {
         now_ms: u64,
     ) -> Result<Vec<DueSealedAttempt>, TraceSpoolError> {
         self.expire(owner, now_ms)?;
+        self.peek_due_attempts(owner, now_ms)
+    }
+
+    /// Returns the due metadata snapshot without expiry, recovery, or any
+    /// other state transition. Callers must validate the concrete protection
+    /// seal against this snapshot before claiming it.
+    pub(crate) fn peek_due_attempts(
+        &self,
+        owner: &TraceOwnerGeneration,
+        now_ms: u64,
+    ) -> Result<Vec<DueSealedAttempt>, TraceSpoolError> {
         let _guard = self.lock()?;
         let disk = self.load(owner)?;
         if disk.owner_pause.is_some() {
@@ -1204,6 +1229,81 @@ impl TraceSpoolStore {
         Ok(CasMutationResult {
             matched_items: matched,
             stale_items: stale,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_validated_ack_cas(
+        &self,
+        handle: &InflightAttemptHandle,
+        accepted: &[TraceItemKey],
+        rejected: &[TraceItemKey],
+        unacknowledged: &[TraceItemKey],
+        credential_rejected: &[TraceItemKey],
+        next_attempt_at_ms: u64,
+    ) -> Result<ValidatedAckMutationResult, TraceSpoolError> {
+        validate_ack_partition(
+            handle,
+            accepted,
+            rejected,
+            unacknowledged,
+            credential_rejected,
+        )?;
+        let _guard = self.lock()?;
+        let mut disk = self.load(handle.owner())?;
+        validate_handle(&disk, handle, |state| {
+            matches!(state, AttemptState::Inflight)
+        })?;
+
+        let mut matched = 0;
+        let mut stale = 0;
+        for key in accepted {
+            let snapshot = handle.items().iter().find(|item| item.key == *key).unwrap();
+            if let Some(index) = disk.items.iter().position(|current| {
+                current.item.key == *key
+                    && current.item.revision == snapshot.revision
+                    && matches!(&current.delivery, ItemDelivery::Sealed(id) if id == handle.attempt_id())
+            }) {
+                disk.items.remove(index);
+                matched += 1;
+            } else {
+                stale += 1;
+            }
+        }
+
+        let credential_set = credential_rejected.iter().cloned().collect::<HashSet<_>>();
+        let mut remediation = Vec::new();
+        for key in rejected.iter().chain(unacknowledged) {
+            let snapshot = handle.items().iter().find(|item| item.key == *key).unwrap();
+            let Some(current) = disk.items.iter_mut().find(|current| {
+                current.item.key == *key
+                    && current.item.revision == snapshot.revision
+                    && matches!(&current.delivery, ItemDelivery::Sealed(id) if id == handle.attempt_id())
+            }) else {
+                continue;
+            };
+            if credential_set.contains(key) {
+                remediation.push(key.clone());
+            } else {
+                current.delivery = ItemDelivery::NeedsSeal;
+                current.next_attempt_at_ms = next_attempt_at_ms;
+            }
+        }
+        validate_handle_mut(&mut disk, handle, |state| {
+            matches!(state, AttemptState::Inflight)
+        })?
+        .state = if remediation.is_empty() {
+            AttemptState::Retired
+        } else {
+            AttemptState::NeedsRemediation(remediation.clone())
+        };
+        self.persist(&disk)?;
+        Ok(ValidatedAckMutationResult {
+            accepted: CasMutationResult {
+                matched_items: matched,
+                stale_items: stale,
+            },
+            remediation,
         })
     }
 
@@ -2085,6 +2185,48 @@ fn reconcile_blocked_attempts(disk: &mut DiskManifest, gates: &VersionGates) -> 
 fn as_set(keys: &[TraceItemKey]) -> HashSet<TraceItemKey> {
     keys.iter().cloned().collect()
 }
+
+fn validate_ack_partition(
+    handle: &InflightAttemptHandle,
+    accepted: &[TraceItemKey],
+    rejected: &[TraceItemKey],
+    unacknowledged: &[TraceItemKey],
+    credential_rejected: &[TraceItemKey],
+) -> Result<(), TraceSpoolError> {
+    let accepted_set = as_set(accepted);
+    let rejected_set = as_set(rejected);
+    let unacknowledged_set = as_set(unacknowledged);
+    let credential_set = as_set(credential_rejected);
+    let dispatched = handle
+        .items()
+        .iter()
+        .map(|item| item.key.clone())
+        .collect::<HashSet<_>>();
+    let union = accepted_set
+        .union(&rejected_set)
+        .cloned()
+        .collect::<HashSet<_>>()
+        .union(&unacknowledged_set)
+        .cloned()
+        .collect::<HashSet<_>>();
+    if accepted_set.len() != accepted.len()
+        || rejected_set.len() != rejected.len()
+        || unacknowledged_set.len() != unacknowledged.len()
+        || credential_set.len() != credential_rejected.len()
+        || !accepted_set.is_disjoint(&rejected_set)
+        || !accepted_set.is_disjoint(&unacknowledged_set)
+        || !rejected_set.is_disjoint(&unacknowledged_set)
+        || union != dispatched
+        || !credential_set.is_subset(&rejected_set)
+        || credential_set
+            .iter()
+            .any(|key| key.entity != TraceSpoolEntity::OutputChunk)
+    {
+        return Err(TraceSpoolError::InvalidHandle);
+    }
+    Ok(())
+}
+
 fn validate_handle_keys(
     handle: &InflightAttemptHandle,
     keys: &[TraceItemKey],
