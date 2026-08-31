@@ -1231,6 +1231,17 @@ impl SealedTraceUpload {
         &self.output_chunks
     }
 
+    fn redaction_summary(&self) -> RedactionSummary {
+        let mut summary = RedactionSummary::empty();
+        for run in &self.runs {
+            summary.merge(&run.redaction_summary());
+        }
+        for event in &self.events {
+            summary.merge(&event.redaction_summary);
+        }
+        summary
+    }
+
     /// Event batches must never smuggle run-level records through the event
     /// sequencing path. The count exposes no redacted text.
     pub const fn run_count(&self) -> usize {
@@ -1471,6 +1482,17 @@ impl TryFrom<SealedTraceUpload> for SentinelAttestedTraceUpload {
 }
 
 impl SentinelAttestedTraceUpload {
+    /// Attests a concrete upload assembled from already-redacted run/event
+    /// records. The raw upload remains private to this conversion until the
+    /// sentinel receipt is bound to its canonical body and metadata.
+    pub fn from_sealed_upload(mut upload: SealedTraceUpload) -> Result<Self, TraceRedactionError> {
+        if upload.credential_sentinel_receipt.is_none() {
+            let sentinel = TraceCredentialSentinelContext::from_upload(&upload);
+            upload.attach_credential_sentinel_receipt(&sentinel)?;
+        }
+        Self::try_from(upload)
+    }
+
     /// Redacts and seals one run revision without exposing a receiptless
     /// intermediate upload. The upload ID is always generated internally.
     pub fn from_run(
@@ -1491,6 +1513,18 @@ impl SentinelAttestedTraceUpload {
 
     pub fn output_chunks(&self) -> &[RedactedOutputChunk] {
         self.upload.output_chunks()
+    }
+
+    pub const fn run_count(&self) -> usize {
+        self.upload.run_count()
+    }
+
+    pub fn event_ids(&self) -> Vec<TraceId> {
+        self.upload.event_ids()
+    }
+
+    pub fn event_bindings(&self) -> Vec<SealedTraceEventBinding> {
+        self.upload.event_bindings()
     }
 
     pub fn metadata_view(&self) -> Result<SealedTraceMetadataView, TraceRedactionError> {
@@ -2489,6 +2523,15 @@ impl TraceCredentialSentinelContext {
         }
     }
 
+    fn from_upload(upload: &SealedTraceUpload) -> Self {
+        let summary = upload.redaction_summary();
+        Self {
+            session_identity: trace_upload_identity(upload, &summary),
+            redaction_count: summary.total(),
+            high_risk: summary.count(CredentialKind::HighRisk) > 0,
+        }
+    }
+
     fn for_upload(
         &self,
         upload: &SealedTraceUpload,
@@ -2585,6 +2628,31 @@ fn trace_run_identity(run: &RedactedTraceRun, summary: &RedactionSummary) -> [u8
     digest.update(run.started_at_ms.to_be_bytes());
     for kind in CredentialKind::ALL {
         digest.update(summary.count(kind).to_be_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn trace_upload_identity(upload: &SealedTraceUpload, summary: &RedactionSummary) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"NWFlash.TraceCredentialSentinel.Upload.v1\0");
+    digest.update(upload.upload_id.as_uuid().as_bytes());
+    for kind in CredentialKind::ALL {
+        digest.update(summary.count(kind).to_be_bytes());
+    }
+    for run in &upload.runs {
+        digest.update(run.run_id.as_uuid().as_bytes());
+    }
+    for event in &upload.events {
+        digest.update(event.event_id.as_uuid().as_bytes());
+        digest.update(event.run_id.as_uuid().as_bytes());
+        digest.update(event.sequence.to_be_bytes());
+    }
+    for chunk in &upload.output_chunks {
+        digest.update(chunk.chunk_id.as_uuid().as_bytes());
+        digest.update(chunk.event_id.as_uuid().as_bytes());
+        digest.update(chunk.chunk_index.to_be_bytes());
+        digest.update(chunk.byte_count.to_be_bytes());
+        digest.update(chunk.sha256.as_bytes());
     }
     digest.finalize().into()
 }
