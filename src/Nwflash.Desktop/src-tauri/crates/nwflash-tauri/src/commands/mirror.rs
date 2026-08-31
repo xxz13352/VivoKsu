@@ -16,6 +16,9 @@ use tokio::time::{sleep, Duration};
 
 use crate::{commands::device::DeviceRuntime, AppState};
 
+const MIRROR_START_FAILED_MESSAGE: &str =
+    "内部错误: 外部工具执行失败，请检查设备连接和所需组件后重试。";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MirrorStatusDto {
     pub is_mirroring: bool,
@@ -192,7 +195,7 @@ pub async fn start_plan(
                             if let Some(sender) =
                                 started_tx.lock().expect("mirror start signal lock").take()
                             {
-                                let _ = sender.send(Err(error.clone()));
+                                let _ = sender.send(Err(MIRROR_START_FAILED_MESSAGE.to_string()));
                             }
                             return Err(DomainError::ExternalTool(error));
                         }

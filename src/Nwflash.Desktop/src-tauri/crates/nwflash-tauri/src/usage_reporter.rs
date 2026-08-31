@@ -267,6 +267,10 @@ impl UsageLogReporter {
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "legacy closeout seam retained while the V1 reporter is retired"
+    )]
     fn disable_after_flush_attempt(&self) {
         if self.begin_closeout() {
             self.finish_closeout();
