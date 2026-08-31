@@ -1158,7 +1158,7 @@ async fn run_async_hides_sensitive_tool_diagnostics_from_callers_state_and_logs(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn run_async_throttles_progress_events_to_hundred_milliseconds() {
     let coordinator =
         OperationCoordinator::new(None, Some(PermissionGate::allow()), None, None, None);
