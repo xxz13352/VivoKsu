@@ -178,6 +178,21 @@ pub trait TraceMetadataSink: Send + Sync {
         authorization: TraceAuthorization,
         outcome: TraceTerminalOutcome,
     ) -> Result<(), TraceProducerError>;
+    /// Raw sealed uploads cannot cross the producer-to-sink capability boundary.
+    ///
+    /// ```compile_fail
+    /// use nwflash_application::{TraceMetadataSink, TraceRunOpen};
+    /// use nwflash_protection::SealedTraceUpload;
+    ///
+    /// fn raw_uploads_cannot_reach_a_sink<S: TraceMetadataSink>(
+    ///     sink: &S,
+    ///     run: &TraceRunOpen,
+    ///     uploads: &[SealedTraceUpload],
+    /// ) {
+    ///     sink.append_upload_attempts(run, 1, uploads).unwrap();
+    /// }
+    /// ```
+    ///
     /// Atomically records the ordered attempts for one logical event sequence.
     /// Implementations must leave no successful attempt side effects when this
     /// method returns an error, so the producer can keep the reservation open.
