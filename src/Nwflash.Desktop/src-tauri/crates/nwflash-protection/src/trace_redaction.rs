@@ -394,8 +394,8 @@ impl TraceOutputSession {
         input: TraceEventText<'_>,
         secrets: &ExactSecretSet,
     ) -> Result<Vec<SealedTraceUpload>, TraceRedactionError> {
-        let sentinel = TraceCredentialSentinelContext::from_session(&self);
         let event = RedactedTraceEvent::from_session(input, secrets, self)?;
+        let sentinel = TraceCredentialSentinelContext::from_event(&event);
         let attempts = SealedTraceUpload::from_event_attempts(event)?;
         attest_upload_attempts(attempts, &sentinel)
     }
@@ -1268,13 +1268,12 @@ impl SealedTraceUpload {
             .collect()
     }
 
-    fn metadata_view(&self) -> Result<SealedTraceMetadataView, TraceRedactionError> {
+    fn metadata_items(&self) -> Result<Vec<SealedTraceMetadataItem>, TraceRedactionError> {
         if self.chunk_contexts.len() != self.output_chunks.len()
             || self.chunk_contexts.iter().any(Option::is_none)
         {
             return Err(TraceRedactionError::MissingTraceContext);
         }
-        let body = self.to_json_body()?;
         let mut items =
             Vec::with_capacity(self.runs.len() + self.events.len() + self.output_chunks.len());
         items.extend(self.runs.iter().map(|run| SealedTraceMetadataItem {
@@ -1316,6 +1315,49 @@ impl SealedTraceUpload {
                 created_at_ms: context.created_at_ms,
             });
         }
+        Ok(items)
+    }
+
+    fn metadata_binding_identity(&self) -> Result<[u8; 32], TraceRedactionError> {
+        let mut digest = Sha256::new();
+        if self.runs.is_empty()
+            && self.events.is_empty()
+            && !self.output_chunks.is_empty()
+            && self.chunk_contexts.len() == self.output_chunks.len()
+            && self.chunk_contexts.iter().all(Option::is_none)
+        {
+            digest.update(b"NWFlash.TraceCredentialSentinel.UnscopedMetadata.v1\0");
+            for chunk in &self.output_chunks {
+                digest.update(chunk.chunk_id.as_uuid().as_bytes());
+                digest.update(chunk.event_id.as_uuid().as_bytes());
+            }
+            return Ok(digest.finalize().into());
+        }
+
+        let items = self.metadata_items()?;
+        digest.update(b"NWFlash.TraceCredentialSentinel.Metadata.v1\0");
+        digest.update((self.runs.len() as u64).to_be_bytes());
+        digest.update((self.events.len() as u64).to_be_bytes());
+        digest.update((self.output_chunks.len() as u64).to_be_bytes());
+        for item in &items {
+            digest.update([sealed_metadata_entity_tag(item.key.entity)]);
+            digest.update(item.key.item_id.as_uuid().as_bytes());
+            digest.update(item.trace_id.as_uuid().as_bytes());
+            match &item.parent {
+                Some(parent) => {
+                    digest.update([1, sealed_metadata_entity_tag(parent.entity)]);
+                    digest.update(parent.item_id.as_uuid().as_bytes());
+                }
+                None => digest.update([0]),
+            }
+            digest.update(item.created_at_ms.to_be_bytes());
+        }
+        Ok(digest.finalize().into())
+    }
+
+    fn metadata_view(&self) -> Result<SealedTraceMetadataView, TraceRedactionError> {
+        let items = self.metadata_items()?;
+        let body = self.to_json_body()?;
         Ok(SealedTraceMetadataView {
             upload_id: self.upload_id,
             body_sha256: Sha256::digest(&body).into(),
@@ -1347,7 +1389,7 @@ impl SealedTraceUpload {
         context: &TraceCredentialSentinelContext,
     ) -> Result<(), TraceRedactionError> {
         let body = self.unattested_json_body()?;
-        let input = context.for_upload(self.upload_id, &body)?;
+        let input = context.for_upload(self, &body)?;
         let receipt = trace_credential_sentinel(&input);
         self.credential_sentinel_session_identity = Some(context.session_identity);
         self.credential_sentinel_receipt = Some(receipt);
@@ -1366,7 +1408,9 @@ impl SealedTraceUpload {
         let body_len =
             u64::try_from(body.len()).map_err(|_| TraceRedactionError::RequestTooLarge)?;
         let body_sha256: [u8; 32] = Sha256::digest(body).into();
-        if !bool::from(receipt.session_identity.ct_eq(session_identity))
+        let bound_session_identity =
+            bind_sentinel_metadata_identity(*session_identity, self.metadata_binding_identity()?);
+        if !bool::from(receipt.session_identity.ct_eq(&bound_session_identity))
             || receipt.upload_id != self.upload_id
             || receipt.body_len != body_len
             || !bool::from(receipt.body_sha256.ct_eq(&body_sha256))
@@ -1427,6 +1471,20 @@ impl TryFrom<SealedTraceUpload> for SentinelAttestedTraceUpload {
 }
 
 impl SentinelAttestedTraceUpload {
+    /// Redacts and seals one run revision without exposing a receiptless
+    /// intermediate upload. The upload ID is always generated internally.
+    pub fn from_run(
+        input: TraceRunText<'_>,
+        secrets: &ExactSecretSet,
+    ) -> Result<Self, TraceRedactionError> {
+        let run = RedactedTraceRun::try_new(input, secrets)?;
+        let sentinel = TraceCredentialSentinelContext::from_run(&run);
+        let upload_id = TraceId::try_new_v7().map_err(|_| TraceRedactionError::IdGeneration)?;
+        let mut upload = SealedTraceUpload::new(upload_id, vec![run], Vec::new())?;
+        upload.attach_credential_sentinel_receipt(&sentinel)?;
+        Self::try_from(upload)
+    }
+
     pub const fn upload_id(&self) -> TraceId {
         self.upload.upload_id()
     }
@@ -2414,20 +2472,59 @@ impl TraceCredentialSentinelContext {
         }
     }
 
+    fn from_event(event: &RedactedTraceEvent) -> Self {
+        Self {
+            session_identity: trace_event_identity(event),
+            redaction_count: event.redaction_summary.total(),
+            high_risk: event.redaction_summary.count(CredentialKind::HighRisk) > 0,
+        }
+    }
+
+    fn from_run(run: &RedactedTraceRun) -> Self {
+        let summary = run.redaction_summary();
+        Self {
+            session_identity: trace_run_identity(run, &summary),
+            redaction_count: summary.total(),
+            high_risk: summary.count(CredentialKind::HighRisk) > 0,
+        }
+    }
+
     fn for_upload(
         &self,
-        upload_id: TraceId,
+        upload: &SealedTraceUpload,
         body: &[u8],
     ) -> Result<TraceCredentialSentinelInput, TraceRedactionError> {
         Ok(TraceCredentialSentinelInput {
-            session_identity: self.session_identity,
-            upload_id,
+            session_identity: bind_sentinel_metadata_identity(
+                self.session_identity,
+                upload.metadata_binding_identity()?,
+            ),
+            upload_id: upload.upload_id,
             body_sha256: Sha256::digest(body).into(),
             body_len: u64::try_from(body.len())
                 .map_err(|_| TraceRedactionError::RequestTooLarge)?,
             redaction_count: self.redaction_count,
             high_risk: self.high_risk,
         })
+    }
+}
+
+fn bind_sentinel_metadata_identity(
+    session_identity: [u8; 32],
+    metadata_identity: [u8; 32],
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"NWFlash.TraceCredentialSentinel.MetadataBinding.v1\0");
+    digest.update(session_identity);
+    digest.update(metadata_identity);
+    digest.finalize().into()
+}
+
+fn sealed_metadata_entity_tag(entity: SealedTraceMetadataEntity) -> u8 {
+    match entity {
+        SealedTraceMetadataEntity::Run => 0,
+        SealedTraceMetadataEntity::Event => 1,
+        SealedTraceMetadataEntity::OutputChunk => 2,
     }
 }
 
@@ -2453,6 +2550,41 @@ fn trace_session_identity(
         digest.update(chunk.chunk_index.to_be_bytes());
         digest.update(chunk.byte_count.to_be_bytes());
         digest.update(chunk.sha256.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn trace_event_identity(event: &RedactedTraceEvent) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"NWFlash.TraceCredentialSentinel.Event.v1\0");
+    digest.update(event.event_id.as_uuid().as_bytes());
+    digest.update(event.run_id.as_uuid().as_bytes());
+    digest.update(event.sequence.to_be_bytes());
+    digest.update(event.started_at_ms.to_be_bytes());
+    for kind in CredentialKind::ALL {
+        digest.update(event.redaction_summary.count(kind).to_be_bytes());
+    }
+    for chunk in &event.output_chunks {
+        digest.update(chunk.chunk_id.as_uuid().as_bytes());
+        digest.update(chunk.event_id.as_uuid().as_bytes());
+        digest.update([match chunk.stream {
+            TraceOutputStreamV2::Stdout => 0,
+            TraceOutputStreamV2::Stderr => 1,
+        }]);
+        digest.update(chunk.chunk_index.to_be_bytes());
+        digest.update(chunk.byte_count.to_be_bytes());
+        digest.update(chunk.sha256.as_bytes());
+    }
+    digest.finalize().into()
+}
+
+fn trace_run_identity(run: &RedactedTraceRun, summary: &RedactionSummary) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"NWFlash.TraceCredentialSentinel.Run.v1\0");
+    digest.update(run.run_id.as_uuid().as_bytes());
+    digest.update(run.started_at_ms.to_be_bytes());
+    for kind in CredentialKind::ALL {
+        digest.update(summary.count(kind).to_be_bytes());
     }
     digest.finalize().into()
 }
@@ -3460,6 +3592,47 @@ mod tests {
     }
 
     #[test]
+    fn attested_run_upload_contains_only_redacted_run_metadata() {
+        let run_id = TraceId::try_new_v7().expect("run id");
+        let secrets = ExactSecretSet::try_new([b"run-secret".as_slice()]).expect("secret set");
+        let source_paths = ["C:/run-secret"];
+        let source_urls: [&str; 0] = [];
+        let upload = SentinelAttestedTraceUpload::from_run(
+            TraceRunText {
+                run_id,
+                operation_kind: "Flashing",
+                title: "token=run-secret",
+                outcome: TraceOutcomeV2::Success,
+                device_serial: Some("token=run-secret"),
+                source_paths: &source_paths,
+                source_urls: &source_urls,
+                client_version: "1.0.1",
+                started_at_ms: 11,
+                ended_at_ms: Some(12),
+                duration_ms: Some(1),
+                error_class: None,
+                error_code: None,
+                error_message: None,
+                final_sequence: Some(1),
+                trace_complete: true,
+                trace_loss_reason: None,
+            },
+            &secrets,
+        )
+        .expect("run upload should be attested");
+
+        let view = upload.metadata_view().expect("run metadata view");
+        assert_eq!(view.run_count(), 1);
+        assert_eq!(view.event_count(), 0);
+        assert_eq!(view.chunk_count(), 0);
+        assert_eq!(view.items()[0].entity(), SealedTraceMetadataEntity::Run);
+        assert_eq!(view.items()[0].item_id(), run_id);
+        let body = upload.to_json_body().expect("run body");
+        let body = std::str::from_utf8(&body).expect("run body UTF-8");
+        assert!(!body.contains("run-secret"));
+    }
+
+    #[test]
     fn redacts_prefixed_http_headers_and_whole_private_key_blocks() {
         let input = concat!(
             "[http] Authorization: Basic basic-prefixed-secret\n",
@@ -4160,7 +4333,7 @@ mod tests {
             .copied()
             .collect::<Vec<_>>();
         let mut output = io::Cursor::new(large_output);
-        let attempts = TraceOutputSession::from_reader(
+        let mut attempts = TraceOutputSession::from_reader(
             event_id,
             TraceOutputStreamV2::Stdout,
             &mut output,
@@ -4194,7 +4367,7 @@ mod tests {
         .expect("bounded attempts");
         assert!(attempts.len() >= 2, "fixture must create a later attempt");
 
-        let later = attempts.last().expect("later chunk attempt");
+        let later = attempts.last_mut().expect("later chunk attempt");
         let view = later.metadata_view().expect("sealed metadata view");
         assert_eq!(view.run_count(), 0);
         assert_eq!(view.event_count(), 0);
@@ -4209,6 +4382,17 @@ mod tests {
             assert_eq!(parent.entity(), SealedTraceMetadataEntity::Event);
             assert_eq!(parent.item_id(), event_id);
         }
+
+        later
+            .chunk_contexts
+            .first_mut()
+            .and_then(Option::as_mut)
+            .expect("later chunk context")
+            .run_id = TraceId::try_new_v7().expect("tampered run id");
+        assert!(matches!(
+            later.metadata_view(),
+            Err(TraceRedactionError::CredentialSentinelInvalid)
+        ));
     }
 
     #[test]
