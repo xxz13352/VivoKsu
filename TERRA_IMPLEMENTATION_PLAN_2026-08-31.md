@@ -426,6 +426,7 @@ git diff -- src/Nwflash.Desktop/src-tauri/crates/nwflash-protection/src/trace_re
 - `475ad21`：新增 bounded process trace adapter，拒绝 observer loss、binary stdout、未确认终止和高风险输出。
 - `643ebef`：将 progress throttle 测试切换为 Tokio paused clock，消除 Windows 并行负载假失败。
 - `01f55be`：新增 concrete metadata spool adapter；owner pause、build epoch gate、批次零部分写入和磁盘原文隔离均有红测。
+- `a25e6ab`：metadata adapter 强制单一逻辑 event ID 与 binding 一致，拒绝混合事件批次。
 
 已验证：
 
