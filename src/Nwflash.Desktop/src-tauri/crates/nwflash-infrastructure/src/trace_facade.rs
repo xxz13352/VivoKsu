@@ -22,10 +22,12 @@
     reason = "crate-private seam awaiting a signed-login trace scope adapter"
 )]
 
+use crate::trace_http::TraceHttpOutcome;
 use crate::trace_spool::{
-    DueSealedAttempt, InflightAttemptHandle, ProtectionClientVersionHash, ProtectionSealedUploadId,
-    SealedAttemptId, SealedAttemptManifest, SealedItemRevision, TraceItemKey, TraceOwnerGeneration,
-    TraceSpoolEntity, TraceSpoolStore,
+    AttemptPauseReason, DueSealedAttempt, InflightAttemptHandle, OwnerPauseReason,
+    ProtectionClientVersionHash, ProtectionSealedUploadId, ResealReason, SealedAttemptId,
+    SealedAttemptManifest, SealedItemRevision, TraceItemKey, TraceOwnerGeneration,
+    TraceSpoolEntity, TraceSpoolError, TraceSpoolStore,
 };
 use crate::trace_uploader::{
     validate_success_ack, TraceAcceptedAck as InternalAcceptedAck,
@@ -33,8 +35,8 @@ use crate::trace_uploader::{
     TraceUploadAck as InternalUploadAck, SERVER_UNACKED_DELAY_MS,
 };
 use nwflash_domain::{
-    TraceId, TRACE_UPLOAD_MAX_BODY_BYTES, TRACE_UPLOAD_MAX_EVENTS, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS,
-    TRACE_UPLOAD_MAX_RUNS,
+    TraceId, TraceRejectedCodeV2, TraceRejectedEntityV2, TRACE_UPLOAD_MAX_BODY_BYTES,
+    TRACE_UPLOAD_MAX_EVENTS, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS, TRACE_UPLOAD_MAX_RUNS,
 };
 use nwflash_protection::{
     SealedTraceMetadataEntity, SealedTraceMetadataKey, SealedTraceMetadataView,
@@ -45,6 +47,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::Mutex;
 
 const TRACE_SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
 const ATTEMPT_DOMAIN: &[u8] = b"nwflash-trace-attempt-v1\0";
@@ -57,8 +60,7 @@ pub(crate) struct AuthenticatedTraceOwner {
 }
 
 impl AuthenticatedTraceOwner {
-    #[cfg(test)]
-    fn try_new(
+    pub(crate) fn try_new(
         canonical_username_hash: [u8; 32],
         login_generation: u64,
     ) -> Result<Self, TraceFacadeError> {
@@ -99,8 +101,7 @@ pub(crate) struct AuthenticatedTraceScope {
 }
 
 impl AuthenticatedTraceScope {
-    #[cfg(test)]
-    fn try_new(
+    pub(crate) fn try_new(
         owner: AuthenticatedTraceOwner,
         client_version_hash: [u8; 32],
     ) -> Result<Self, TraceFacadeError> {
@@ -225,6 +226,10 @@ pub struct TraceManifestKey {
 }
 
 impl TraceManifestKey {
+    pub fn new(entity: TraceManifestEntity, item_id: TraceId) -> Self {
+        Self { entity, item_id }
+    }
+
     pub fn entity(&self) -> TraceManifestEntity {
         self.entity
     }
@@ -296,6 +301,7 @@ impl fmt::Debug for OpaqueTraceAttemptIdentity {
 /// metadata attempt. It intentionally has no `Clone`, serialization, or
 /// deserialization path and is required again before the spool may mutate a
 /// pending attempt into `Inflight`.
+#[derive(Clone)]
 pub struct RegisteredSealedAttempt {
     upload_id: TraceId,
     attempt_identity: OpaqueTraceAttemptIdentity,
@@ -482,6 +488,10 @@ pub enum TraceFacadeError {
     InvalidOwner,
     #[error("trace client version identity is invalid")]
     InvalidClientVersion,
+    #[error("trace owner scope is paused")]
+    OwnerPaused,
+    #[error("trace client version is blocked by update policy")]
+    BuildEpochBlocked,
     #[error("trace revision manifest is invalid")]
     InvalidRevisionManifest,
     #[error("protection-sealed trace upload is invalid")]
@@ -494,6 +504,559 @@ pub enum TraceFacadeError {
     InvalidAck,
     #[error("trace metadata spool operation failed")]
     Storage,
+}
+
+/// Public, authenticated owner scope used by the concrete metadata adapter.
+///
+/// The byte arrays are opaque identities.  They are validated here so callers
+/// cannot accidentally create an all-zero owner or build epoch.
+#[derive(Clone, Eq, PartialEq)]
+pub struct TraceMetadataOwnerScope {
+    username_hash: [u8; 32],
+    login_generation: u64,
+    build_identity: [u8; 32],
+}
+
+impl TraceMetadataOwnerScope {
+    pub fn try_new(
+        username_hash: [u8; 32],
+        login_generation: u64,
+        build_identity: [u8; 32],
+    ) -> Result<Self, TraceMetadataSpoolError> {
+        if username_hash == [0; 32] || login_generation == 0 {
+            return Err(TraceMetadataSpoolError::InvalidOwner);
+        }
+        if build_identity == [0; 32] {
+            return Err(TraceMetadataSpoolError::InvalidBuildIdentity);
+        }
+        Ok(Self {
+            username_hash,
+            login_generation,
+            build_identity,
+        })
+    }
+
+    pub fn login_generation(&self) -> u64 {
+        self.login_generation
+    }
+}
+
+impl fmt::Debug for TraceMetadataOwnerScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TraceMetadataOwnerScope")
+            .field("login_generation", &self.login_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum TraceMetadataSpoolError {
+    #[error("trace metadata owner scope is invalid")]
+    InvalidOwner,
+    #[error("trace metadata build identity is invalid")]
+    InvalidBuildIdentity,
+    #[error("trace event batch is invalid")]
+    InvalidEventBatch,
+    #[error("trace owner is paused")]
+    OwnerPaused,
+    #[error("trace build epoch is blocked")]
+    BuildEpochBlocked,
+    #[error("trace sealed upload is invalid")]
+    InvalidSealedUpload,
+    #[error("trace sealed upload does not match its pending metadata")]
+    SealMismatch,
+    #[error("trace dispatch is not available")]
+    DispatchUnavailable,
+    #[error("trace HTTP acknowledgement is invalid")]
+    InvalidAcknowledgement,
+    #[error("trace metadata spool operation failed")]
+    Storage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TraceMetadataSpoolEntity {
+    Run,
+    Event,
+    OutputChunk,
+}
+
+impl From<TraceManifestEntity> for TraceMetadataSpoolEntity {
+    fn from(entity: TraceManifestEntity) -> Self {
+        match entity {
+            TraceManifestEntity::Run => Self::Run,
+            TraceManifestEntity::Event => Self::Event,
+            TraceManifestEntity::OutputChunk => Self::OutputChunk,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraceMetadataSpoolItem {
+    entity: TraceMetadataSpoolEntity,
+    item_id: TraceId,
+    trace_id: TraceId,
+    parent_id: Option<TraceId>,
+    revision: u64,
+    created_at_ms: u64,
+}
+
+impl TraceMetadataSpoolItem {
+    pub fn entity(&self) -> TraceMetadataSpoolEntity {
+        self.entity
+    }
+
+    pub fn item_id(&self) -> TraceId {
+        self.item_id
+    }
+
+    pub fn trace_id(&self) -> TraceId {
+        self.trace_id
+    }
+
+    pub fn parent_id(&self) -> Option<TraceId> {
+        self.parent_id
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn created_at_ms(&self) -> u64 {
+        self.created_at_ms
+    }
+}
+
+#[derive(Debug)]
+pub struct TraceMetadataRegisteredAttempt {
+    upload_id: TraceId,
+    items: Vec<TraceMetadataSpoolItem>,
+    registration: RegisteredSealedAttempt,
+}
+
+impl TraceMetadataRegisteredAttempt {
+    pub fn upload_id(&self) -> TraceId {
+        self.upload_id
+    }
+
+    pub fn items(&self) -> &[TraceMetadataSpoolItem] {
+        &self.items
+    }
+}
+
+#[derive(Debug)]
+pub struct TraceMetadataRegisteredEventBatch {
+    owner: TraceMetadataOwnerScope,
+    attempts: Vec<TraceMetadataRegisteredAttempt>,
+}
+
+impl TraceMetadataRegisteredEventBatch {
+    pub fn owner(&self) -> &TraceMetadataOwnerScope {
+        &self.owner
+    }
+
+    pub fn attempts(&self) -> &[TraceMetadataRegisteredAttempt] {
+        &self.attempts
+    }
+}
+
+#[derive(Debug)]
+pub struct TraceMetadataDispatch {
+    instruction: TraceDispatchInstruction,
+}
+
+impl TraceMetadataDispatch {
+    pub fn items(&self) -> &[TraceManifestItem] {
+        self.instruction.items()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraceMetadataUploadOutcome {
+    Accepted {
+        accepted_items: usize,
+        rejected_items: usize,
+        unacknowledged_items: usize,
+    },
+    Unauthorized,
+    Forbidden,
+    UpdateRequired,
+    InvalidRequest,
+    OwnershipConflict,
+    BodyTooLarge,
+    Incomplete,
+    RateLimited,
+    ServerFailure,
+}
+
+/// Concrete bridge from producer-owned protection receipts to the durable
+/// metadata spool.  The sealed body is never written to disk; a live upload
+/// remains necessary to claim and send a pending attempt.
+pub struct TraceMetadataSpoolAdapter {
+    facade: TraceSpoolFacade,
+    owner: TraceMetadataOwnerScope,
+    registrations: Mutex<HashMap<TraceId, RegisteredSealedAttempt>>,
+}
+
+impl fmt::Debug for TraceMetadataSpoolAdapter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TraceMetadataSpoolAdapter")
+            .field("owner", &self.owner)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TraceMetadataSpoolAdapter {
+    pub fn open(
+        root: impl AsRef<Path>,
+        owner: TraceMetadataOwnerScope,
+    ) -> Result<Self, TraceMetadataSpoolError> {
+        let authenticated_owner =
+            AuthenticatedTraceOwner::try_new(owner.username_hash, owner.login_generation)
+                .map_err(metadata_error)?;
+        let scope = AuthenticatedTraceScope::try_new(authenticated_owner, owner.build_identity)
+            .map_err(metadata_error)?;
+        let facade = TraceSpoolFacade::open(root, scope).map_err(metadata_error)?;
+        Ok(Self {
+            facade,
+            owner,
+            registrations: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn register_attested_event_batch(
+        &self,
+        run_id: TraceId,
+        sequence: u64,
+        uploads: &[SentinelAttestedTraceUpload],
+    ) -> Result<TraceMetadataRegisteredEventBatch, TraceMetadataSpoolError> {
+        if sequence == 0 || sequence > TRACE_SAFE_INTEGER_MAX || uploads.is_empty() {
+            return Err(TraceMetadataSpoolError::InvalidEventBatch);
+        }
+        // Validate the entire batch before mutating the spool.  This keeps a
+        // mixed-event or mixed-sequence producer call at zero partial writes.
+        let manifests = uploads
+            .iter()
+            .map(|upload| event_revision_manifest(upload, run_id, sequence))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut registered = Vec::with_capacity(uploads.len());
+        for (upload, revisions) in uploads.iter().zip(manifests) {
+            let attempt = self
+                .facade
+                .register_sealed_upload(upload, &revisions)
+                .map_err(metadata_error)?;
+            let items = attempt
+                .items()
+                .iter()
+                .map(public_metadata_item)
+                .collect::<Result<Vec<_>, _>>()?;
+            registered.push(TraceMetadataRegisteredAttempt {
+                upload_id: attempt.upload_id(),
+                items,
+                registration: attempt,
+            });
+        }
+        let mut registrations = self
+            .registrations
+            .lock()
+            .map_err(|_| TraceMetadataSpoolError::Storage)?;
+        let attempts = registered
+            .iter()
+            .map(|attempt| {
+                registrations.insert(attempt.upload_id, attempt.registration.clone());
+                TraceMetadataRegisteredAttempt {
+                    upload_id: attempt.upload_id,
+                    items: attempt.items.clone(),
+                    registration: attempt.registration.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        // The public batch intentionally exposes metadata only; the live
+        // registrations are retained in the adapter for dispatch.
+        Ok(TraceMetadataRegisteredEventBatch {
+            owner: self.owner.clone(),
+            attempts,
+        })
+    }
+
+    pub fn pending_attempt_count(&self, now_ms: u64) -> Result<usize, TraceMetadataSpoolError> {
+        if now_ms > TRACE_SAFE_INTEGER_MAX {
+            return Err(TraceMetadataSpoolError::Storage);
+        }
+        self.facade
+            .store
+            .peek_due_attempts(&self.facade.spool_owner, now_ms)
+            .map(|attempts| attempts.len())
+            .map_err(|_| TraceMetadataSpoolError::Storage)
+    }
+
+    pub fn begin_dispatch_for_upload(
+        &self,
+        upload: &SentinelAttestedTraceUpload,
+        now_ms: u64,
+    ) -> Result<Option<TraceMetadataDispatch>, TraceMetadataSpoolError> {
+        let registrations = self
+            .registrations
+            .lock()
+            .map_err(|_| TraceMetadataSpoolError::Storage)?;
+        let registration = registrations
+            .get(&upload.upload_id())
+            .ok_or(TraceMetadataSpoolError::DispatchUnavailable)?;
+        self.facade
+            .begin_next_dispatch(registration, upload, now_ms)
+            .map_err(metadata_error)
+            .map(|instruction| instruction.map(|instruction| TraceMetadataDispatch { instruction }))
+    }
+
+    pub fn apply_http_outcome(
+        &self,
+        dispatch: TraceMetadataDispatch,
+        outcome: TraceHttpOutcome,
+        now_ms: u64,
+    ) -> Result<TraceMetadataUploadOutcome, TraceMetadataSpoolError> {
+        if now_ms > TRACE_SAFE_INTEGER_MAX {
+            return Err(TraceMetadataSpoolError::Storage);
+        }
+        match outcome {
+            TraceHttpOutcome::Accepted(ack) => {
+                let full_ack = full_ack_from_http(&dispatch.instruction, &ack)?;
+                let result = self
+                    .facade
+                    .apply_validated_ack(&dispatch.instruction, full_ack, now_ms)
+                    .map_err(metadata_error)?;
+                Ok(TraceMetadataUploadOutcome::Accepted {
+                    accepted_items: result.accepted().matched_items(),
+                    rejected_items: result.rejected().len(),
+                    unacknowledged_items: result.unacknowledged().len(),
+                })
+            }
+            TraceHttpOutcome::Unauthorized(_) => {
+                self.facade
+                    .store
+                    .pause_owner(&dispatch.instruction.handle, OwnerPauseReason::Unauthorized)
+                    .map_err(|_| TraceMetadataSpoolError::Storage)?;
+                Ok(TraceMetadataUploadOutcome::Unauthorized)
+            }
+            TraceHttpOutcome::Forbidden(_) => {
+                self.facade
+                    .store
+                    .pause_owner(&dispatch.instruction.handle, OwnerPauseReason::Forbidden)
+                    .map_err(|_| TraceMetadataSpoolError::Storage)?;
+                Ok(TraceMetadataUploadOutcome::Forbidden)
+            }
+            TraceHttpOutcome::UpdateRequired(_) => {
+                self.facade
+                    .store
+                    .pause_client_version_for_update(&dispatch.instruction.handle)
+                    .map_err(|_| TraceMetadataSpoolError::Storage)?;
+                Ok(TraceMetadataUploadOutcome::UpdateRequired)
+            }
+            TraceHttpOutcome::InvalidRequest(_) => {
+                self.pause_local(&dispatch.instruction)?;
+                Ok(TraceMetadataUploadOutcome::InvalidRequest)
+            }
+            TraceHttpOutcome::OwnershipConflict(_) => {
+                self.facade
+                    .store
+                    .pause_attempt(&dispatch.instruction.handle, AttemptPauseReason::Forbidden)
+                    .map_err(|_| TraceMetadataSpoolError::Storage)?;
+                Ok(TraceMetadataUploadOutcome::OwnershipConflict)
+            }
+            TraceHttpOutcome::BodyTooLarge(_) => {
+                self.pause_local(&dispatch.instruction)?;
+                Ok(TraceMetadataUploadOutcome::BodyTooLarge)
+            }
+            TraceHttpOutcome::Incomplete(_) => {
+                self.pause_local(&dispatch.instruction)?;
+                Ok(TraceMetadataUploadOutcome::Incomplete)
+            }
+            TraceHttpOutcome::RateLimited { .. } => {
+                self.retry_later(&dispatch.instruction, now_ms)?;
+                Ok(TraceMetadataUploadOutcome::RateLimited)
+            }
+            TraceHttpOutcome::ServerFailure { .. } => {
+                self.retry_later(&dispatch.instruction, now_ms)?;
+                Ok(TraceMetadataUploadOutcome::ServerFailure)
+            }
+        }
+    }
+
+    fn pause_local(
+        &self,
+        instruction: &TraceDispatchInstruction,
+    ) -> Result<(), TraceMetadataSpoolError> {
+        self.facade
+            .store
+            .pause_attempt(&instruction.handle, AttemptPauseReason::LocalContract)
+            .map_err(|_| TraceMetadataSpoolError::Storage)
+    }
+
+    fn retry_later(
+        &self,
+        instruction: &TraceDispatchInstruction,
+        now_ms: u64,
+    ) -> Result<(), TraceMetadataSpoolError> {
+        let next = now_ms
+            .checked_add(SERVER_UNACKED_DELAY_MS)
+            .filter(|next| *next <= TRACE_SAFE_INTEGER_MAX)
+            .ok_or(TraceMetadataSpoolError::Storage)?;
+        self.facade
+            .store
+            .retire_attempt_and_mark_reseal_cas(&instruction.handle, next, ResealReason::Retryable)
+            .map(|_| ())
+            .map_err(|_| TraceMetadataSpoolError::Storage)
+    }
+}
+
+fn metadata_error(error: TraceFacadeError) -> TraceMetadataSpoolError {
+    match error {
+        TraceFacadeError::InvalidOwner => TraceMetadataSpoolError::InvalidOwner,
+        TraceFacadeError::InvalidClientVersion => TraceMetadataSpoolError::InvalidBuildIdentity,
+        TraceFacadeError::OwnerPaused => TraceMetadataSpoolError::OwnerPaused,
+        TraceFacadeError::BuildEpochBlocked => TraceMetadataSpoolError::BuildEpochBlocked,
+        TraceFacadeError::InvalidRevisionManifest => TraceMetadataSpoolError::InvalidEventBatch,
+        TraceFacadeError::InvalidSealedUpload => TraceMetadataSpoolError::InvalidSealedUpload,
+        TraceFacadeError::SealMismatch => TraceMetadataSpoolError::SealMismatch,
+        TraceFacadeError::AttemptIdentityGeneration
+        | TraceFacadeError::InvalidAck
+        | TraceFacadeError::Storage => TraceMetadataSpoolError::Storage,
+    }
+}
+
+fn event_revision_manifest(
+    upload: &SentinelAttestedTraceUpload,
+    run_id: TraceId,
+    sequence: u64,
+) -> Result<TraceRevisionManifest, TraceMetadataSpoolError> {
+    if upload.run_count() != 0 || upload.event_ids().is_empty() {
+        return Err(TraceMetadataSpoolError::InvalidEventBatch);
+    }
+    let bindings = upload.event_bindings();
+    if !bindings.is_empty()
+        && bindings
+            .iter()
+            .any(|binding| binding.run_id != run_id || binding.sequence != sequence)
+    {
+        return Err(TraceMetadataSpoolError::InvalidEventBatch);
+    }
+    let view = upload
+        .metadata_view()
+        .map_err(|_| TraceMetadataSpoolError::InvalidSealedUpload)?;
+    if view.body_len() == 0
+        || view.body_len() > TRACE_UPLOAD_MAX_BODY_BYTES
+        || view.event_count() > TRACE_UPLOAD_MAX_EVENTS
+        || view.chunk_count() > TRACE_UPLOAD_MAX_OUTPUT_CHUNKS
+    {
+        return Err(TraceMetadataSpoolError::InvalidSealedUpload);
+    }
+    for item in view.items() {
+        if item.trace_id() != run_id {
+            return Err(TraceMetadataSpoolError::InvalidEventBatch);
+        }
+        match item.key().entity() {
+            SealedTraceMetadataEntity::Event => {
+                if item.parent().is_none_or(|parent| {
+                    parent.entity() != SealedTraceMetadataEntity::Run || parent.item_id() != run_id
+                }) {
+                    return Err(TraceMetadataSpoolError::InvalidEventBatch);
+                }
+            }
+            SealedTraceMetadataEntity::OutputChunk => {
+                if item
+                    .parent()
+                    .is_none_or(|parent| parent.entity() != SealedTraceMetadataEntity::Event)
+                {
+                    return Err(TraceMetadataSpoolError::InvalidEventBatch);
+                }
+            }
+            SealedTraceMetadataEntity::Run => {
+                return Err(TraceMetadataSpoolError::InvalidEventBatch)
+            }
+        }
+    }
+    let revisions = view
+        .items()
+        .iter()
+        .map(|item| {
+            TraceItemRevisionInput::try_new(item.item_id(), run_id, 1, item.created_at_ms())
+                .map_err(|_| TraceMetadataSpoolError::InvalidEventBatch)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    TraceRevisionManifest::try_new(revisions)
+        .map_err(|_| TraceMetadataSpoolError::InvalidEventBatch)
+}
+
+fn public_metadata_item(
+    item: &TraceManifestItem,
+) -> Result<TraceMetadataSpoolItem, TraceMetadataSpoolError> {
+    Ok(TraceMetadataSpoolItem {
+        entity: item.key().entity.into(),
+        item_id: item.key().item_id(),
+        trace_id: item.trace_id(),
+        parent_id: item.parent().map(|parent| parent.item_id()),
+        revision: item.revision(),
+        created_at_ms: item.created_at_ms(),
+    })
+}
+
+fn full_ack_from_http(
+    instruction: &TraceDispatchInstruction,
+    ack: &crate::trace_http::TraceHttpAck,
+) -> Result<TraceFullAck, TraceMetadataSpoolError> {
+    let mut accepted = Vec::new();
+    for (entity, ids) in [
+        (TraceManifestEntity::Run, ack.accepted_runs()),
+        (TraceManifestEntity::Event, ack.accepted_events()),
+        (
+            TraceManifestEntity::OutputChunk,
+            ack.accepted_output_chunks(),
+        ),
+    ] {
+        for id in ids {
+            accepted.push(key_for_dispatch(instruction, entity, id.id())?);
+        }
+    }
+    let rejected = ack
+        .rejected()
+        .iter()
+        .map(|item| {
+            let entity = match item.entity() {
+                TraceRejectedEntityV2::Run => TraceManifestEntity::Run,
+                TraceRejectedEntityV2::Event => TraceManifestEntity::Event,
+                TraceRejectedEntityV2::OutputChunk => TraceManifestEntity::OutputChunk,
+            };
+            let id = item
+                .id()
+                .ok_or(TraceMetadataSpoolError::InvalidAcknowledgement)?;
+            let key = key_for_dispatch(instruction, entity, id)?;
+            let code = match item.code() {
+                TraceRejectedCodeV2::Invalid => TraceRejectedCode::Invalid,
+                TraceRejectedCodeV2::MissingParent => TraceRejectedCode::MissingParent,
+                TraceRejectedCodeV2::SequenceConflict => TraceRejectedCode::SequenceConflict,
+                TraceRejectedCodeV2::IncompleteTrace => TraceRejectedCode::IncompleteTrace,
+                TraceRejectedCodeV2::CredentialRejected => TraceRejectedCode::CredentialRejected,
+            };
+            Ok(TraceRejectedAck::new(key, code))
+        })
+        .collect::<Result<Vec<_>, TraceMetadataSpoolError>>()?;
+    Ok(TraceFullAck::new(accepted, rejected))
+}
+
+fn key_for_dispatch(
+    instruction: &TraceDispatchInstruction,
+    entity: TraceManifestEntity,
+    item_id: TraceId,
+) -> Result<TraceManifestKey, TraceMetadataSpoolError> {
+    if instruction
+        .items()
+        .iter()
+        .any(|item| item.key().entity() == entity && item.key().item_id() == item_id)
+    {
+        Ok(TraceManifestKey::new(entity, item_id))
+    } else {
+        Err(TraceMetadataSpoolError::InvalidAcknowledgement)
+    }
 }
 
 /// Metadata-only crate-private facade. The body remains owned by
@@ -572,7 +1135,11 @@ impl TraceSpoolFacade {
         );
         self.store
             .register_sealed_attempt(manifest)
-            .map_err(|_| TraceFacadeError::Storage)?;
+            .map_err(|error| match error {
+                TraceSpoolError::OwnerPaused => TraceFacadeError::OwnerPaused,
+                TraceSpoolError::ClientVersionBlocked => TraceFacadeError::BuildEpochBlocked,
+                _ => TraceFacadeError::Storage,
+            })?;
         Ok(RegisteredSealedAttempt {
             upload_id: upload.upload_id(),
             attempt_identity,

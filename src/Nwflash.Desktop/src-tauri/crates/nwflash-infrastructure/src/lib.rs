@@ -80,6 +80,11 @@ pub use root_resources::{
 };
 pub use scrcpy_provisioner::{ScrcpyProvisionError, ScrcpyProvisioner};
 pub use session_security::{compiled_build_id, ProcessIdentity, SecretToken};
+pub use trace_facade::{
+    TraceMetadataOwnerScope, TraceMetadataRegisteredAttempt, TraceMetadataRegisteredEventBatch,
+    TraceMetadataSpoolAdapter, TraceMetadataSpoolEntity, TraceMetadataSpoolError,
+    TraceMetadataSpoolItem, TraceMetadataUploadOutcome,
+};
 pub use trace_http::{
     TraceHttpAck, TraceHttpApiError, TraceHttpError, TraceHttpOutcome, TraceHttpResult,
     TraceHttpUpdateRequired, TraceSafeId, TraceSafeRejectedItem,

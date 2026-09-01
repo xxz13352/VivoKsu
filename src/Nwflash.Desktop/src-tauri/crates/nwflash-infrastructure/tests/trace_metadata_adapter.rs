@@ -1,8 +1,6 @@
 use std::io::Cursor;
 
-use nwflash_domain::{
-    TraceEventKindV2, TraceEventStatusV2, TraceId, TraceOutputStreamV2,
-};
+use nwflash_domain::{TraceEventKindV2, TraceEventStatusV2, TraceId, TraceOutputStreamV2};
 use nwflash_infrastructure::{
     CloudflareClient, SecretToken, TraceMetadataOwnerScope, TraceMetadataSpoolAdapter,
     TraceMetadataSpoolEntity, TraceMetadataSpoolError, TraceMetadataUploadOutcome,
@@ -75,7 +73,10 @@ fn json_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "json") {
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
                 files.push(path);
             }
         }
@@ -121,19 +122,23 @@ fn concrete_attested_metadata_registers_without_persisting_payload() {
             .iter()
             .any(|item| item.entity() == TraceMetadataSpoolEntity::Event)
     }));
-    assert!(registered.attempts().iter().all(|attempt| {
-        attempt
-            .items()
-            .iter()
-            .all(|item| item.trace_id() == run_id)
-    }));
+    assert!(registered
+        .attempts()
+        .iter()
+        .all(|attempt| { attempt.items().iter().all(|item| item.trace_id() == run_id) }));
     assert_eq!(adapter.pending_attempt_count(0).unwrap(), attempts.len());
 
     let persisted = json_files(root.path())
         .into_iter()
         .map(|path| std::fs::read_to_string(path).unwrap())
         .collect::<String>();
-    for forbidden in ["before", "adapter-secret", "after", "Authorization", "https://"] {
+    for forbidden in [
+        "before",
+        "adapter-secret",
+        "after",
+        "Authorization",
+        "https://",
+    ] {
         assert!(!persisted.contains(forbidden), "spool leaked {forbidden}");
     }
 }
@@ -172,7 +177,7 @@ async fn mount_status(server: &MockServer, status: u16) {
             "error": {
                 "code": "TRACE_UNAUTHORIZED",
                 "message": "unauthorized",
-                "request_id": "trace-test-request"
+                "request_id": "123e4567-e89b-12d3-a456-426614174000"
             }
         }),
         403 => serde_json::json!({
@@ -180,7 +185,7 @@ async fn mount_status(server: &MockServer, status: u16) {
             "error": {
                 "code": "TRACE_FORBIDDEN",
                 "message": "forbidden",
-                "request_id": "trace-test-request"
+                "request_id": "123e4567-e89b-12d3-a456-426614174000"
             }
         }),
         426 => serde_json::json!({
@@ -233,8 +238,7 @@ async fn unauthorized_and_forbidden_pause_only_the_dispatched_owner() {
         ));
 
         let adapter_b =
-            TraceMetadataSpoolAdapter::open(root.path(), owner(status as u8 + 1, 1, 0x55))
-                .unwrap();
+            TraceMetadataSpoolAdapter::open(root.path(), owner(status as u8 + 1, 1, 0x55)).unwrap();
         let other_run = TraceId::try_new_v7().unwrap();
         let other = event_attempts(
             other_run,
@@ -267,8 +271,7 @@ async fn update_required_is_a_global_build_epoch_gate_across_owners() {
     let run_id = TraceId::try_new_v7().unwrap();
     let event_id = TraceId::try_new_v7().unwrap();
     let mut attempts = event_attempts(run_id, event_id, 1, b"old-build\n".to_vec());
-    let adapter_a =
-        TraceMetadataSpoolAdapter::open(root.path(), owner(0x61, 1, 0x70)).unwrap();
+    let adapter_a = TraceMetadataSpoolAdapter::open(root.path(), owner(0x61, 1, 0x70)).unwrap();
     adapter_a
         .register_attested_event_batch(run_id, 1, &attempts)
         .unwrap();
@@ -296,8 +299,7 @@ async fn update_required_is_a_global_build_epoch_gate_across_owners() {
         1,
         b"same-build\n".to_vec(),
     );
-    let same_build =
-        TraceMetadataSpoolAdapter::open(root.path(), owner(0x62, 1, 0x70)).unwrap();
+    let same_build = TraceMetadataSpoolAdapter::open(root.path(), owner(0x62, 1, 0x70)).unwrap();
     assert!(matches!(
         same_build.register_attested_event_batch(blocked_run, 1, &blocked),
         Err(TraceMetadataSpoolError::BuildEpochBlocked)
@@ -310,8 +312,7 @@ async fn update_required_is_a_global_build_epoch_gate_across_owners() {
         1,
         b"fresh-build\n".to_vec(),
     );
-    let fresh_build =
-        TraceMetadataSpoolAdapter::open(root.path(), owner(0x63, 1, 0x71)).unwrap();
+    let fresh_build = TraceMetadataSpoolAdapter::open(root.path(), owner(0x63, 1, 0x71)).unwrap();
     fresh_build
         .register_attested_event_batch(fresh_run, 1, &fresh)
         .expect("a different build epoch must remain eligible");
