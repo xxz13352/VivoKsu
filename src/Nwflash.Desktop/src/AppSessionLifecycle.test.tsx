@@ -320,6 +320,7 @@ describe('会话事件联动', () => {
     await flushPromises();
 
     const progress = host.querySelector('[data-role="operation-progress"]') as HTMLParagraphElement;
+    await waitUntil(() => progress.textContent?.includes('无进行中的操作') ?? false);
     expect(progress.textContent).toContain('无进行中的操作');
 
     const logout = host.querySelector('[data-role="logout-button"]') as HTMLButtonElement;
