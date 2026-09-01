@@ -422,10 +422,15 @@ git diff -- src/Nwflash.Desktop/src-tauri/crates/nwflash-protection/src/trace_re
 - `6864812` / `5a67b8d`：attested metadata spool facade、Run-only attested upload、canonical metadata binding、stale remediation/high-risk 修复。
 - `0c2716b`：mirror 启动失败统一为脱敏外部工具错误，并清理两处既有 Clippy dead-code 门禁。
 - `62b9112`：capability boundary 测试设置固定合法 build ID，区分 probe unavailable(43) 与 missing build identity(46)。
+- `05bc964` / `e1a4f1e` / `7c4ee7a`：producer sentinel-static 边界、原始 fixture 隔离与 attested upload 强制。
+- `475ad21`：新增 bounded process trace adapter，拒绝 observer loss、binary stdout、未确认终止和高风险输出。
+- `643ebef`：将 progress throttle 测试切换为 Tokio paused clock，消除 Windows 并行负载假失败。
+- `01f55be`：新增 concrete metadata spool adapter；owner pause、build epoch gate、批次零部分写入和磁盘原文隔离均有红测。
 
 已验证：
 
-- Rust workspace `cargo test --workspace --no-fail-fast`：通过；所有 workspace 测试通过。
+- Rust：`cargo test --workspace --exclude nwflash-windows --no-fail-fast --quiet` 通过；应用层 52/52、infrastructure metadata adapter 4/4、Tauri 278/278、protection 37/37 等均通过。
+- Windows：`nwflash-windows --test driver` 2/2、`driver_installer` 串行 11/11 通过；并行 workspace 驱动安装会触发 Windows runner 退出码 `0x40010004`，未出现断言失败，因此保留串行门禁。
 - Rust workspace Clippy `--all-targets -- -D warnings`：通过。
 - Rustfmt 与 `git diff --check`：通过。
 - 桌面前端：UI 180/180、capability 5/5、生产构建通过。
@@ -440,5 +445,5 @@ git diff -- src/Nwflash.Desktop/src-tauri/crates/nwflash-protection/src/trace_re
 
 - durable sealed body/restart recovery 或明确 orphan → durable loss 闭环；
 - completed-attempt 历史容量与去重账本；
-- producer sentinel-static、process trace adapter、producer → spool → HTTP、最终 Tauri spawn 接线；
+- producer → spool → HTTP 的实际运行时接线、最终 Tauri spawn 接线；
 - 手工 VMProtect Lite 保护、compiler log/marker review、protected runtime/CRC、Authenticode、NSIS、安装卸载和真机 smoke。
