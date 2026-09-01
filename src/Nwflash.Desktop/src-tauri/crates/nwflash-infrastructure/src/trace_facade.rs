@@ -929,14 +929,17 @@ fn event_revision_manifest(
     run_id: TraceId,
     sequence: u64,
 ) -> Result<TraceRevisionManifest, TraceMetadataSpoolError> {
-    if upload.run_count() != 0 || upload.event_ids().is_empty() {
+    let event_ids = upload.event_ids();
+    if upload.run_count() != 0 || event_ids.len() != 1 {
         return Err(TraceMetadataSpoolError::InvalidEventBatch);
     }
     let bindings = upload.event_bindings();
-    if !bindings.is_empty()
-        && bindings
-            .iter()
-            .any(|binding| binding.run_id != run_id || binding.sequence != sequence)
+    if bindings.len() > 1
+        || bindings.first().is_some_and(|binding| {
+            binding.event_id != event_ids[0]
+                || binding.run_id != run_id
+                || binding.sequence != sequence
+        })
     {
         return Err(TraceMetadataSpoolError::InvalidEventBatch);
     }
