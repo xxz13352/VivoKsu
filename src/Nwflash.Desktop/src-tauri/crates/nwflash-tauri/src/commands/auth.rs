@@ -88,6 +88,7 @@ async fn finalize_login_session(
     session: AuthSession,
     generation: String,
 ) -> Result<(), String> {
+    let usage_token = session.token.request_scope();
     let lifecycle_session = SessionLifecycleSession::prepare(
         session.token.request_scope(),
         session.username.clone(),
@@ -110,6 +111,11 @@ async fn finalize_login_session(
         .exit_supervisor
         .install_generation(generation.clone())
         .map_err(|_| "应用正在安全退出，无法发布新会话。".to_string())?;
+    state
+        .usage_reporter
+        .publish_session(session.username.clone(), &generation, usage_token)
+        .await
+        .map_err(|_| "本地 V1 使用日志兼容队列不可用，无法发布新会话。".to_string())?;
 
     let capability =
         state
@@ -139,17 +145,19 @@ pub async fn auth_logout(state: State<'_, AppState>) -> Result<LogoutResult, Str
 }
 
 async fn auth_logout_inner(state: &AppState) -> Result<LogoutResult, String> {
-    let generation = state.session_lifecycle.generation().await;
-    let idle_lease = state
-        .operation_coordinator
-        .try_acquire_idle()
+    let (idle_lease, generation) = state
+        .acquire_session_closeout()
+        .await
         .map_err(|_| OPERATION_IN_PROGRESS_MESSAGE.to_string())?;
 
     match state.session_lifecycle.stop().await {
         Ok(()) | Err(SessionLifecycleError::NotStarted) => {}
         Err(error) => return Err(error.to_string()),
     }
-    state.usage_reporter.flush().await;
+    state
+        .usage_reporter
+        .flush_and_close_session(generation.as_deref())
+        .await;
     state.revoke_root_capabilities(&idle_lease);
     {
         let mut token = state
@@ -219,7 +227,8 @@ mod tests {
 
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use ed25519_dalek::{Signer as _, SigningKey};
-    use nwflash_domain::FlashImageInfo;
+    use nwflash_application::UsageReporter;
+    use nwflash_domain::{FlashImageInfo, UsageLogEntry};
     use nwflash_infrastructure::{AuthSession, CloudflareClient, SecretToken, DEFAULT_APP_VERSION};
     use nwflash_protection::{
         accept_signed_login_lease, IntegrityProbe, IntegritySignals, LeaseBinding, LeaseClaims,
@@ -322,13 +331,9 @@ mod tests {
             "process-nonce",
             session_id,
         );
-        let lease = accept_signed_login_lease(
-            &envelope,
-            &signing_key.verifying_key(),
-            &binding,
-            now,
-        )
-        .unwrap();
+        let lease =
+            accept_signed_login_lease(&envelope, &signing_key.verifying_key(), &binding, now)
+                .unwrap();
         AuthSession {
             token: SecretToken::new(token.to_string()),
             username: "user".to_string(),
@@ -486,6 +491,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_publishes_and_logout_detaches_the_durable_usage_owner() {
+        let server = MockServer::start().await;
+        let state = AppState::try_with_client(CloudflareClient::new_injected(
+            server.uri(),
+            DEFAULT_APP_VERSION,
+        ))
+        .unwrap();
+        finalize_login_session(
+            &state,
+            verified_auth_session("usage-owner-token", "usage-owner-session"),
+            "usage-owner-generation".to_string(),
+        )
+        .await
+        .unwrap();
+        let entry = UsageLogEntry {
+            operation: "Flashing".to_string(),
+            title: "durable".to_string(),
+            status: "success".to_string(),
+            event_id: "owner-bound".to_string(),
+            started_at: 1,
+            ended_at: Some(2),
+            duration_ms: Some(1),
+        };
+
+        state.usage_reporter.record(entry.clone());
+        assert_eq!(state.usage_reporter.pending_count(), 1);
+        auth_logout_inner(&state).await.unwrap();
+
+        state.usage_reporter.record(entry);
+        assert_eq!(state.usage_reporter.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_stop_detaches_the_same_durable_usage_generation() {
+        let server = MockServer::start().await;
+        let state = AppState::try_with_client(CloudflareClient::new_injected(
+            server.uri(),
+            DEFAULT_APP_VERSION,
+        ))
+        .unwrap();
+        finalize_login_session(
+            &state,
+            verified_auth_session("session-stop-token", "session-stop-session"),
+            "session-stop-generation".to_string(),
+        )
+        .await
+        .unwrap();
+        let entry = UsageLogEntry {
+            operation: "Mirroring".to_string(),
+            title: "durable".to_string(),
+            status: "success".to_string(),
+            event_id: "session-stop-owner".to_string(),
+            started_at: 1,
+            ended_at: Some(2),
+            duration_ms: Some(1),
+        };
+        state.usage_reporter.record(entry.clone());
+        assert_eq!(state.usage_reporter.pending_count(), 1);
+
+        crate::commands::session::session_stop_inner(&state)
+            .await
+            .unwrap();
+
+        state.usage_reporter.record(entry);
+        assert_eq!(state.usage_reporter.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn closeout_generation_snapshot_holds_idle_admission_until_the_caller_finishes() {
+        let state = AppState::new();
+
+        let (idle, generation) = state.acquire_session_closeout().await.unwrap();
+
+        assert!(generation.is_none());
+        assert!(matches!(
+            state.operation_coordinator.try_acquire_idle(),
+            Err(nwflash_application::OperationCoordinatorError::InProgress)
+        ));
+        drop(idle);
+        assert!(state.operation_coordinator.try_acquire_idle().is_ok());
+    }
+
+    #[tokio::test]
     async fn verified_login_runs_one_crc_check_before_session_publication() {
         let server = MockServer::start().await;
         let signing_key = SigningKey::generate(&mut OsRng);
@@ -611,6 +699,9 @@ mod tests {
         )
         .await
         .expect("signed login should publish its generation");
+        let output_selection = state
+            .firmware_output_directories
+            .replace(std::path::PathBuf::from(r"C:\private\firmware-output"));
 
         auth_logout_inner(&state)
             .await
@@ -627,6 +718,10 @@ mod tests {
             state.operation_coordinator.admission_state(),
             nwflash_application::OperationAdmissionState::Running
         );
+        assert!(state
+            .firmware_output_directories
+            .resolve(&output_selection.selection_id)
+            .is_err());
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ function Get-NwflashProtectedMarkers {
         [pscustomobject]@{ symbol = 'nwflash_protection_admit_local_operation'; name = 'NWFlash.OperationAdmission'; mode = 'Ultra' }
         [pscustomobject]@{ symbol = 'nwflash_protection_verify_image_integrity'; name = 'NWFlash.ImageIntegrityDispatch'; mode = 'Virtualization' }
         [pscustomobject]@{ symbol = 'nwflash_protection_build_identity_matches'; name = 'NWFlash.BuildIdentity'; mode = 'Mutation' }
+        [pscustomobject]@{ symbol = 'nwflash_protection_trace_credential_sentinel'; name = 'NWFlash.TraceCredentialSentinel'; mode = 'Ultra' }
     )
 }
 
@@ -147,6 +148,23 @@ function Resolve-FullyQualifiedLeaf {
         throw "Required file is empty: $fullPath"
     }
     $item.FullName
+}
+
+function Resolve-SingleProtectedDesktopPdb {
+    param([Parameter(Mandatory)][string]$ReleaseDirectory)
+
+    $root = Get-NormalizedFullPath $ReleaseDirectory
+    Assert-NoReparseAncestors $root
+    $candidates = @(
+        foreach ($name in @('nwflash-desktop.pdb', 'nwflash_desktop.pdb')) {
+            $candidate = Join-Path $root $name
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate }
+        }
+    )
+    if ($candidates.Count -ne 1) {
+        throw "Expected exactly one protected desktop PDB under $root."
+    }
+    Resolve-FullyQualifiedLeaf $candidates[0]
 }
 
 function Get-ReparseSafeTreeEntries {
@@ -492,6 +510,17 @@ function Assert-DesktopMarkerLayout {
         if ($begin.Count -ne 1 -or $begin[0].Groups[1].Value -ne $marker.mode -or $end.Count -ne 1 -or $begin[0].Index -ge $end[0].Index) {
             throw "Marker region $($marker.symbol) does not contain exactly Begin$($marker.mode) followed by End."
         }
+        $protectedBody = $region.Substring($begin[0].Index, $end[0].Index - $begin[0].Index)
+        if ($protectedBody -match '(?im)\bret[nq]?\b') {
+            throw "Marker region $($marker.symbol) returns before VMProtectEnd."
+        }
+        if ($marker.symbol -eq 'nwflash_protection_trace_credential_sentinel') {
+            $innerStart = $begin[0].Index + $begin[0].Length
+            $innerBody = $region.Substring($innerStart, $end[0].Index - $innerStart)
+            if ($innerBody -match '(?im)\bcall\b') {
+                throw "Marker region $($marker.symbol) must not call helpers inside the Ultra marker region."
+            }
+        }
     }
     [pscustomobject]@{ verified = $true; marker_count = @(Get-NwflashProtectedMarkers).Count }
 }
@@ -572,6 +601,7 @@ function Read-ProtectedEvidence {
 function New-DefaultProtectionOperations {
     $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).ProviderPath
     [pscustomobject]@{
+        CopyFile = { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination }
         GetSignature = { param($Path) Get-AuthenticodeSignature -LiteralPath $Path }
         AssertGitClean = {
             $status = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all)
@@ -617,12 +647,6 @@ function Invoke-PrepareManualHandoffCore {
     $exe = Resolve-FullyQualifiedLeaf $InputExe
     $pdb = Resolve-FullyQualifiedLeaf $InputPdb
     $map = Resolve-FullyQualifiedLeaf $InputMap
-    Assert-Amd64Pe $exe | Out-Null
-    $signature = & $Operations.GetSignature $exe
-    if ([string]$signature.Status -ne 'NotSigned') { throw "Pre-VMP input must be unsigned; status was $($signature.Status)." }
-    & $Operations.AssertMatchingPdb $exe $pdb
-    $desktopImports = & $Operations.AssertExpectedVmProtectImports $exe
-    $markerLayout = & $Operations.AssertMarkerLayout $exe $map
 
     $output = Get-NormalizedFullPath $ProtectedOutputPath
     $log = Get-NormalizedFullPath $CompilerLogPath
@@ -642,8 +666,6 @@ function Invoke-PrepareManualHandoffCore {
     if (-not (Test-Path -LiteralPath $handoffBase)) { New-Item -ItemType Directory -Path $handoffBase | Out-Null }
     Assert-PathNotReparsePoint $handoffBase | Out-Null
 
-    $sdkResult = & $Operations.VerifySdk $environment.sdk_root
-    $linkResult = & $Operations.VerifyLinkLayout $environment.sdk_root
     $handoffId = [Guid]::NewGuid().ToString('D')
     $handoffDirectory = Join-Path $handoffBase $handoffId
     if (Test-Path -LiteralPath $handoffDirectory) { throw "Handoff directory already exists: $handoffDirectory" }
@@ -651,23 +673,29 @@ function Invoke-PrepareManualHandoffCore {
     $evidenceDirectory = Join-Path $handoffDirectory 'evidence'
     New-Item -ItemType Directory -Path $inputDirectory | Out-Null
     New-Item -ItemType Directory -Path $evidenceDirectory | Out-Null
-    $sdkEvidence = Write-AtomicEvidence -Path (Join-Path $evidenceDirectory 'sdk-verification.json') -Value $sdkResult
-    $linkEvidence = Write-AtomicEvidence -Path (Join-Path $evidenceDirectory 'link-layout.json') -Value $linkResult
-
     $copiedExe = Join-Path $inputDirectory 'nwflash-desktop.exe'
     $copiedPdb = Join-Path $inputDirectory 'nwflash-desktop.pdb'
     $copiedMap = Join-Path $inputDirectory 'nwflash-desktop.map'
-    Copy-Item -LiteralPath $exe -Destination $copiedExe
-    Copy-Item -LiteralPath $pdb -Destination $copiedPdb
-    Copy-Item -LiteralPath $map -Destination $copiedMap
-    foreach ($pair in @(@($exe, $copiedExe), @($pdb, $copiedPdb), @($map, $copiedMap))) {
-        if ((Get-Sha256Hex $pair[0]) -ne (Get-Sha256Hex $pair[1]) -or (Get-Item -LiteralPath $pair[0]).Length -ne (Get-Item -LiteralPath $pair[1]).Length) {
-            throw "Handoff copy hash/length mismatch: $($pair[1])"
-        }
-    }
-    # The source EXE/PDB/MAP were fully validated above. Exact length and SHA-256
-    # equality transfer those proofs to the immutable handoff copies without a
-    # second 90+ MiB dumpbin disassembly pass that can truncate under pressure.
+    & $Operations.CopyFile $exe $copiedExe
+    & $Operations.CopyFile $pdb $copiedPdb
+    & $Operations.CopyFile $map $copiedMap
+
+    # The staged snapshot is the sole validation and evidence authority. Source
+    # files are never read again after copying starts, so replacements cannot
+    # transfer proof from one generation to another.
+    $copiedExe = Resolve-FullyQualifiedLeaf $copiedExe
+    $copiedPdb = Resolve-FullyQualifiedLeaf $copiedPdb
+    $copiedMap = Resolve-FullyQualifiedLeaf $copiedMap
+    Assert-Amd64Pe $copiedExe | Out-Null
+    $signature = & $Operations.GetSignature $copiedExe
+    if ([string]$signature.Status -ne 'NotSigned') { throw "Pre-VMP input must be unsigned; status was $($signature.Status)." }
+    & $Operations.AssertMatchingPdb $copiedExe $copiedPdb
+    $desktopImports = & $Operations.AssertExpectedVmProtectImports $copiedExe
+    $markerLayout = & $Operations.AssertMarkerLayout $copiedExe $copiedMap
+    $sdkResult = & $Operations.VerifySdk $environment.sdk_root
+    $linkResult = & $Operations.VerifyLinkLayout $environment.sdk_root
+    $sdkEvidence = Write-AtomicEvidence -Path (Join-Path $evidenceDirectory 'sdk-verification.json') -Value $sdkResult
+    $linkEvidence = Write-AtomicEvidence -Path (Join-Path $evidenceDirectory 'link-layout.json') -Value $linkResult
     foreach ($path in @($copiedExe, $copiedPdb, $copiedMap)) { (Get-Item -LiteralPath $path).IsReadOnly = $true }
 
     & $Operations.AssertGitClean

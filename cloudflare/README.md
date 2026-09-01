@@ -22,8 +22,8 @@ Nwflash 的**整个服务端都托管在 Cloudflare,零自有服务器**:
 | 端点 | 说明 |
 | --- | --- |
 | `GET /health` | 健康检查 |
-| `POST /api/login` | 账号密码 → API token + Ed25519 签名登录租约 |
-| `GET /api/me` | 校验 token 有效性(桌面端每次强制登录,不再用于免登录) |
+| `POST /api/login` | 账号密码 → API token + Ed25519 签名登录租约;`revoked:*` marker 先 CAS 为唯一的新 32-byte hex token |
+| `GET /api/me` | 校验 token 有效性;已替换/撤销/停用 token 返回 401(桌面端每次强制登录,不再用于免登录) |
 | `POST /api/heartbeat` | D1 完整绑定 + sequence/最小间隔/force-exit 单点 CAS;仅 CAS 获胜返回严格递增签名租约 |
 | `GET /api/security/pins` | `api.nwflash.cc.cd` 的签名叶证书 + WE1 备用 SPKI pin 清单 |
 | `POST /api/integrity/report` | 匿名/鉴权最小完整性事件(4 KiB 上限、闭集字段、IP 限流、event ID 幂等) |

@@ -2,6 +2,8 @@
 //! 供安全刷写（线刷）与 Vivo ROOT 云端 OTA 提取共用。
 //! 读设备信息在 Rust 内部完成，浏览器不提交 serial，也不获得原始输出。
 
+use nwflash_application::OperationAdmissionState;
+use nwflash_domain::OperationKind;
 use nwflash_windows::{
     device_transport::DeviceTransport,
     platform_tools::PlatformTools,
@@ -64,6 +66,48 @@ fn is_generic_version(value: &str) -> bool {
     lower.contains("release-keys") || lower == "unknown" || lower == "not found"
 }
 
+#[allow(
+    dead_code,
+    reason = "legacy callers migrate to identity_refresh_block_reason"
+)]
+pub(crate) fn identity_refresh_is_blocked(
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> bool {
+    identity_refresh_block_reason(admission, operation).is_some()
+}
+
+pub(crate) fn identity_refresh_block_reason(
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> Option<&'static str> {
+    match admission {
+        OperationAdmissionState::ExitPending => Some("skipped:exit_pending"),
+        OperationAdmissionState::Terminating => Some("skipped:terminating"),
+        OperationAdmissionState::Running if operation == OperationKind::Flashing => {
+            Some("denied:flashing")
+        }
+        OperationAdmissionState::Running => None,
+    }
+}
+
+/// Gate identity reads for callers that can observe the operation coordinator.
+/// The legacy function remains available to existing safe-flash call sites;
+/// those callers should migrate to this entry point when coordinator state is
+/// threaded through their command boundary.
+pub async fn read_identity_if_admitted(
+    serial: &str,
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> Result<(String, String), String> {
+    if let Some(reason) = identity_refresh_block_reason(admission, operation) {
+        return Err(format!(
+            "设备信息读取已跳过（{reason}）：当前操作或应用退出流程禁止设备检测。"
+        ));
+    }
+    read_online_ota_identity(serial).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +168,49 @@ mod tests {
         assert!(!error.contains("private"));
         assert!(!error.contains("rom.invalid"));
         assert!(!error.contains("adb"));
+    }
+
+    #[test]
+    fn identity_refresh_gate_skips_adb_spawn_during_flashing_or_teardown() {
+        use nwflash_application::OperationAdmissionState;
+        use nwflash_domain::OperationKind;
+
+        assert_eq!(
+            identity_refresh_block_reason(
+                OperationAdmissionState::Running,
+                OperationKind::Flashing,
+            ),
+            Some("denied:flashing")
+        );
+        assert_eq!(
+            identity_refresh_block_reason(
+                OperationAdmissionState::ExitPending,
+                OperationKind::Idle,
+            ),
+            Some("skipped:exit_pending")
+        );
+        assert_eq!(
+            identity_refresh_block_reason(
+                OperationAdmissionState::Terminating,
+                OperationKind::Idle,
+            ),
+            Some("skipped:terminating")
+        );
+        assert!(identity_refresh_is_blocked(
+            OperationAdmissionState::Running,
+            OperationKind::Flashing,
+        ));
+        assert!(identity_refresh_is_blocked(
+            OperationAdmissionState::ExitPending,
+            OperationKind::Idle,
+        ));
+        assert!(identity_refresh_is_blocked(
+            OperationAdmissionState::Terminating,
+            OperationKind::Idle,
+        ));
+        assert!(!identity_refresh_is_blocked(
+            OperationAdmissionState::Running,
+            OperationKind::Idle,
+        ));
     }
 }

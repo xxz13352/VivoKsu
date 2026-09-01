@@ -2031,8 +2031,8 @@ async fn root_execute_patched_artifact_flash_inner(
             let lease = capability_scope
                 .capture()
                 .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
-            let plan = root_patched_artifacts
-                .take_prepared_flash_with_lease(lease, &artifact_id)?;
+            let plan =
+                root_patched_artifacts.take_prepared_flash_with_lease(lease, &artifact_id)?;
             Ok(crate::commands::quick_flash::QuickFlashExecutionRequest {
                 plan,
                 auto_reboot: false,
@@ -2274,9 +2274,8 @@ mod tests {
         parse_kernel_release, publish_root_patch_candidate, quick_flash_partition_from_name,
         root_execute_patched_artifact_flash_inner, root_preflight_from_runtime,
         root_preflight_response, AutomaticRootStage, RootAutomaticOptionsDto, RootImageKind,
-        RootImageRuntime,
-        RootOfficialVendorBootPatchOptionsDto, RootPatchedArtifactRuntime, RootPreflightOptionsDto,
-        RootVivoKsuPatchOptionsDto,
+        RootImageRuntime, RootOfficialVendorBootPatchOptionsDto, RootPatchedArtifactRuntime,
+        RootPreflightOptionsDto, RootVivoKsuPatchOptionsDto,
     };
     use crate::{session_capabilities::SessionCapabilityScope, AppState};
     use futures::future::BoxFuture;
@@ -2286,8 +2285,8 @@ mod tests {
         SafeFlashPreparedSource,
     };
     use nwflash_domain::{
-        DomainError, FlashImageInfo, OperationKind, PartitionExecutionPlan,
-        PartitionOperationKind, PartitionTask, PartitionTransportKind, QuickFlashPartition,
+        DomainError, FlashImageInfo, OperationKind, PartitionExecutionPlan, PartitionOperationKind,
+        PartitionTask, PartitionTransportKind, QuickFlashPartition,
     };
     use tokio::sync::Notify;
 
@@ -3537,9 +3536,7 @@ mod tests {
             },
             QuickFlashPartition::InitBoot,
         );
-        let mut plan = prepared_root_patch_plan(Path::new(
-            r"C:\test-only\patched-init_boot.img",
-        ));
+        let mut plan = prepared_root_patch_plan(Path::new(r"C:\test-only\patched-init_boot.img"));
         plan.transport = PartitionTransportKind::Automatic;
         state
             .root_patched_artifacts

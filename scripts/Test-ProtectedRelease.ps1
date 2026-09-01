@@ -96,6 +96,53 @@ function New-MarkerReviewFixture {
     }
 }
 
+function New-MarkerLayoutFixture {
+    param(
+        [Parameter(Mandatory)][string]$MapPath,
+        [Parameter(Mandatory)][string]$DisassemblyPath,
+        [switch]$TraceSentinelReturnsEarly,
+        [switch]$TraceSentinelCallsHelper
+    )
+    $mapLines = [Collections.Generic.List[string]]::new()
+    $disassemblyLines = [Collections.Generic.List[string]]::new()
+    $index = 1
+    foreach ($marker in Get-NwflashProtectedMarkers) {
+        $mapLines.Add((' 0001:{0:X8} {1} 0000000000000000 f probe.obj' -f $index, $marker.symbol))
+        $disassemblyLines.Add("$($marker.symbol):")
+        $disassemblyLines.Add("  call VMProtectBegin$($marker.mode)")
+        if ($TraceSentinelReturnsEarly -and $marker.name -eq 'NWFlash.TraceCredentialSentinel') {
+            $disassemblyLines.Add('  ret')
+        }
+        if ($TraceSentinelCallsHelper -and $marker.name -eq 'NWFlash.TraceCredentialSentinel') {
+            $disassemblyLines.Add('  call forbidden_helper')
+        }
+        $disassemblyLines.Add('  nop')
+        $disassemblyLines.Add('  call VMProtectEnd')
+        $disassemblyLines.Add('  ret')
+        $index++
+    }
+    [IO.File]::WriteAllLines($MapPath, $mapLines)
+    [IO.File]::WriteAllLines($DisassemblyPath, $disassemblyLines)
+}
+
+$protectedMarkers = @(Get-NwflashProtectedMarkers)
+$traceSentinelMarkers = @($protectedMarkers | Where-Object {
+    [string]$_.symbol -eq 'nwflash_protection_trace_credential_sentinel'
+})
+Assert-Condition ($protectedMarkers.Count -eq 6) 'Protected release contract must contain exactly six stable leaf markers.'
+Assert-Condition ($traceSentinelMarkers.Count -eq 1) 'Protected release contract must contain exactly one trace credential sentinel leaf.'
+Assert-Condition (
+    [string]$traceSentinelMarkers[0].name -eq 'NWFlash.TraceCredentialSentinel' -and
+    [string]$traceSentinelMarkers[0].mode -eq 'Ultra'
+) 'Trace credential sentinel must use the reviewed name and Ultra mode.'
+Assert-Condition (@(Get-NwflashRequiredSdkImports).Count -eq 8) 'Adding the trace sentinel must not expand the exact SDK import set.'
+
+$linkProbeSource = Get-Content -LiteralPath (Join-Path $repo 'src\Nwflash.Desktop\src-tauri\crates\nwflash-protection\examples\vmp_link_probe.rs') -Raw
+Assert-Condition ($linkProbeSource.Contains('trace_credential_sentinel(')) 'The link probe does not call the trace credential sentinel leaf.'
+Assert-Condition ($linkProbeSource -match '(?s)TraceOutputSession::from_reader\(') 'The link probe does not use the sealed Wave1 logical-stream API.'
+Assert-Condition ($linkProbeSource.Contains('credential_sentinel_input()')) 'The link probe bypasses the fixed-size sentinel input boundary.'
+Assert-Condition ($linkProbeSource -match '(?s)black_box\s*\([^;]*trace_credential') 'The link probe does not keep the trace sentinel result live through black_box.'
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("nwflash-task8-contract-" + [Guid]::NewGuid().ToString('N'))
 $priorKey = $env:NWFLASH_SESSION_VERIFY_KEY_B64
 $priorBuildId = $env:NWFLASH_BUILD_ID
@@ -119,6 +166,26 @@ try {
     $compilerLog = Join-Path $operatorRoot 'vmprotect-compiler.log'
     New-Amd64PeFixture -Path $sourceExe -Tail 1
     [IO.File]::WriteAllBytes($sourcePdb, [byte[]](1, 2, 3, 4))
+    [IO.File]::WriteAllText($sourceMap, 'fixture marker layout')
+
+    $layoutDisassembly = Join-Path $testRoot 'layout-disassembly.txt'
+    $fakeDumpbin = Join-Path $testRoot 'fake-dumpbin.ps1'
+    [IO.File]::WriteAllText($fakeDumpbin, @'
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+Get-Content -LiteralPath (Join-Path $PSScriptRoot 'layout-disassembly.txt')
+exit 0
+'@)
+    New-MarkerLayoutFixture -MapPath $sourceMap -DisassemblyPath $layoutDisassembly
+    $layoutFixtureResult = Assert-DesktopMarkerLayout -Executable $sourceExe -MapPath $sourceMap -DumpbinPath $fakeDumpbin
+    Assert-Condition ($layoutFixtureResult.verified -and $layoutFixtureResult.marker_count -eq 6) 'Six-leaf physical marker fixture did not pass.'
+    New-MarkerLayoutFixture -MapPath $sourceMap -DisassemblyPath $layoutDisassembly -TraceSentinelReturnsEarly
+    Assert-ThrowsLike {
+        Assert-DesktopMarkerLayout -Executable $sourceExe -MapPath $sourceMap -DumpbinPath $fakeDumpbin
+    } '*returns before VMProtectEnd*' 'Marker layout accepted an early return inside the trace sentinel region.'
+    New-MarkerLayoutFixture -MapPath $sourceMap -DisassemblyPath $layoutDisassembly -TraceSentinelCallsHelper
+    Assert-ThrowsLike {
+        Assert-DesktopMarkerLayout -Executable $sourceExe -MapPath $sourceMap -DumpbinPath $fakeDumpbin
+    } '*must not call helpers*' 'Marker layout accepted a helper call inside the trace sentinel region.'
     [IO.File]::WriteAllText($sourceMap, 'fixture marker layout')
 
     $env:NWFLASH_SESSION_VERIFY_KEY_B64 = [Convert]::ToBase64String([byte[]](0..31))
@@ -165,14 +232,29 @@ try {
             files_copied = 0
         }
     }
+    $pdbValidationPairs = [Collections.Generic.List[object]]::new()
+    $importValidationPaths = [Collections.Generic.List[string]]::new()
+    $markerValidationPaths = [Collections.Generic.List[string]]::new()
     $operations = [pscustomobject]@{
+        CopyFile = { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination }
         GetSignature = { param($Path) $unsignedSignature }
         AssertGitClean = {}
         GetGitCommit = { '0123456789abcdef0123456789abcdef01234567' }
-        AssertMatchingPdb = { param($Exe, $Pdb) }
-        AssertMarkerLayout = { param($Exe, $Map) [pscustomobject]@{ verified = $true } }
+        AssertMatchingPdb = {
+            param($Exe, $Pdb)
+            $pdbValidationPairs.Add([pscustomobject]@{
+                exe = [IO.Path]::GetFullPath($Exe)
+                pdb = [IO.Path]::GetFullPath($Pdb)
+            }) | Out-Null
+        }.GetNewClosure()
+        AssertMarkerLayout = {
+            param($Exe, $Map)
+            $markerValidationPaths.Add([IO.Path]::GetFullPath($Exe)) | Out-Null
+            [pscustomobject]@{ verified = $true }
+        }.GetNewClosure()
         AssertExpectedVmProtectImports = {
             param($Path)
+            $importValidationPaths.Add([IO.Path]::GetFullPath($Path)) | Out-Null
             [pscustomobject]@{
                 verified = $true
                 imported_dll = 'VMProtectSDK64.dll'
@@ -222,14 +304,160 @@ try {
             -ProtectedOutputPath $sourceExe -CompilerLogPath $compilerLog -HandoffRoot $handoffRoot -Operations $operations
     } '*must be distinct*' 'Prepare accepted in-place protected output.'
 
+    $stableSnapshotRoot = Join-Path $testRoot 'stable-snapshot'
+    $stableSourceRoot = Join-Path $stableSnapshotRoot 'source'
+    $stableHandoffRoot = Join-Path $stableSnapshotRoot 'handoffs'
+    $stableOperatorRoot = Join-Path $stableSnapshotRoot 'operator-output'
+    New-Item -ItemType Directory -Path $stableSourceRoot,$stableHandoffRoot,$stableOperatorRoot | Out-Null
+    $stableExe = Join-Path $stableSourceRoot 'nwflash-desktop.exe'
+    $stablePdb = Join-Path $stableSourceRoot 'nwflash-desktop.pdb'
+    $stableMap = Join-Path $stableSourceRoot 'nwflash-desktop.map'
+    New-Amd64PeFixture -Path $stableExe -Tail 7
+    [IO.File]::WriteAllBytes($stablePdb, [byte[]](7))
+    [IO.File]::WriteAllText($stableMap, '7')
+    $stableCopyState = [pscustomobject]@{ Count = 0 }
+    $stableOperations = $operations.PSObject.Copy()
+    $stableOperations.CopyFile = {
+        param($Source, $Destination)
+        Copy-Item -LiteralPath $Source -Destination $Destination
+        $stableCopyState.Count++
+        if ($stableCopyState.Count -eq 1) {
+            $replacedExe = [IO.File]::ReadAllBytes($stableExe)
+            $replacedExe[-1] = 6
+            [IO.File]::WriteAllBytes($stableExe, $replacedExe)
+        }
+    }.GetNewClosure()
+    $stableOperations.AssertMatchingPdb = {
+        param($Exe, $Pdb)
+        $exeBytes = [IO.File]::ReadAllBytes($Exe)
+        $pdbBytes = [IO.File]::ReadAllBytes($Pdb)
+        if ($exeBytes[-1] -ne $pdbBytes[0]) { throw 'stable snapshot PDB mismatch' }
+    }
+    $stableOperations.AssertMarkerLayout = {
+        param($Exe, $Map)
+        $exeBytes = [IO.File]::ReadAllBytes($Exe)
+        if ([string]$exeBytes[-1] -ne [IO.File]::ReadAllText($Map)) { throw 'stable snapshot MAP mismatch' }
+        [pscustomobject]@{ verified = $true }
+    }
+    $stableOperations.AssertExpectedVmProtectImports = {
+        param($Path)
+        [pscustomobject]@{
+            verified = $true
+            imported_dll = 'VMProtectSDK64.dll'
+            required_imports = @(Get-NwflashRequiredSdkImports)
+        }
+    }
+    $stablePreparedPath = Invoke-PrepareManualHandoffCore -InputExe $stableExe -InputPdb $stablePdb -InputMap $stableMap `
+        -ProtectedOutputPath (Join-Path $stableOperatorRoot 'nwflash-desktop.protected.exe') `
+        -CompilerLogPath (Join-Path $stableOperatorRoot 'vmprotect-compiler.log') `
+        -HandoffRoot $stableHandoffRoot -Operations $stableOperations
+    $stablePrepared = Get-Content -Raw -LiteralPath $stablePreparedPath | ConvertFrom-Json
+    Assert-Condition ($stableCopyState.Count -eq 3) 'Prepare bypassed the injected snapshot copy operation.'
+    Assert-Condition ($stablePrepared.input_exe.sha256 -eq (Get-Sha256Hex $stablePrepared.input_exe.path)) 'Prepared identity does not describe the staged EXE.'
+    Assert-Condition ($stablePrepared.input_exe.sha256 -ne (Get-Sha256Hex $stableExe)) 'Prepared identity was recomputed from a replaced source EXE.'
+
+    $swapRoot = Join-Path $testRoot 'source-swap'
+    $swapSourceRoot = Join-Path $swapRoot 'source'
+    $swapHandoffRoot = Join-Path $swapRoot 'handoffs'
+    $swapOperatorRoot = Join-Path $swapRoot 'operator-output'
+    New-Item -ItemType Directory -Path $swapSourceRoot,$swapHandoffRoot,$swapOperatorRoot | Out-Null
+    $swapExe = Join-Path $swapSourceRoot 'nwflash-desktop.exe'
+    $swapPdb = Join-Path $swapSourceRoot 'nwflash-desktop.pdb'
+    $swapMap = Join-Path $swapSourceRoot 'nwflash-desktop.map'
+    New-Amd64PeFixture -Path $swapExe -Tail 9
+    [IO.File]::WriteAllBytes($swapPdb, [byte[]](9))
+    [IO.File]::WriteAllText($swapMap, '9')
+    $swapCopyState = [pscustomobject]@{ Count = 0 }
+    $swapOperations = $operations.PSObject.Copy()
+    $swapOperations.CopyFile = {
+        param($Source, $Destination)
+        Copy-Item -LiteralPath $Source -Destination $Destination
+        $swapCopyState.Count++
+        if ($swapCopyState.Count -eq 1) {
+            [IO.File]::WriteAllBytes($swapPdb, [byte[]](8))
+            [IO.File]::WriteAllText($swapMap, '8')
+        }
+    }.GetNewClosure()
+    $swapOperations.AssertMatchingPdb = {
+        param($Exe, $Pdb)
+        $exeBytes = [IO.File]::ReadAllBytes($Exe)
+        $pdbBytes = [IO.File]::ReadAllBytes($Pdb)
+        if ($exeBytes[-1] -ne $pdbBytes[0]) { throw 'snapshot PDB mismatch' }
+    }
+    $swapOperations.AssertMarkerLayout = {
+        param($Exe, $Map)
+        $exeBytes = [IO.File]::ReadAllBytes($Exe)
+        if ([string]$exeBytes[-1] -ne [IO.File]::ReadAllText($Map)) { throw 'snapshot MAP mismatch' }
+        [pscustomobject]@{ verified = $true }
+    }
+    Assert-ThrowsLike {
+        Invoke-PrepareManualHandoffCore -InputExe $swapExe -InputPdb $swapPdb -InputMap $swapMap `
+            -ProtectedOutputPath (Join-Path $swapOperatorRoot 'nwflash-desktop.protected.exe') `
+            -CompilerLogPath (Join-Path $swapOperatorRoot 'vmprotect-compiler.log') `
+            -HandoffRoot $swapHandoffRoot -Operations $swapOperations
+    } '*snapshot PDB mismatch*' 'Prepare transferred validation from one source generation to a mixed snapshot.'
+
+    $pdbCandidateRoot = Join-Path $testRoot 'pdb-candidates'
+    New-Item -ItemType Directory -Path $pdbCandidateRoot | Out-Null
+    Assert-ThrowsLike {
+        Resolve-SingleProtectedDesktopPdb -ReleaseDirectory $pdbCandidateRoot
+    } '*Expected exactly one protected desktop PDB*' 'PDB selection accepted zero candidates.'
+    $dashPdb = Join-Path $pdbCandidateRoot 'nwflash-desktop.pdb'
+    [IO.File]::WriteAllBytes($dashPdb, [byte[]](1))
+    Assert-Condition ((Resolve-SingleProtectedDesktopPdb -ReleaseDirectory $pdbCandidateRoot) -eq $dashPdb) 'PDB selection did not return the sole dash-form candidate.'
+    $underscorePdb = Join-Path $pdbCandidateRoot 'nwflash_desktop.pdb'
+    [IO.File]::WriteAllBytes($underscorePdb, [byte[]](2))
+    Assert-ThrowsLike {
+        Resolve-SingleProtectedDesktopPdb -ReleaseDirectory $pdbCandidateRoot
+    } '*Expected exactly one protected desktop PDB*' 'PDB selection accepted two candidates.'
+    Remove-Item -LiteralPath $dashPdb -Force
+    Assert-Condition ((Resolve-SingleProtectedDesktopPdb -ReleaseDirectory $pdbCandidateRoot) -eq $underscorePdb) 'PDB selection did not return the sole underscore-form candidate.'
+
+    $cleanupScript = Join-Path $repo 'scripts\vmp\cleanup-generated-preflight.ps1'
+    $generatedPreflightRoot = Join-Path $repo 'artifacts\vmp-preflight'
+    Assert-Condition (-not (Test-Path -LiteralPath $generatedPreflightRoot)) 'Cleanup contract requires an initially absent generated preflight root.'
+    Assert-ThrowsLike {
+        & $cleanupScript -Root (Join-Path $testRoot 'outside-preflight')
+    } '*Refusing cleanup outside the exact generated preflight root*' 'Generated preflight cleanup accepted an out-of-scope root.'
+    New-Item -ItemType Directory -Path $generatedPreflightRoot | Out-Null
+    [IO.File]::WriteAllText((Join-Path $generatedPreflightRoot 'generated.txt'), 'generated')
+    & $cleanupScript -Root $generatedPreflightRoot
+    Assert-Condition (-not (Test-Path -LiteralPath $generatedPreflightRoot)) 'Generated preflight cleanup did not remove the exact generated root.'
+
+    $cleanupExternalRoot = Join-Path $testRoot 'cleanup-external'
+    New-Item -ItemType Directory -Path $cleanupExternalRoot | Out-Null
+    [IO.File]::WriteAllText((Join-Path $cleanupExternalRoot 'must-survive.txt'), 'survive')
+    New-Item -ItemType Directory -Path $generatedPreflightRoot | Out-Null
+    $cleanupChildJunction = Join-Path $generatedPreflightRoot 'outside-link'
+    New-Item -ItemType Junction -Path $cleanupChildJunction -Target $cleanupExternalRoot | Out-Null
+    try {
+        Assert-ThrowsLike {
+            & $cleanupScript -Root $generatedPreflightRoot
+        } '*Reparse points are not allowed*' 'Generated preflight cleanup traversed a child junction.'
+        Assert-Condition (Test-Path -LiteralPath (Join-Path $cleanupExternalRoot 'must-survive.txt')) 'Generated preflight cleanup touched a junction target.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $cleanupChildJunction) { Remove-Item -LiteralPath $cleanupChildJunction -Force }
+        if (Test-Path -LiteralPath $generatedPreflightRoot) { Remove-Item -LiteralPath $generatedPreflightRoot -Recurse -Force }
+    }
+
     $preparedPath = Invoke-PrepareManualHandoffCore -InputExe $sourceExe -InputPdb $sourcePdb -InputMap $sourceMap `
         -ProtectedOutputPath $protectedOutput -CompilerLogPath $compilerLog -HandoffRoot $handoffRoot -Operations $operations
     $prepared = Get-Content -Raw -LiteralPath $preparedPath | ConvertFrom-Json
     Assert-Condition ((Get-Item -LiteralPath $preparedPath).IsReadOnly) 'prepared.json must be immutable.'
     Assert-Condition ($prepared.state -eq 'prepared') 'Prepare emitted the wrong state.'
     Assert-Condition ($null -eq $prepared.previous_evidence_sha256) 'Prepared state must not invent prior evidence.'
-    Assert-Condition ($prepared.input_exe.sha256 -eq (Get-Sha256Hex $sourceExe)) 'Prepared EXE hash does not bind the source.'
+    Assert-Condition (@($prepared.markers).Count -eq 6) 'Prepared evidence did not bind the exact six-leaf marker set.'
+    Assert-Condition (@($prepared.markers | Where-Object {
+        [string]$_.symbol -eq 'nwflash_protection_trace_credential_sentinel' -and
+        [string]$_.name -eq 'NWFlash.TraceCredentialSentinel' -and
+        [string]$_.mode -eq 'Ultra'
+    }).Count -eq 1) 'Prepared evidence did not bind the trace sentinel symbol, name, and mode.'
+    Assert-Condition ($prepared.input_exe.sha256 -eq (Get-Sha256Hex $prepared.input_exe.path)) 'Prepared EXE hash does not bind the staged snapshot.'
     Assert-Condition ($prepared.input_map.marker_layout_verified) 'Prepared evidence omitted desktop MAP proof.'
+    Assert-Condition ($pdbValidationPairs.Count -eq 1 -and $pdbValidationPairs[0].exe -eq [string]$prepared.input_exe.path -and $pdbValidationPairs[0].pdb -eq [string]$prepared.input_pdb.path) 'PDB identity was not checked exactly once on the staged EXE/PDB pair.'
+    Assert-Condition ($importValidationPaths.Count -eq 1 -and $importValidationPaths[0] -eq [string]$prepared.input_exe.path) 'VMProtect imports were not checked exactly once on the staged EXE.'
+    Assert-Condition ($markerValidationPaths.Count -eq 1 -and $markerValidationPaths[0] -eq [string]$prepared.input_exe.path) 'Marker layout was not checked exactly once on the staged EXE.'
     Assert-Condition (-not (Get-ChildItem -LiteralPath (Split-Path -Parent $preparedPath) -Recurse -File | Where-Object { $_.Name -like 'VMProtect*' })) 'Prepare copied an SDK artifact.'
 
     $preparedHash = Get-Sha256Hex $preparedPath
@@ -247,6 +475,18 @@ try {
     } '*must differ from the unprotected input*' 'Accept allowed unchanged protected bytes.'
 
     New-Amd64PeFixture -Path $protectedOutput -Tail 2
+    New-MarkerReviewFixture -Prepared $prepared -PreparedHash $preparedHash -CompilerLogHash $compilerLogHash `
+        -ProtectedOutputHash (Get-Sha256Hex $protectedOutput) |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
+
+    $reviewWithoutTraceSentinel = Get-Content -Raw -LiteralPath $reviewPath | ConvertFrom-Json -AsHashtable
+    $reviewWithoutTraceSentinel.markers = @($reviewWithoutTraceSentinel.markers | Where-Object {
+        [string]$_.name -ne 'NWFlash.TraceCredentialSentinel'
+    })
+    $reviewWithoutTraceSentinel | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
+    Assert-ThrowsLike {
+        Invoke-AcceptManualOutputCore -PreparedManifest $preparedPath -MarkerReviewPath $reviewPath -Operations $operations
+    } '*exact marker set*' 'Accept authorized a marker review that omitted the trace credential sentinel.'
     New-MarkerReviewFixture -Prepared $prepared -PreparedHash $preparedHash -CompilerLogHash $compilerLogHash `
         -ProtectedOutputHash (Get-Sha256Hex $protectedOutput) |
         ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reviewPath -Encoding UTF8

@@ -2,11 +2,13 @@ use std::sync::{Arc, Mutex};
 
 use nwflash_application::{
     parse_adb_battery_level, parse_adb_device_details, result_to_domain_error, DeviceMonitor,
-    DeviceSession, MonitorRefreshResult,
+    DeviceSession, MonitorRefreshResult, OperationAdmissionState,
 };
 use nwflash_domain::{
     DeviceConnectionState, DeviceRefreshMode, DeviceSnapshot, DomainError, OperationKind,
+    OperationLogLevel,
 };
+use nwflash_infrastructure::OperationLogStore;
 use nwflash_windows::{
     process::{run_command, run_command_with_cancel},
     DeviceTransport, PlatformDeviceDiscovery, PlatformTools, ProcessCommand,
@@ -67,6 +69,14 @@ impl DeviceRuntime {
         }
 
         Ok(snapshot.serial.clone())
+    }
+
+    fn snapshot(&self) -> DeviceSnapshot {
+        self.monitor
+            .lock()
+            .expect("device monitor lock should not be poisoned")
+            .snapshot()
+            .clone()
     }
 
     pub fn active_fastboot_serial(&self) -> Result<String, String> {
@@ -148,22 +158,97 @@ pub fn build_reboot_command_for_connection(
     command.map_err(|error| error.to_string())
 }
 
+#[allow(dead_code)]
 pub async fn automatic_device_refresh(
     runtime: &DeviceRuntime,
     is_device_busy: bool,
 ) -> DeviceSnapshotUpdate {
-    if is_device_busy {
-        return runtime.apply_snapshot(
-            DeviceSnapshot::disconnected(),
-            true,
-            DeviceRefreshMode::Automatic,
-        );
+    let operation = if is_device_busy {
+        OperationKind::Flashing
+    } else {
+        OperationKind::Idle
+    };
+    automatic_device_refresh_with_admission(runtime, OperationAdmissionState::Running, operation)
+        .await
+}
+
+/// Automatic refresh entry point for callers that can provide the coordinator
+/// admission snapshot. The legacy bool-only wrapper above maps busy to
+/// `Flashing` until the monitor binding is migrated to this function.
+pub async fn automatic_device_refresh_with_admission(
+    runtime: &DeviceRuntime,
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> DeviceSnapshotUpdate {
+    if device_refresh_is_blocked(admission, operation) {
+        return DeviceSnapshotUpdate {
+            snapshot: runtime.snapshot(),
+            should_emit: false,
+        };
     }
 
     let snapshot = discover_current_device()
         .await
         .unwrap_or_else(|_| discovery_error_snapshot());
     runtime.apply_snapshot(snapshot, false, DeviceRefreshMode::Automatic)
+}
+
+pub async fn automatic_device_refresh_guarded_with_log(
+    runtime: &DeviceRuntime,
+    coordinator: &nwflash_application::OperationCoordinator,
+    operation_log_store: Option<&OperationLogStore>,
+) -> DeviceSnapshotUpdate {
+    let Ok(_idle) = coordinator.try_acquire_idle() else {
+        let operation = coordinator.state().await.kind;
+        let reason = device_refresh_block_reason(coordinator.admission_state(), operation)
+            .unwrap_or("denied:busy");
+        if let Some(log) = operation_log_store {
+            record_refresh_gate(log, "设备自动刷新", reason);
+        }
+        return DeviceSnapshotUpdate {
+            snapshot: runtime.snapshot(),
+            should_emit: false,
+        };
+    };
+    automatic_device_refresh_with_admission(
+        runtime,
+        OperationAdmissionState::Running,
+        OperationKind::Idle,
+    )
+    .await
+}
+
+pub(crate) fn device_refresh_is_blocked(
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> bool {
+    device_refresh_block_reason(admission, operation).is_some()
+}
+
+pub(crate) fn device_refresh_block_reason(
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> Option<&'static str> {
+    match admission {
+        OperationAdmissionState::ExitPending => Some("skipped:exit_pending"),
+        OperationAdmissionState::Terminating => Some("skipped:terminating"),
+        OperationAdmissionState::Running if operation == OperationKind::Flashing => {
+            Some("denied:flashing")
+        }
+        OperationAdmissionState::Running => None,
+    }
+}
+
+pub(crate) fn record_refresh_gate(
+    operation_log_store: &OperationLogStore,
+    operation: &'static str,
+    reason: &'static str,
+) {
+    operation_log_store.write(
+        OperationLogLevel::Warning,
+        format!("{operation}已跳过（{reason}）。"),
+        None,
+    );
 }
 
 pub(crate) async fn discover_current_device() -> Result<DeviceSnapshot, String> {
@@ -222,6 +307,19 @@ pub async fn device_refresh(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<DeviceSnapshot, String> {
+    let operation = state.operation_coordinator.state().await.kind;
+    let admission = state.operation_coordinator.admission_state();
+    if let Some(reason) = device_refresh_block_reason(admission, operation) {
+        record_refresh_gate(&state.operation_log_store, "设备刷新", reason);
+        return Err(format!("设备刷新已跳过（{reason}）。"));
+    }
+    let _idle = match state.operation_coordinator.try_acquire_idle() {
+        Ok(lease) => lease,
+        Err(error) => {
+            record_refresh_gate(&state.operation_log_store, "设备刷新", "denied:busy");
+            return Err(error.to_string());
+        }
+    };
     let snapshot = discover_current_device().await?;
 
     let update = state.device_runtime.apply_snapshot(
@@ -424,5 +522,66 @@ mod tests {
         assert_eq!(snapshot.model, "V2318A");
         assert_eq!(snapshot.android_version, "15");
         assert_eq!(snapshot.battery_level, "78%");
+    }
+
+    #[tokio::test]
+    async fn automatic_refresh_is_skipped_without_mutating_snapshot_while_operation_is_busy() {
+        let runtime = DeviceRuntime::new();
+        let original = adb("SN-BUSY");
+        runtime.apply_snapshot(original.clone(), false, DeviceRefreshMode::Manual);
+
+        let update = automatic_device_refresh(&runtime, true).await;
+
+        assert_eq!(update.snapshot, original);
+        assert!(!update.should_emit);
+    }
+
+    #[test]
+    fn refresh_gate_denies_discovery_for_flashing_and_teardown_admission() {
+        use nwflash_application::OperationAdmissionState;
+
+        assert_eq!(
+            device_refresh_block_reason(OperationAdmissionState::Running, OperationKind::Flashing,),
+            Some("denied:flashing")
+        );
+        assert_eq!(
+            device_refresh_block_reason(OperationAdmissionState::ExitPending, OperationKind::Idle,),
+            Some("skipped:exit_pending")
+        );
+        assert_eq!(
+            device_refresh_block_reason(OperationAdmissionState::Terminating, OperationKind::Idle,),
+            Some("skipped:terminating")
+        );
+        assert!(device_refresh_is_blocked(
+            OperationAdmissionState::Running,
+            OperationKind::Flashing,
+        ));
+        assert!(device_refresh_is_blocked(
+            OperationAdmissionState::ExitPending,
+            OperationKind::Idle,
+        ));
+        assert!(device_refresh_is_blocked(
+            OperationAdmissionState::Terminating,
+            OperationKind::Idle,
+        ));
+        assert!(!device_refresh_is_blocked(
+            OperationAdmissionState::Running,
+            OperationKind::Idle,
+        ));
+    }
+
+    #[test]
+    fn refresh_gate_records_only_a_safe_denied_or_skipped_reason() {
+        let log = OperationLogStore::new(None, 10);
+
+        record_refresh_gate(&log, "设备刷新", "skipped:exit_pending");
+
+        let entries = log.snapshot();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, OperationLogLevel::Warning);
+        assert_eq!(
+            entries[0].message,
+            "设备刷新已跳过（skipped:exit_pending）。"
+        );
     }
 }

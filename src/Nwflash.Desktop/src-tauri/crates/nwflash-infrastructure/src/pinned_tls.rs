@@ -439,6 +439,9 @@ fn build_http_client(
 
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(30))
+        // Trace uploads consume single-use sentinel receipts, so protocol
+        // retries must remain visible to the spool/reseal state machine.
+        .retry(reqwest::retry::never())
         .no_proxy()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())

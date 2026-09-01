@@ -22,6 +22,10 @@ type FirmwareExtraction = {
   }>;
 };
 
+type FirmwareOutputDirectorySelection = {
+  selectionId: string;
+};
+
 type FirmwareArtifactConfirmation = {
   partition: string;
   taskCount: number;
@@ -57,7 +61,7 @@ const asSinglePath = (value: string | string[] | null): string | null =>
 export const FirmwareExtractPage: FC = () => {
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [remoteUrl, setRemoteUrl] = useState('');
-  const [outputDirectory, setOutputDirectory] = useState<string | null>(null);
+  const [outputDirectory, setOutputDirectory] = useState<FirmwareOutputDirectorySelection | null>(null);
   const [format, setFormat] = useState('');
   const [entries, setEntries] = useState<FirmwareEntry[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -144,7 +148,9 @@ export const FirmwareExtractPage: FC = () => {
 
   const chooseOutputDirectory = async () => {
     setErrorText('');
-    const selected = asSinglePath(await open({ multiple: false, directory: true }));
+    const selected = await invoke<FirmwareOutputDirectorySelection | null>(
+      'firmware_select_output_directory',
+    );
     if (!selected) {
       return;
     }
@@ -180,11 +186,14 @@ export const FirmwareExtractPage: FC = () => {
     }
 
     setErrorText('');
-    const selectedOutputDirectory = outputDirectory ?? asSinglePath(
-      await open({ multiple: false, directory: true }),
+    const selectedOutputDirectory = outputDirectory ?? await invoke<FirmwareOutputDirectorySelection | null>(
+      'firmware_select_output_directory',
     );
     if (!selectedOutputDirectory) {
       return;
+    }
+    if (!outputDirectory) {
+      setOutputDirectory(selectedOutputDirectory);
     }
 
     setIsWorking(true);
@@ -193,17 +202,17 @@ export const FirmwareExtractPage: FC = () => {
         ? await invoke<FirmwareExtraction>('firmware_extract_remote', {
             url: remoteUrl.trim(),
             selectedIds: [...selectedIds],
-            outputDirectory: selectedOutputDirectory,
+            outputDirectoryId: selectedOutputDirectory.selectionId,
           })
         : format === 'payload'
           ? await invoke<FirmwareExtraction>('firmware_extract_payload_local', {
               selectedIds: [...selectedIds],
-              outputDirectory: selectedOutputDirectory,
+              outputDirectoryId: selectedOutputDirectory.selectionId,
             })
           : await invoke<FirmwareExtraction>('firmware_extract_vivo_local', {
               sourcePath,
               selectedIds: [...selectedIds],
-              outputDirectory: selectedOutputDirectory,
+              outputDirectoryId: selectedOutputDirectory.selectionId,
             });
       setStatusText(`已提取 ${extraction.images.length} 个镜像。`);
       setExtractedImages(extraction.images);

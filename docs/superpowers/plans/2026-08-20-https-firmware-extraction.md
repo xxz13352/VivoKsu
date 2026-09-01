@@ -44,7 +44,7 @@
 
 **Interfaces:**
 - Add `firmware_inspect_remote(state, url) -> Result<FirmwareInspectionDto, String>`.
-- Add `firmware_extract_remote(state, url, selected_ids, output_directory) -> Result<FirmwareExtractionDto, String>`.
+- Add `firmware_extract_remote(state, url, selected_ids, output_directory_id) -> Result<FirmwareExtractionDto, String>`; the current implementation resolves the ID from a Rust-owned native-dialog selection runtime.
 - Direct ZIP entries use checked opaque IDs; payload entries use `PayloadInspectionRuntime` and the same checked IDs as local payload extraction.
 
 - [ ] **Step 1: Add failing command-level tests for direct-image URL inspection and extraction.** Use the existing Range test server and assert DTOs contain only safe entry names, sizes, and generated result IDs.
@@ -61,8 +61,8 @@
 - Modify: `src/Nwflash.Desktop/src/pages/FirmwareExtractPage.test.tsx`
 
 **Interfaces:**
-- Local mode continues invoking `firmware_inspect_local`, `firmware_extract_vivo_local`, and `firmware_extract_payload_local`.
-- Remote mode invokes `firmware_inspect_remote` and `firmware_extract_remote` with `{ url, selectedIds, outputDirectory }`.
+- Local mode continues invoking `firmware_inspect_local`, `firmware_extract_vivo_local`, and `firmware_extract_payload_local`; extraction sends the Rust-issued `{ outputDirectoryId }` instead of a raw output path.
+- Remote mode invokes `firmware_inspect_remote` and `firmware_extract_remote` with `{ url, selectedIds, outputDirectoryId }`; raw output paths are not remote execution inputs.
 - Rendered source status is a generic label such as “已选择 HTTP(S) 固件地址”; the URL input is never echoed elsewhere.
 
 - [ ] **Step 1: Add failing Vitest cases for switching to HTTP(S) mode, entering HTTP and signed HTTPS URLs, and checking them with `firmware_inspect_remote`.** Assert the command receives the exact URL and the page renders only safe format/entry data.

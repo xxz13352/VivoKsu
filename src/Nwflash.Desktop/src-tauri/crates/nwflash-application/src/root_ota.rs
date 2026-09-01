@@ -1,17 +1,17 @@
 //! ROOT 云端 OTA 提取：从服务器解析出的 OTA 链接按需提取修补所需的启动分区镜像。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nwflash_domain::{DomainError, FlashImageInfo};
-use nwflash_infrastructure::{
-    validate_available_space, OtaDiskSpaceProvider, SystemOtaDiskSpaceProvider,
-};
 use nwflash_infrastructure::remote_firmware::{
     extract_zip_members, list_zip_members, probe_remote_kind, RemoteFirmwareError,
     RemoteFirmwareKind,
+};
+use nwflash_infrastructure::{
+    validate_available_space, OtaDiskSpaceProvider, SystemOtaDiskSpaceProvider,
 };
 
 use crate::FirmwareExtractService;
@@ -249,12 +249,14 @@ impl RootOtaService {
                         .into_domain()
                 })
             })?;
-        let available_bytes = self.disk_space.available_bytes(staging_root).map_err(|error| {
-            DomainError::InvalidOperation(format!("读取解包磁盘空间失败：{error}"))
-        })?;
-        validate_available_space(total_bytes, available_bytes).map_err(|error| {
-            DomainError::InvalidOperation(format!("解包磁盘空间不足：{error}"))
-        })?;
+        let available_bytes = self
+            .disk_space
+            .available_bytes(staging_root)
+            .map_err(|error| {
+                DomainError::InvalidOperation(format!("读取解包磁盘空间失败：{error}"))
+            })?;
+        validate_available_space(total_bytes, available_bytes)
+            .map_err(|error| DomainError::InvalidOperation(format!("解包磁盘空间不足：{error}")))?;
 
         let image_directory = staging_root.join("images");
 

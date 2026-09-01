@@ -460,7 +460,11 @@ mod tests {
         assert!(provisioner.downloader.is_none());
         assert_eq!(
             provisioner.bundled_executable_path(),
-            Some(root.join("payload-tools").join(PAYLOAD_DUMPER_EXECUTABLE_NAME).as_path())
+            Some(
+                root.join("payload-tools")
+                    .join(PAYLOAD_DUMPER_EXECUTABLE_NAME)
+                    .as_path()
+            )
         );
 
         std::fs::remove_dir_all(root).expect("fixture root should be removed");

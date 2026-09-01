@@ -67,8 +67,7 @@ fn signed_lease(sequence: u64) -> SessionLease {
 
     let verifying_key = signing_key.verifying_key();
     let login = make_signed(LeaseKind::Login, 1);
-    let mut lease =
-        accept_signed_login_lease(&login, &verifying_key, &binding, issued_at).unwrap();
+    let mut lease = accept_signed_login_lease(&login, &verifying_key, &binding, issued_at).unwrap();
     for next in 2..=sequence {
         let heartbeat = make_signed(LeaseKind::Heartbeat, next);
         lease = match classify_signed_heartbeat_lease(

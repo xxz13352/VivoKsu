@@ -27,7 +27,8 @@ $LeafContracts = @(
     [pscustomobject]@{ Symbol = 'nwflash_protection_classify_heartbeat_lease'; Mode = 'Virtualization' },
     [pscustomobject]@{ Symbol = 'nwflash_protection_admit_local_operation'; Mode = 'Ultra' },
     [pscustomobject]@{ Symbol = 'nwflash_protection_verify_image_integrity'; Mode = 'Virtualization' },
-    [pscustomobject]@{ Symbol = 'nwflash_protection_build_identity_matches'; Mode = 'Mutation' }
+    [pscustomobject]@{ Symbol = 'nwflash_protection_build_identity_matches'; Mode = 'Mutation' },
+    [pscustomobject]@{ Symbol = 'nwflash_protection_trace_credential_sentinel'; Mode = 'Ultra' }
 )
 
 function Resolve-X64Dumpbin {
@@ -167,6 +168,17 @@ function Assert-MarkerLayout {
         }
         if ($beginCalls[0].Index -ge $endCalls[0].Index) {
             throw "$($leaf.Symbol) marker End does not physically follow Begin$($leaf.Mode)."
+        }
+        $protectedBody = $region.Substring($beginCalls[0].Index, $endCalls[0].Index - $beginCalls[0].Index)
+        if ($protectedBody -match '(?im)\bret[nq]?\b') {
+            throw "$($leaf.Symbol) returns before VMProtectEnd."
+        }
+        if ($leaf.Symbol -eq 'nwflash_protection_trace_credential_sentinel') {
+            $innerStart = $beginCalls[0].Index + $beginCalls[0].Length
+            $innerBody = $region.Substring($innerStart, $endCalls[0].Index - $innerStart)
+            if ($innerBody -match '(?im)\bcall\b') {
+                throw "$($leaf.Symbol) must not call helpers inside the Ultra marker region."
+            }
         }
         $verified += [pscustomobject]@{ symbol = $leaf.Symbol; mode = $leaf.Mode; begin_count = 1; end_count = 1; verified = $true }
     }

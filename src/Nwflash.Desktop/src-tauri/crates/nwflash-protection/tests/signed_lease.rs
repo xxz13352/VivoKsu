@@ -263,7 +263,5 @@ fn signed_envelope_debug_output_redacts_the_wire_values() {
 #[test]
 fn verified_login_fixture_is_accepted() {
     let (envelope, verification_key) = signed_envelope(&claims(LeaseKind::Login));
-    assert!(
-        accept_signed_login_lease(&envelope, &verification_key, &binding(), NOW).is_ok()
-    );
+    assert!(accept_signed_login_lease(&envelope, &verification_key, &binding(), NOW).is_ok());
 }

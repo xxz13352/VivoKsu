@@ -4,8 +4,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey};
 use nwflash_protection::{
     accept_signed_login_lease, admit_local_operation, build_identity_matches,
-    classify_signed_heartbeat_lease, verify_image_integrity, LeaseBinding, LeaseClaims, LeaseKind,
-    SignedEnvelope, TokenDigest, VmpIntegrityProbe,
+    classify_signed_heartbeat_lease, trace_credential_sentinel, verify_image_integrity,
+    LeaseBinding, LeaseClaims, LeaseKind, SignedEnvelope, TokenDigest, TraceOutputSession,
+    VmpIntegrityProbe,
 };
 
 const NOW: i64 = 1_725_000_000;
@@ -17,14 +18,30 @@ fn main() {
     let session = accept_signed_login_lease(&login, &verifying_key, &binding(), NOW)
         .expect("probe login must verify and bind");
     let heartbeat = signed_lease(&signing_key, LeaseKind::Heartbeat, 2);
-    let heartbeat =
-        classify_signed_heartbeat_lease(&heartbeat, &verifying_key, &binding(), 1, NOW)
-            .expect("probe heartbeat must verify");
+    let heartbeat = classify_signed_heartbeat_lease(&heartbeat, &verifying_key, &binding(), 1, NOW)
+        .expect("probe heartbeat must verify");
     let admission = admit_local_operation(&session, "layout-build", "layout-nonce", NOW);
     let integrity = verify_image_integrity(&VmpIntegrityProbe);
     let identity = build_identity_matches("layout-build", "layout-build");
+    let mut trace_reader = std::io::Cursor::new(b"trace layout probe".as_slice());
+    let trace_session = TraceOutputSession::from_reader(
+        nwflash_domain::TraceId::try_new_v7().expect("probe event id"),
+        nwflash_domain::TraceOutputStreamV2::Stdout,
+        &mut trace_reader,
+        &nwflash_protection::ExactSecretSet::empty(),
+    )
+    .expect("static probe text must seal");
+    let trace_input = trace_session.credential_sentinel_input();
+    let trace_credential = trace_credential_sentinel(&trace_input);
 
-    black_box((session, heartbeat, admission, integrity, identity));
+    black_box((
+        session,
+        heartbeat,
+        admission,
+        integrity,
+        identity,
+        trace_credential,
+    ));
 }
 
 fn binding() -> LeaseBinding {

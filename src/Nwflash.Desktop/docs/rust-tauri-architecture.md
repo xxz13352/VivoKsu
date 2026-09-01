@@ -51,8 +51,8 @@ src/Nwflash.Desktop/
 
 - `AppState.session_token` 中的 bearer token。`auth_login` 返回的 `AuthSessionDto` 只有 `username` 和 `name`；`AuthSessionPayload` 同样没有 token 字段，`session_state` 只报告 `has_token`。
 - 浏览器不能提交原始 `PartitionExecutionPlan`、任意命令数组、任意程序名、任意 shell 文本或通用 ROM/固件解析入口；但公开 Quick Flash prepare API 当前会把 Rust 生成的 serial 和 `ProcessCommandDto` 程序/参数作为 `QuickFlashPlanDto` 预览返回，这是现有/遗留 API 暴露限制，不是执行输入。
-- 用户输入的 HTTP(S) 固件 URL 是受限入口：`FirmwareExtractPage` 只把它提交给 `firmware_inspect_remote`/`firmware_extract_remote`，Rust 复核 scheme 与 host；提取还必须匹配已检查的 URL，并只接受该次检查生成的不透明分区 ID。服务端解析的 ROM/OTA URL 不属于这个用户输入边界，仍只留在 Rust runtime，并由受控设备信息和内存 token 驱动。浏览器不能提交任意程序、命令数组、shell 文本、未校验资源路径或任意远程分区 ID。
-- `DeviceSnapshot`、TypeScript `DeviceSnapshotPayload` 和现有 `QuickFlashPlanDto` 预览可包含 serial；它不是公开执行输入，浏览器不能提交、选择或伪造 execution serial。服务端解析来源、staging、固件工件、prepared dual-slot、ROOT 和 Safe Flash 的受保护计划仍只通过安全摘要或 capability ID 暴露；通用 Quick Flash 镜像路径与远程固件输出目录是下述当前例外。
+- 用户输入的 HTTP(S) 固件 URL 是受限入口：`FirmwareExtractPage` 只把它提交给 `firmware_inspect_remote`/`firmware_extract_remote`，Rust 复核 scheme 与 host；提取还必须匹配已检查的 URL，只接受该次检查生成的不透明分区 ID，并使用 `firmware_select_output_directory` 经 Rust 原生对话框签发的 UUID v4 输出目录 capability。`firmware_extract_remote` 的 IPC 参数只有 `output_directory_id`，真实目录留在 Rust 进程内；空、伪造、旧 ID 和原始路径字符串均拒绝。服务端解析的 ROM/OTA URL 不属于这个用户输入边界，仍只留在 Rust runtime，并由受控设备信息和内存 token 驱动。浏览器不能提交任意程序、命令数组、shell 文本、未校验资源路径或任意远程分区 ID。
+- `DeviceSnapshot`、TypeScript `DeviceSnapshotPayload` 和现有 `QuickFlashPlanDto` 预览可包含 serial；它不是公开执行输入，浏览器不能提交、选择或伪造 execution serial。服务端解析来源、staging、固件工件、prepared dual-slot、ROOT 和 Safe Flash 的受保护计划仍只通过安全摘要或 capability ID 暴露；通用 Quick Flash 镜像路径仍是下述当前例外，固件提取输出目录已统一使用 Rust-owned capability。
 
 `quick_flash_prepare_commands`/`quick_flash_execute_commands` 是 Rust 内部 helper，但公开的 `quick_flash_prepare_boot_image`/`quick_flash_prepare_preset_image` 会返回上述命令预览。当前 `QuickFlashPage` 把原生 dialog 选出的 `imagePath`/封闭分区请求保存在 React 确认状态，随后提交给 `quick_flash_execute_preset_images`；Rust 在该次调用内重新检查镜像，并在构造命令前解析当前唯一 transport serial。该 serial 覆盖计划/预览中的历史值，并用于 flash、切槽和重启；流程不消费 Rust-owned confirmation capability。
 
@@ -70,7 +70,7 @@ src/Nwflash.Desktop/
 
 通用预设 Quick Flash 使用 browser-held 路径/请求和单次 execution invocation 内的 Rust 复检，不使用不透明确认 capability。固件工件、prepared dual-slot、ROOT 和 Safe Flash 则使用私有 runtime 保存不透明工件、计划或 session，确认执行时重新解析或一次性消费；分区工作区也从 Rust 当前快照和私有映射重建执行计划。
 
-本地输入/输出路径在正常 UI 交互中通常来自原生对话框，Rust 会按具体流程检查存在性、后缀、大小、归档成员或写入结果；不能把它概括为每个公开路径都已证明 dialog provenance。特别是 `firmware_extract_remote(output_directory: String)` 当前把字符串直接转为提取目录：Rust 仍验证 HTTP(S) URL、inspected-source 等值、不透明 selected ID、归档成员，并以 partial/大小校验/原子发布写入，但 command 层没有证明目录来源，这是后续 hardening 边界。
+本地输入/输出路径在正常 UI 交互中通常来自原生对话框，Rust 会按具体流程检查存在性、后缀、大小、归档成员或写入结果；不能把它概括为每个公开路径都已证明 dialog provenance。固件提取输出目录是明确的强化边界：Rust 原生目录对话框把选择保存到 `FirmwareOutputDirectoryRuntime`，选择 DTO 只返回 `selectionId`；React 对本地 VIVO/ZIP、payload 和远程提取都只提交 `outputDirectoryId`，各 command 从进程内映射解析 `PathBuf`，不会把浏览器字符串转为固件写入目录。每次打开 picker 与 cleanup 都推进单调 epoch，只有当前 picker 可发布；重新选择只保留新 capability，取消保留上一有效选择，旧/乱序/跨会话完成均 fail closed。当前能力可供重复提取；会话停止、退出登录和受保护退出统一清理。
 
 ### ROOT 服务器 OTA 云提取
 

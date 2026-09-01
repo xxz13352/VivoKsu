@@ -21,6 +21,7 @@ serde_json = "1.0.128"
 sha2 = "0.10.8"
 tokio = { version = "1.40.0", features = ["fs", "sync", "time"] }
 tokio-util = "0.7.13"
+uuid = { version = "1.24.1", features = ["v4"] }
 zeroize = "1.8.1"
 tauri = { version = "2.0.3", features = ["wry"] }
 tauri-plugin-dialog = "2.7.2"

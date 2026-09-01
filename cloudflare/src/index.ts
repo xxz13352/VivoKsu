@@ -13,6 +13,8 @@ import {
   tokenSha256,
   type LeaseClaims,
 } from "./security";
+import { ingestTraceUploadV2, traceErrorV2 } from "./trace-v2-ingest";
+import { purgeExpiredTraceData } from "./trace-v2-retention";
 
 /**
  * Cloudflare Worker —— Vivo ROM OTA 链接代理 + Nwflash 版本门禁。
@@ -98,7 +100,8 @@ export default {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
         const user = await authenticateUser(env, request);
-        if (user instanceof Response || user === null) return json({ loggedIn: false }, 200);
+        if (user instanceof Response) return user;
+        if (user === null) return json({ loggedIn: false }, 200);
         return json({ loggedIn: true, name: user.name }, 200);
       }
 
@@ -130,6 +133,19 @@ export default {
         return acceptUsageLogs(env, request);
       }
 
+      if (url.pathname === "/api/usage/traces/v2" && request.method === "POST") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return withNoStore(gate);
+        const auth = await authenticateUser(env, request);
+        if (auth instanceof Response) {
+          return traceErrorV2(401, "TRACE_UNAUTHORIZED", "API token 无效或已停用。");
+        }
+        if (auth === null) return traceErrorV2(401, "TRACE_UNAUTHORIZED", "请先登录。");
+        if (auth.banned) return traceErrorV2(403, "TRACE_FORBIDDEN", "账号已被封禁。");
+        const bearerToken = request.headers.get("Authorization")?.slice(7).trim() ?? "";
+        return ingestTraceUploadV2(env, request, { ...auth, bearer_token: bearerToken });
+      }
+
       if (url.pathname === "/api/rom") {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
@@ -146,6 +162,9 @@ export default {
 
       return json({ error: "Not found" }, 404);
     } catch {
+      if (url.pathname === "/api/usage/traces/v2" && request.method === "POST") {
+        return traceErrorV2(500, "TRACE_INTERNAL", "日志写入失败。");
+      }
       return json({ error: "内部错误。" }, 500);
     }
   },
@@ -157,6 +176,8 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     await purgeStaleSessions(env, /* force */ true);
     await purgeIntegrityRateLimits(env);
+    const retention = await purgeExpiredTraceData(env.DB, Date.now());
+    console.log("trace-v2-retention", retention);
   },
 };
 
@@ -222,6 +243,9 @@ async function authenticateUser(
   const header = request.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) return null;
+  if (token.startsWith(REVOKED_TOKEN_PREFIX)) {
+    return json({ error: "API token 无效或已停用。" }, 401);
+  }
 
   const user = await env.DB
     .prepare("SELECT id, username, name, enabled, banned FROM api_users WHERE token = ?")
@@ -698,7 +722,7 @@ async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
   const statement = env.DB.prepare(
     `INSERT INTO usage_logs (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at, ended_at, duration_ms)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(event_key) DO NOTHING`,
+     ON CONFLICT(event_key) WHERE source_schema = 1 DO NOTHING`,
   );
   const batch = logs.map((log) =>
     statement.bind(
@@ -800,6 +824,7 @@ async function checkAppVersion(env: Env, request: Request): Promise<Response | n
 /* ------------------------------------------------------------------ */
 
 const PBKDF2_ITERATIONS = 100_000;
+const REVOKED_TOKEN_PREFIX = "revoked:";
 
 /** POST /api/login —— 密码验证成功后返回 token 与绑定当前进程/会话的短期签名租约。 */
 async function login(env: Env, request: Request): Promise<Response> {
@@ -826,15 +851,69 @@ async function login(env: Env, request: Request): Promise<Response> {
   if (user.enabled !== 1) return json({ error: "账号已被停用。" }, 401);
   if (!user.password || !user.salt) return json({ error: "该账号未设置密码,请联系管理员。" }, 401);
 
-  const hash = await pbkdf2(password, user.salt);
-  if (hash !== user.password) return json({ error: "用户名或密码错误。" }, 401);
+  const verifiedPasswordHash = user.password;
+  const verifiedSalt = user.salt;
+  const hash = await pbkdf2(password, verifiedSalt);
+  if (hash !== verifiedPasswordHash) return json({ error: "用户名或密码错误。" }, 401);
+
+  let activeToken = user.token;
+  if (activeToken.startsWith(REVOKED_TOKEN_PREFIX)) {
+    const candidate = randomHex(32);
+    const exchanged = await env.DB.prepare(
+      `UPDATE api_users SET token = ?
+       WHERE id = ? AND password = ? AND salt = ? AND token = ?
+         AND token LIKE 'revoked:%' AND enabled = 1 AND banned = 0
+       RETURNING token`,
+    )
+      .bind(candidate, user.id, verifiedPasswordHash, verifiedSalt, activeToken)
+      .first<{ token: string }>();
+    if (exchanged) {
+      activeToken = exchanged.token;
+    } else {
+      const winner = await env.DB.prepare(
+        "SELECT token, password, salt, enabled, banned FROM api_users WHERE id = ?",
+      )
+        .bind(user.id)
+        .first<{ token: string; password: string | null; salt: string | null; enabled: number; banned: number }>();
+      if (
+        !winner
+        || winner.password !== verifiedPasswordHash
+        || winner.salt !== verifiedSalt
+        || winner.enabled !== 1
+        || winner.banned !== 0
+        || !winner.token
+        || winner.token.startsWith(REVOKED_TOKEN_PREFIX)
+      ) {
+        return json({ error: "登录状态已变化，请重试。" }, 409);
+      }
+      activeToken = winner.token;
+    }
+  }
+
+  if (!activeToken || activeToken.startsWith(REVOKED_TOKEN_PREFIX)) {
+    return json({ error: "登录状态已变化，请重试。" }, 409);
+  }
+
+  // 无论 token 是否刚从 revoked marker 交换,都用最初验证的完整凭据代际做一次 D1 mutation。
+  // 普通 token 登录因此也不能在并发改密后继续签 lease;CAS 败者的 winner 读取同样在此再次线性化。
+  const linearized = await env.DB.prepare(
+    `UPDATE api_users SET token = ?
+     WHERE id = ? AND password = ? AND salt = ? AND token = ? AND enabled = 1 AND banned = 0
+     RETURNING token`,
+  )
+    .bind(activeToken, user.id, verifiedPasswordHash, verifiedSalt, activeToken)
+    .first<{ token: string }>();
+  if (!linearized || !linearized.token || linearized.token.startsWith(REVOKED_TOKEN_PREFIX)) {
+    return json({ error: "登录状态已变化，请重试。" }, 409);
+  }
+  activeToken = linearized.token;
 
   const issuedAt = Math.floor(Date.now() / 1000);
   const claims: LeaseClaims = {
     version: 1,
     kind: "login",
     username: user.username,
-    token_sha256: await tokenSha256(user.token),
+    token_sha256: await tokenSha256(activeToken),
     client_version: clientVersion,
     build_id: buildId,
     process_nonce: processNonce,
@@ -848,14 +927,29 @@ async function login(env: Env, request: Request): Promise<Response> {
     const claimed = await env.DB.prepare(
       `INSERT INTO session_leases
          (session_id, user_id, username, client_version, build_id, process_nonce, sequence, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+       SELECT ?, ?, ?, ?, ?, ?, 1, ?, ?
+       FROM api_users
+       WHERE id = ? AND password = ? AND salt = ? AND token = ? AND enabled = 1 AND banned = 0
        ON CONFLICT(session_id) DO NOTHING
        RETURNING sequence`,
     )
-      .bind(sessionId, user.id, user.username, clientVersion, buildId, processNonce, issuedAt, issuedAt)
+      .bind(
+        sessionId,
+        user.id,
+        user.username,
+        clientVersion,
+        buildId,
+        processNonce,
+        issuedAt,
+        issuedAt,
+        user.id,
+        verifiedPasswordHash,
+        verifiedSalt,
+        activeToken,
+      )
       .first<{ sequence: number }>();
-    if (!claimed) return json({ error: "session_id 已被占用。" }, 409);
-    return json({ ok: true, token: user.token, username: user.username, name: user.name, ...envelope }, 200);
+    if (!claimed) return json({ error: "登录状态已变化或 session_id 已被占用。" }, 409);
+    return json({ ok: true, token: activeToken, username: user.username, name: user.name, ...envelope }, 200);
   } catch (error) {
     if (error instanceof SigningConfigurationError) return signingUnavailable();
     throw error;
@@ -897,5 +991,15 @@ function json(obj: unknown, status: number): Response {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { "Content-Type": "application/json", ...CORS },
+  });
+}
+
+function withNoStore(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
 }

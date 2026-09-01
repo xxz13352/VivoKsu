@@ -9,6 +9,7 @@ obj/
 # ---- Cloudflare Worker ----
 cloudflare/node_modules/
 cloudflare/.wrangler/
+**/.wrangler/
 cloudflare/.dev.vars
 
 # ---- Node / Tauri generated output ----

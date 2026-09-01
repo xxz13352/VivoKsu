@@ -68,6 +68,7 @@ this intent:
 | Local operation admission | Ultra |
 | Image CRC and integrity decision dispatch | Virtualization |
 | Build identity comparison | Mutation |
+| Trace credential sentinel | Ultra |
 
 Do not expand marker ranges to Tauri/WebView entry points, Tokio or async state
 machines, HTTP/TLS, adb/fastboot, drivers, child-process control, downloads,
@@ -76,16 +77,28 @@ labels and never contain passwords, tokens, paths, URLs, or device serials.
 
 ## Plan C trace-redaction release gate
 
-The current contract intentionally contains exactly the five implemented leaves
-above; it does not invent a sixth marker for code that does not yet exist. After
-Plan C integrates client trace spooling/HTTP/chunking, the final production
-release must first prove that the complete logical trace is synchronously
-redacted before any spool, HTTP, or chunk boundary. A fresh sensitive-surface
-review must then decide whether the pure synchronous redaction/credential
-sentinel leaf uses Ultra or Virtualization, update the exact marker contract,
-and rerun source reachability, MAP/dumpbin physical layout, SDK, runtime probe,
-and protected-package rejection gates. Passing this Task 8 five-leaf handoff is
-not authorization for a later Plan C production release.
+The source/API gate contains the sixth synchronous leaf,
+`nwflash_protection_trace_credential_sentinel`, named
+`NWFlash.TraceCredentialSentinel` and reviewed for Ultra mode. A real
+`TraceOutputSession` forms each concrete bounded upload first, hashes its
+canonical already-redacted body outside the marker, and synchronously asks the
+leaf to mint an opaque safe-Rust receipt bound to that upload ID, digest, and
+length. Receiptless or mismatched uploads cannot emit a public wire body, pass
+the producer facade, or enter its sink trait.
+
+The leaf input contains only fixed-size identities, counts, and risk state. Its
+region excludes raw or redacted trace text, JSON/serialization, spooling, HTTP,
+disk, chunking, async/Tokio work, and third-party implementations. This is
+source/API gate evidence only: Tauri production wrappers still select the
+discarding observer instead of the `nwflash-windows` observation interface,
+and the durable spool has no concrete adapter to this producer facade.
+It also does not prove that a release PE contains the physical leaf or that
+VMProtect Lite has processed it. Plan C may proceed to a protected release only
+after that adapter is integrated and a fresh source-reachability review,
+six-symbol MAP/dumpbin layout, unchanged eight-import SDK contract,
+compiler-log/marker review, protected runtime probe, CRC, signing, package, and
+installed smoke gates all pass. A PowerShell fixture pass alone is not release
+authorization.
 
 Enable Memory Protection, Import Protection, and Packing for the protected
 release. Virtual-machine denial remains disabled: debugger and VM detections
@@ -109,7 +122,7 @@ under Cargo's ignored `target/release/examples` directory, and then uses x64
 
 - the final PE has exactly one `VMProtectSDK64.dll` import block containing the
   eight required symbols and no additional VMProtect import;
-- each of the five stable leaf symbols occurs exactly once in the MAP; and
+- each of the six stable leaf symbols occurs exactly once in the MAP; and
 - each physical leaf disassembly region contains exactly one expected Begin
   mode followed by exactly one `VMProtectEnd`.
 

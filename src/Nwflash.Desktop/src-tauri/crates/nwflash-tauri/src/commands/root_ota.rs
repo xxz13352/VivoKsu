@@ -6,7 +6,10 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use nwflash_application::{result_to_domain_error, RootOtaExtractOptions, RootOtaService};
+use nwflash_application::{
+    result_to_domain_error, OperationAdmissionState, OperationCoordinator, RootOtaExtractOptions,
+    RootOtaService,
+};
 use nwflash_domain::{DomainError, FlashImageInfo, OperationKind};
 use nwflash_infrastructure::{
     remote_firmware::{probe_remote_kind, RemoteFirmwareError, RemoteFirmwareKind},
@@ -180,8 +183,13 @@ pub struct RootOtaExtractResultDto {
     pub vendor_boot: Option<crate::commands::root::RootImageSelectionDto>,
 }
 
-async fn read_online_ota_identity(serial: &str) -> Result<(String, String), String> {
-    crate::commands::device_identity::read_online_ota_identity(serial).await
+async fn read_online_ota_identity(
+    serial: &str,
+    coordinator: &OperationCoordinator,
+) -> Result<(String, String), String> {
+    let operation = coordinator.state().await.kind;
+    let admission = coordinator.admission_state();
+    crate::commands::device_identity::read_identity_if_admitted(serial, admission, operation).await
 }
 
 fn needs_payload_dumper(kind: RemoteFirmwareKind) -> bool {
@@ -189,6 +197,28 @@ fn needs_payload_dumper(kind: RemoteFirmwareKind) -> bool {
         kind,
         RemoteFirmwareKind::PayloadZip | RemoteFirmwareKind::PayloadRaw
     )
+}
+
+#[cfg(test)]
+pub(crate) fn root_ota_check_is_blocked(
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> bool {
+    root_ota_check_block_reason(admission, operation).is_some()
+}
+
+pub(crate) fn root_ota_check_block_reason(
+    admission: OperationAdmissionState,
+    operation: OperationKind,
+) -> Option<&'static str> {
+    match admission {
+        OperationAdmissionState::ExitPending => Some("skipped:exit_pending"),
+        OperationAdmissionState::Terminating => Some("skipped:terminating"),
+        OperationAdmissionState::Running if operation == OperationKind::Flashing => {
+            Some("denied:flashing")
+        }
+        OperationAdmissionState::Running => None,
+    }
 }
 
 fn map_probe_error(error: RemoteFirmwareError) -> DomainError {
@@ -230,6 +260,33 @@ fn publish_extracted_root_images(
 /// 检测服务器 OTA 并把链接缓存到 Rust 内存。无设备/未登录/查询失败 → 静默不可用。
 #[tauri::command]
 pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDto, String> {
+    let operation = state.operation_coordinator.state().await.kind;
+    let admission = state.operation_coordinator.admission_state();
+    if let Some(reason) = root_ota_check_block_reason(admission, operation) {
+        crate::commands::device::record_refresh_gate(
+            &state.operation_log_store,
+            "ROOT OTA 检测",
+            reason,
+        );
+        return Ok(RootOtaCheckDto {
+            available: false,
+            label: None,
+        });
+    }
+    let _idle = match state.operation_coordinator.try_acquire_idle() {
+        Ok(lease) => lease,
+        Err(_) => {
+            crate::commands::device::record_refresh_gate(
+                &state.operation_log_store,
+                "ROOT OTA 检测",
+                "denied:busy",
+            );
+            return Ok(RootOtaCheckDto {
+                available: false,
+                label: None,
+            });
+        }
+    };
     let lease = match state.session_capabilities.capture() {
         Ok(lease) => lease,
         Err(_) => {
@@ -273,7 +330,8 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
             label: None,
         });
     }
-    let (pd, version) = match read_online_ota_identity(&serial).await {
+    let (pd, version) = match read_online_ota_identity(&serial, &state.operation_coordinator).await
+    {
         Ok(identity) => identity,
         Err(_) => {
             return Ok(RootOtaCheckDto {
@@ -775,5 +833,55 @@ mod tests {
             .expect("current lease should clear before probe");
 
         assert!(runtime.resolve().is_err());
+    }
+
+    #[test]
+    fn root_ota_check_gate_skips_identity_and_cloud_request_during_flashing_or_teardown() {
+        use nwflash_application::OperationAdmissionState;
+        use nwflash_domain::OperationKind;
+
+        assert_eq!(
+            root_ota_check_block_reason(OperationAdmissionState::Running, OperationKind::Flashing,),
+            Some("denied:flashing")
+        );
+        assert_eq!(
+            root_ota_check_block_reason(OperationAdmissionState::ExitPending, OperationKind::Idle,),
+            Some("skipped:exit_pending")
+        );
+        assert_eq!(
+            root_ota_check_block_reason(OperationAdmissionState::Terminating, OperationKind::Idle,),
+            Some("skipped:terminating")
+        );
+        assert!(root_ota_check_is_blocked(
+            OperationAdmissionState::Running,
+            OperationKind::Flashing,
+        ));
+        assert!(root_ota_check_is_blocked(
+            OperationAdmissionState::ExitPending,
+            OperationKind::Idle,
+        ));
+        assert!(root_ota_check_is_blocked(
+            OperationAdmissionState::Terminating,
+            OperationKind::Idle,
+        ));
+        assert!(!root_ota_check_is_blocked(
+            OperationAdmissionState::Running,
+            OperationKind::Idle,
+        ));
+    }
+
+    #[tokio::test]
+    async fn root_ota_identity_gate_rechecks_admission_before_spawning_adb() {
+        let coordinator = nwflash_application::OperationCoordinator::default();
+        assert_eq!(
+            coordinator.request_exit_pending(),
+            OperationAdmissionState::ExitPending
+        );
+
+        let error = read_online_ota_identity("unused", &coordinator)
+            .await
+            .expect_err("exit-pending identity refresh must be skipped before spawn");
+
+        assert!(error.contains("skipped:exit_pending"));
     }
 }

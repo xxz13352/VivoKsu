@@ -874,8 +874,7 @@ async fn execute_session_bound_safe_flash(
                 let session_id = session_id.clone();
                 let execution_result_for_run = execution_result_for_run.clone();
                 async move {
-                    let _token =
-                        session_token(state).map_err(DomainError::AuthorizationDenied)?;
+                    let _token = session_token(state).map_err(DomainError::AuthorizationDenied)?;
                     let session = safe_flash_runtime
                         .begin_execution(&session_id)
                         .map_err(DomainError::InvalidOperation)?;
@@ -1208,16 +1207,12 @@ mod tests {
             .safe_flash_runtime
             .replace(prepared_safe_flash_session(&session_id))
             .expect("current session should publish the prepared Safe Flash entry");
-        let executor = RecordedSafeFlashExecutor::new(
-            Vec::<Result<ProcessOutput, DomainError>>::new(),
-        );
+        let executor =
+            RecordedSafeFlashExecutor::new(Vec::<Result<ProcessOutput, DomainError>>::new());
         let execution_service = SafeFlashExecutionService::new(Arc::new(executor.clone()));
 
-        let execution = safe_flash_execute_prepared_inner(
-            &state,
-            session_id.clone(),
-            execution_service,
-        );
+        let execution =
+            safe_flash_execute_prepared_inner(&state, session_id.clone(), execution_service);
         let observe_pending_authorization = async {
             entered.notified().await;
             assert!(safe_flash_is_prepared_and_not_executing(
@@ -1264,16 +1259,12 @@ mod tests {
             .safe_flash_runtime
             .replace(prepared_safe_flash_session(&session_id))
             .expect("current session should publish the prepared Safe Flash entry");
-        let executor = RecordedSafeFlashExecutor::new(
-            Vec::<Result<ProcessOutput, DomainError>>::new(),
-        );
+        let executor =
+            RecordedSafeFlashExecutor::new(Vec::<Result<ProcessOutput, DomainError>>::new());
         let execution_service = SafeFlashExecutionService::new(Arc::new(executor.clone()));
 
-        let execution = safe_flash_execute_prepared_inner(
-            &state,
-            session_id.clone(),
-            execution_service,
-        );
+        let execution =
+            safe_flash_execute_prepared_inner(&state, session_id.clone(), execution_service);
         let observe_pending_authorization = async {
             entered.notified().await;
             assert!(safe_flash_is_prepared_and_not_executing(

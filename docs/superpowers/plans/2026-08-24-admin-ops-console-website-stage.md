@@ -41,6 +41,8 @@ export const TRACE_UPLOAD_MAX_RUNS = 20;
 export const TRACE_UPLOAD_MAX_EVENTS = 100;
 export const TRACE_UPLOAD_MAX_OUTPUT_CHUNKS = 200;
 export const TRACE_OUTPUT_MAX_BYTES = 32_768;
+export const TRACE_RUN_MAX_EVENTS = 100;
+export const TRACE_RUN_MAX_EVENT_STORAGE_BYTES = 8_388_608;
 
 export type TraceOutcomeV2 =
   | "running" | "success" | "failed" | "canceled"
@@ -251,11 +253,12 @@ export interface RomLogAdminRowV2 {
 
 HTTP behavior is fixed:
 
-- `200`: valid upload/query, including same-user idempotent duplicates and item-level rejections.
-- `400`: malformed JSON, unknown fields, invalid schema/enums/IDs/relationships/cursor.
+- `200`: valid upload/query, including same-user idempotent duplicates and item-level `missing_parent`/conflict rejections.
+- `400`: malformed JSON, unknown fields, invalid schema/enums/IDs/local duplicate tuples/cursor.
 - `401`: missing or expired bearer/admin session authentication.
 - `403`: banned user or forbidden administrator action.
-- `409`: an existing global ID belongs to another user; the entire upload makes no writes.
+- `426`: pre-ingest legacy app-version gate; returns `{error,code:"UPDATE_REQUIRED",latest,min,download_url}` rather than `TraceApiErrorV2`.
+- `409`: an existing global ID or referenced parent belongs to another user; the entire upload makes no writes.
 - `413`: request body exceeds 1 MiB.
 - `422`: client requests `trace_complete=true` while declared sequences/chunks are missing.
 - `500`: unhandled D1/internal failure; no credential-bearing details are returned.
@@ -275,6 +278,10 @@ Administrator `trace_ref` is also opaque and has one exact encoding: V2 is `v2:<
 - Create: `cloudflare/contracts/trace-v2/usage-trace-v2.schema.json`
 - Create: `cloudflare/contracts/trace-v2/upload.success.json`
 - Create: `cloudflare/contracts/trace-v2/upload.failed.json`
+- Create: `cloudflare/contracts/trace-v2/upload.open.json`
+- Create: `cloudflare/contracts/trace-v2/upload.event-only.json`
+- Create: `cloudflare/contracts/trace-v2/upload.chunk-only.json`
+- Create: `cloudflare/contracts/trace-v2/upload.finalize-only.json`
 - Create: `cloudflare/contracts/trace-v2/upload-ack.success.json`
 - Create: `cloudflare/contracts/trace-v2/admin-users-page.json`
 - Create: `cloudflare/contracts/trace-v2/admin-runs-page.json`
@@ -287,7 +294,7 @@ Administrator `trace_ref` is also opaque and has one exact encoding: V2 is `v2:<
 
 **Interfaces:**
 - Consumes: approved design document and the frozen contract above.
-- Produces: `readTraceUploadV2`, `validateTraceUploadV2`, `encodeTraceCursorV2`, `decodeTraceCursorV2`, every V2 TypeScript interface, JSON Schema, and canonical fixtures used by API and UI tests.
+- Produces: `readTraceUploadV2`, `validateTraceUploadV2`, `encodeTraceCursorV2`, `decodeTraceCursorV2`, every V2 TypeScript interface, JSON Schema, and canonical single-request plus open/event-only/chunk-only/finalize-only fixtures used by API and UI tests.
 
 - [ ] **Step 1: Write failing contract and cursor tests**
 
@@ -344,7 +351,7 @@ export function validateTraceUploadV2(value: unknown): TraceUploadRequestV2 {
   const runs = requireArray(root.runs, TRACE_UPLOAD_MAX_RUNS, parseRunV2, "runs");
   const events = requireArray(root.events, TRACE_UPLOAD_MAX_EVENTS, parseEventV2, "events");
   const chunks = requireArray(root.output_chunks, TRACE_UPLOAD_MAX_OUTPUT_CHUNKS, parseChunkV2, "output_chunks");
-  validateParentRelationships(runs, events, chunks);
+  validateRequestIdentities(runs, events, chunks);
   return { schema_version: 2, upload_id: uploadId, runs, events, output_chunks: chunks };
 }
 
@@ -363,7 +370,7 @@ export function decodeTraceCursorV2(encoded: string): TraceCursorV2 {
 }
 ```
 
-Validation must reject unknown fields, non-lowercase UUIDv7 values, invalid enums, unsafe integers, negative counts, inconsistent timestamps, duplicate IDs, duplicate `(run_id, sequence)`, duplicate `(event_id, stream, chunk_index)`, UTF-8 fields over limits, and chunk `byte_count`/SHA-256 mismatches against stored fixture text.
+Validation must reject unknown fields, non-lowercase UUIDv7 values, invalid enums, unsafe integers, negative counts, `event.sequence`/non-null `run.final_sequence` outside `1..100`, inconsistent timestamps, duplicate IDs, duplicate `(run_id, sequence)`, duplicate `(event_id, stream, chunk_index)`, UTF-8 fields over limits, chunk `byte_count`/SHA-256 mismatches, and `trace_complete=true` with `outcome=running`. It must not require parents or all declared chunks in the same request: event-only and chunk-only requests resolve accepted same-user parents from D1, while completion is the only strict persisted-plus-current completeness gate.
 
 - [ ] **Step 4: Make `npm test` and typecheck discover website-stage files**
 
@@ -460,7 +467,7 @@ export function redactTraceUploadV2(
 }
 ```
 
-Patterns remove only credential values for Authorization/Bearer, Cookie/Set-Cookie, password/token/api-key/secret/signature assignments, CLI secret flags, URL userinfo/query credentials, PEM blocks, and OpenSSH private-key blocks. Unparseable high-risk material becomes `[CREDENTIAL_REMOVED:HIGH_RISK]`. Store `{kind,count}` only; never store secret hashes.
+Patterns remove only credential values for Authorization/Bearer, Cookie/Set-Cookie, password/token/api-key/secret/signature assignments, CLI secret flags, URL userinfo/query credentials, PEM blocks, and OpenSSH private-key blocks. Unparseable high-risk material becomes `[CREDENTIAL_REMOVED:HIGH_RISK]`. Store `{kind,count}` only; never store secret hashes. A match wholly inside one raw chunk is deterministically redacted and rehashed. If matching a contiguous same-event/stream group differs from concatenated per-chunk matching, the credential crosses a raw boundary: every chunk in that contiguous group is item-level `credential_rejected` and none is persisted. Gapped indexes form separate groups. Plan C MUST synchronously streaming-redact the complete logical stream before spool/body/chunk boundaries; hostile clients that split any credential across separate requests—including fragments of a bearer already known to the server—are outside V2's server guarantee and require a separately designed encrypted-pending V3.
 
 When chunk text changes, recompute `byte_count` and SHA-256 from the post-redaction UTF-8 text before constructing D1 statements or acknowledgements.
 
@@ -578,7 +585,7 @@ git commit -m "feat(d1): add usage trace v2 schema"
 
 **Interfaces:**
 - Consumes: validated/redacted `TraceUploadRequestV2`, D1 schema, enabled unbanned bearer user, `CF-Connecting-IP`.
-- Produces: `POST /api/usage/traces/v2`, item ack/rejections, cross-user conflict rollback, finalization checks, and legacy summary projection.
+- Produces: `POST /api/usage/traces/v2`, persisted-parent hydration, child-only continuation, item ack/rejections, cross-user entity/parent conflict rollback, atomic finalization checks, and legacy summary projection.
 
 - [ ] **Step 1: Write failing ingestion tests using canonical success and failure fixtures**
 
@@ -633,7 +640,7 @@ export async function ingestTraceUploadV2(
 }
 ```
 
-Route after the existing app-version gate and bearer authentication. Reject disabled/banned users. Validate all parent ownership before writes. Same-user duplicate IDs are accepted idempotently. Missing parents/sequence conflicts become item rejections. `trace_complete=true` requires sequences `1..final_sequence` and every declared chunk index across persisted plus current items; otherwise return `422` without marking complete. Project terminal V2 run summary to `usage_logs` with `event_key=run_id` in the same D1 batch.
+Route after the existing app-version gate and bearer authentication. Reject disabled/banned users. A request may omit accepted parent items: `event.run_id` and `output_chunk.event_id` hydrate same-user parents from D1. Any foreign entity or parent makes the whole request `409`; unknown parents are item-level `missing_parent`, and descendants of a parent item rejected in the same request are also `missing_parent`. Same-user duplicate IDs require exact persisted semantics. A new event whose sequence exceeds an accepted current or persisted open run's known non-null `final_sequence` is item-level `invalid`; completed-run append rejection takes precedence. Fresh chunk classification after durable-ID handling is parent/ancestor → completed run → credential boundary → declared bound → natural tuple. `stdout_chunks`/`stderr_chunks` are logical totals across requests; open runs accept in-range gaps/partials, while the atomic D1 completion trigger requires event sequences `1..final_sequence` and every declared stream index `0..total-1` across persisted plus current statements or returns `422`. Across all requests, a run stores at most 100 events and 8,388,608 UTF-8 bytes over the persisted event TEXT metadata columns: IDs, kind/name/partition/status, command program/argv/display/working-directory/paths/URLs/serial, verification, device state, remedies, error fields, and credential-redaction JSON. TypeScript preflight and D1 use this identical byte scope; quota overflow is item-level `invalid`, descendants are `missing_parent`, and the D1 trigger resolves append races. These ceilings bound the administrator run-detail event load. Reads are ID-batched, guard sets use `json_each`, and the D1 parent/open/owner/quota triggers remain the race-safe authority. Project terminal V2 run summary to `usage_logs` with `event_key=run_id` in the same D1 batch.
 
 - [ ] **Step 4: Run ingestion, V1 compatibility, and credential scans**
 
@@ -773,6 +780,8 @@ git commit -m "feat(admin-api): add trace v2 query contract"
 
 **Files:**
 - Create: `cloudflare/src/trace-v2-retention.ts`
+- Create: `cloudflare/web/migrate-usage-traces-v2-retention-stage.sql`
+- Modify: `cloudflare/web/schema.sql`
 - Modify: `cloudflare/src/index.ts`
 - Create: `cloudflare/test/trace-v2-retention.workerd.test.ts`
 - Modify: `cloudflare/package.json`
@@ -817,7 +826,7 @@ export interface TraceRetentionResult {
 export async function purgeExpiredTraceData(db: D1Database, nowMs: number): Promise<TraceRetentionResult>;
 ```
 
-At 30 days delete outputs and clear command/paths/URLs/IP/serial; at 90 days delete event metadata; at 180 days delete runs. The scheduled handler logs only result counts and cutoffs.
+At 30 days delete outputs and clear command/paths/URLs/IP/serial; at 90 days delete event metadata; at 180 days delete runs. The D1-only `retention_detail_cleared` marker and partial indexes restrict 30-day candidate seeks to pending rows; clearing operational detail sets the marker permanently for an open run. Such a run is detail-sealed: finalization, identity/detail mutation, event upload, and chunk retry are item-level `invalid` with a `retention_expired` explanation, the marker is never reset, and no V1 projection is created. This is internal storage state, not a wire field. Every DELETE/UPDATE selects a deterministic ordered batch of at most 100 rows so later cron executions drain backlog without one unbounded transaction. Compatibility projections carry D1-only `source_schema = 2` plus owner-bound `trace_run_id`; historical V1 rows remain `source_schema = 1`, so equal V1 event keys and V2 run IDs may coexist. Before deleting each 180-day V2 run batch, delete only the tagged projection whose trace ID and owner match that exact run; unrelated V1 rows remain. Existing V2 databases migrate in order base → P0 → one-time retention-stage, and all three migrations must succeed before the API receives upload traffic. The scheduled handler logs only result counts and cutoffs.
 
 - [ ] **Step 4: Run retention and existing cron tests**
 
@@ -1344,6 +1353,7 @@ git commit -m "test(admin): verify accessible responsive ops console"
 
 **Files:**
 - Create: `docs/superpowers/notes/2026-08-24-structured-trace-client-handoff.md`
+- Create: `docs/architecture/admin-website-subsystem.md`
 - Modify only files required by findings from the independent review.
 
 **Interfaces:**
@@ -1357,8 +1367,8 @@ npm --prefix cloudflare test
 npm --prefix cloudflare run test:workerd
 npm --prefix cloudflare run typecheck
 npm --prefix cloudflare run test:admin
-npm --prefix cloudflare exec -- wrangler deploy --dry-run --outdir .wrangler/website-stage-api
-npm --prefix cloudflare exec -- wrangler deploy --dry-run --config web/wrangler.toml --outdir .wrangler/website-stage-web
+npm --prefix cloudflare run dry-run:api
+npm --prefix cloudflare run dry-run:web
 git diff --check
 ```
 
@@ -1378,28 +1388,89 @@ The handoff must include:
 
 ```text
 - POST /api/usage/traces/v2 URL, bearer auth, X-Nwflash-Version gate
-- schema version, JSON Schema path, success/failure fixture paths
+- schema version, JSON Schema path, success/failure plus open/event-only/chunk-only/finalize-only fixture paths
 - UUIDv7/upload/run/event/chunk identity rules
 - closed outcomes/event kinds/statuses/output streams
-- 1 MiB/20/100/200/32 KiB limits
+- 1 MiB/20/100/200/32 KiB per-request limits plus per-run 100-event/8,388,608-byte event-metadata ceilings
 - item ack and rejected shapes
 - 200/400/401/403/409/413/422/500 behavior
 - same-user idempotency and cross-user conflict rule
-- trace_complete/final_sequence/chunk completeness rule
-- credential removal boundary and operational-field preservation
+- persisted-parent rule: accepted parent IDs may be deleted from the spool; child-only requests carry only parent IDs
+- logical chunk total rule: open runs allow in-range gaps/partials; only finalization requires contiguous complete evidence
+- trace_complete/final_sequence/chunk completeness rule and atomic D1 trigger behavior
+- credential boundary: Plan C synchronously streaming-redacts the complete logical stream before any spool/HTTP/chunk boundary
+- server defense-in-depth covers known bearer and structured patterns across adjacent chunks in one request; malicious cross-request fragmentation is an explicit V2 non-goal and future encrypted-pending V3 work
 - retry rule: delete only accepted IDs; keep rejected/unacknowledged tail
+- client retention rule: keep Plan C spool data for at most seven days, then discard it and record explicit trace loss
+- server retention seal: a 30-day open run is permanently detail-sealed and cannot be finalized or receive child retries
 - V1 projection and administrator query endpoints
 - explicit prohibition on modifying website contract without a version bump
 ```
 
-- [ ] **Step 5: Rerun the complete gate after review fixes**
+- [ ] **Step 5: Write the administrator website subsystem architecture**
+
+Create `docs/architecture/admin-website-subsystem.md` with exactly these scopes:
+
+```text
+1. Purpose and ownership boundary (`cloudflare/web` plus website trace contract only)
+2. Browser module tree and one responsibility per module
+3. Admin Worker route split, static asset delivery, CSP, no-store, and security headers
+4. D1 V1/V2 tables, indexes, retention windows, projection and deduplication
+5. Bearer upload authentication versus administrator session-cookie query authentication
+6. V2 flow: upload contract → credential boundary → D1 transaction/ack → admin keyset queries → five-level UI
+7. Browser URL router, page lifecycle, loading/empty/partial/stale/error/retry and mutation states
+8. Node/Workerd/Playwright/axe test layers and the exact nondeployment release gate
+9. Deployment boundary: schema/API before UI, dry-run only in this task, client producer deferred to Plan C
+```
+
+Do not describe the desktop application, user portal, VMP, release pipeline, or whole-project architecture beyond the interface boundary required to explain the website.
+
+- [ ] **Step 6: Safely remove only task-generated temporary/build/preview output**
+
+First configure Playwright output under the exact task-owned directory `cloudflare/web/.artifacts/admin-website/`. After tests and review, resolve each candidate and verify it is inside the isolated worktree and one of these roots:
+
+```text
+cloudflare/.wrangler/website-stage-api
+cloudflare/.wrangler/website-stage-web
+cloudflare/web/.artifacts/admin-website/test-results
+cloudflare/web/.artifacts/admin-website/playwright-report
+```
+
+Use this guarded PowerShell shape from the isolated worktree root:
+
+```powershell
+$taskRoot = (Resolve-Path '.').Path
+$relativeTargets = @(
+  'cloudflare\.wrangler\website-stage-api',
+  'cloudflare\.wrangler\website-stage-web',
+  'cloudflare\web\.artifacts\admin-website\test-results',
+  'cloudflare\web\.artifacts\admin-website\playwright-report'
+)
+$approvedTargets = $relativeTargets | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $taskRoot $_)) }
+foreach ($relativeTarget in $relativeTargets) {
+  $candidate = Join-Path $taskRoot $relativeTarget
+  if (-not (Test-Path -LiteralPath $candidate)) { continue }
+  $resolved = (Resolve-Path -LiteralPath $candidate).Path
+  if (-not $resolved.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove path outside task worktree: $resolved"
+  }
+  if ($resolved -notin $approvedTargets) { throw "Unapproved cleanup target: $resolved" }
+  Remove-Item -LiteralPath $resolved -Recurse -Force
+}
+```
+
+Then run `git status --short` and inspect every remaining untracked path. Do not use `git clean`; do not delete `.superpowers/sdd/**`, browser brainstorm sessions, dependency caches, unknown untracked files, or any path outside the four exact targets.
+
+- [ ] **Step 7: Rerun the complete gate after review fixes and cleanup**
 
 Run the Step 1 command block again. Expected: all exit `0`.
 
-- [ ] **Step 6: Commit website acceptance and handoff**
+Because the final typecheck, browser, and Wrangler dry-runs recreate task-owned output, repeat the exact guarded Step 6 cleanup after this final gate, then run only `git status --short --untracked-files=all` and `git diff --check`. Do not rerun a generating command after that final cleanup.
+
+- [ ] **Step 8: Commit website acceptance, subsystem architecture, and handoff**
 
 ```powershell
-git add cloudflare docs/superpowers/notes/2026-08-24-structured-trace-client-handoff.md
+git add cloudflare docs/architecture/admin-website-subsystem.md docs/superpowers/notes/2026-08-24-structured-trace-client-handoff.md
 git commit -m "docs: hand off structured trace v2 client contract"
 ```
 

@@ -4,6 +4,7 @@ import worker, { type Env } from "../src/index";
 import {
   importSigningKey,
   signLease,
+  tokenSha256,
   type LeaseClaims,
 } from "../src/security";
 
@@ -52,6 +53,7 @@ interface StoredSessionLease {
 
 class FakeD1Database {
   readonly users: TestUser[] = [];
+  readonly appVersions: Array<{ version: string; min_version: string; download_url: string }> = [];
   readonly sessions = new Map<string, {
     user_id: number;
     last_seen_at: number;
@@ -73,7 +75,16 @@ class FakeD1Database {
   private sessionCasReachedPromise: Promise<void> = Promise.resolve();
   private releaseSessionCas: (() => void) | null = null;
   private sessionCasGate: Promise<void> = Promise.resolve();
+  private tokenCasTarget = 0;
+  private tokenCasCount = 0;
+  private releaseTokenCas: (() => void) | null = null;
+  private tokenCasGate: Promise<void> = Promise.resolve();
+  private credentialReadReached: (() => void) | null = null;
+  private credentialReadReachedPromise: Promise<void> = Promise.resolve();
+  private releaseCredentialRead: (() => void) | null = null;
+  private credentialReadGate: Promise<void> = Promise.resolve();
   private integrityTransactionTail: Promise<void> = Promise.resolve();
+  private shouldRejectNextTokenCas = false;
 
   prepare(query: string): FakeD1PreparedStatement {
     return new FakeD1PreparedStatement(this, query);
@@ -144,6 +155,69 @@ class FakeD1Database {
     await this.sessionCasGate;
     this.sessionCasReached = null;
     this.releaseSessionCas = null;
+  }
+
+  rejectNextTokenCas(): void {
+    this.shouldRejectNextTokenCas = true;
+  }
+
+  consumeTokenCasRejection(): boolean {
+    if (!this.shouldRejectNextTokenCas) return false;
+    this.shouldRejectNextTokenCas = false;
+    return true;
+  }
+
+  synchronizeTokenCas(count: number): void {
+    this.tokenCasTarget = count;
+    this.tokenCasCount = 0;
+    this.tokenCasGate = new Promise((resolve) => {
+      this.releaseTokenCas = resolve;
+    });
+  }
+
+  async waitBeforeTokenCas(): Promise<void> {
+    if (this.tokenCasTarget === 0) return;
+    this.tokenCasCount += 1;
+    if (this.tokenCasCount === this.tokenCasTarget) {
+      this.tokenCasTarget = 0;
+      this.releaseTokenCas?.();
+    }
+    await this.tokenCasGate;
+  }
+
+  pauseNextCredentialRead(): { reached: Promise<void>; release: () => void } {
+    this.credentialReadReachedPromise = new Promise((resolve) => {
+      this.credentialReadReached = resolve;
+    });
+    this.credentialReadGate = new Promise((resolve) => {
+      this.releaseCredentialRead = resolve;
+    });
+    return {
+      reached: this.credentialReadReachedPromise,
+      release: () => this.releaseCredentialRead?.(),
+    };
+  }
+
+  async waitAfterCredentialRead(): Promise<void> {
+    if (!this.releaseCredentialRead) return;
+    this.credentialReadReached?.();
+    await this.credentialReadGate;
+    this.credentialReadReached = null;
+    this.releaseCredentialRead = null;
+  }
+
+  commitPasswordChange(userId: number, password: string, salt: string, revokedToken: string): void {
+    const user = this.users.find((entry) => entry.id === userId);
+    if (!user) throw new Error("expected user for password change");
+    user.password = password;
+    user.salt = salt;
+    user.token = revokedToken;
+    for (const [sessionId, lease] of this.sessionLeases) {
+      if (lease.user_id === userId) this.sessionLeases.delete(sessionId);
+    }
+    for (const [sessionId, session] of this.sessions) {
+      if (session.user_id === userId) this.sessions.delete(sessionId);
+    }
   }
 
   private async withIntegrityTransaction<T>(operation: () => Promise<T>): Promise<T> {
@@ -236,8 +310,39 @@ class FakeD1PreparedStatement {
 
   async first<T>(): Promise<T | null> {
     const sql = normalizedSql(this.query);
+    if (sql.startsWith("update api_users set token = ?")) {
+      const isRevokedCas = sql.includes("token like 'revoked:%'");
+      if (isRevokedCas) await this.db.waitBeforeTokenCas();
+      const [candidateToken, userId, expectedPassword, expectedSalt, expectedToken] = this.values;
+      const user = this.db.users.find((entry) => entry.id === Number(userId));
+      if (
+        !user
+        || (isRevokedCas && this.db.consumeTokenCasRejection())
+        || user.password !== String(expectedPassword)
+        || user.salt !== String(expectedSalt)
+        || user.token !== String(expectedToken)
+        || (isRevokedCas && !user.token.startsWith("revoked:"))
+        || user.enabled !== 1
+        || user.banned !== 0
+      ) return null;
+      user.token = String(candidateToken);
+      return { token: user.token } as T;
+    }
     if (sql.includes("from api_users where username = ?")) {
-      return (this.db.users.find((user) => user.username === this.values[0]) ?? null) as T | null;
+      const user = this.db.users.find((entry) => entry.username === this.values[0]);
+      const snapshot = user ? { ...user } : null;
+      await this.db.waitAfterCredentialRead();
+      return snapshot as T | null;
+    }
+    if (sql.startsWith("select") && sql.includes("from api_users where id = ?")) {
+      const user = this.db.users.find((entry) => entry.id === Number(this.values[0]));
+      return (user ? {
+        token: user.token,
+        password: user.password,
+        salt: user.salt,
+        enabled: user.enabled,
+        banned: user.banned,
+      } : null) as T | null;
     }
     if (sql.includes("from api_users where token = ?")) {
       const user = this.db.users.find((candidate) => candidate.token === this.values[0]);
@@ -275,9 +380,32 @@ class FakeD1PreparedStatement {
       return (event ? { event_id: event.eventId } : null) as T | null;
     }
     if (sql.startsWith("insert into session_leases")) {
-      const [sessionId, userId, username, clientVersion, buildId, processNonce, createdAt, updatedAt] = this.values;
+      const [
+        sessionId,
+        userId,
+        username,
+        clientVersion,
+        buildId,
+        processNonce,
+        createdAt,
+        updatedAt,
+        expectedUserId,
+        expectedPassword,
+        expectedSalt,
+        expectedToken,
+      ] = this.values;
       const key = String(sessionId);
-      if (this.db.sessionLeases.has(key)) return null;
+      const user = this.db.users.find((entry) => entry.id === Number(expectedUserId));
+      if (
+        this.db.sessionLeases.has(key)
+        || !user
+        || Number(userId) !== Number(expectedUserId)
+        || user.password !== String(expectedPassword)
+        || user.salt !== String(expectedSalt)
+        || user.token !== String(expectedToken)
+        || user.enabled !== 1
+        || user.banned !== 0
+      ) return null;
       const lease: StoredSessionLease = {
         session_id: key,
         user_id: Number(userId),
@@ -340,7 +468,9 @@ class FakeD1PreparedStatement {
 
   async all<T>(): Promise<{ results: T[] }> {
     const sql = normalizedSql(this.query);
-    if (sql.includes("from app_versions")) return { results: [] };
+    if (sql.includes("from app_versions")) {
+      return { results: this.db.appVersions.map((row) => ({ ...row })) as T[] };
+    }
     throw new Error(`Unhandled D1 all(): ${this.query}`);
   }
 
@@ -532,13 +662,14 @@ async function postHeartbeat(
   env: Env,
   token: string,
   overrides: Record<string, unknown> = {},
+  version = "1.4.0",
 ): Promise<Response> {
   return fetchWorker(env, "/api/heartbeat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
-      "X-Nwflash-Version": "1.4.0",
+      "X-Nwflash-Version": version,
     },
     body: JSON.stringify({
       sessionId: "session-abc",
@@ -691,6 +822,140 @@ describe("signed lease routes", () => {
       issued_at: 1_787_444_800,
       expires_at: 1_787_444_920,
     });
+  });
+
+  it("exchanges a revoked marker before returning and signing the login token", async () => {
+    const revokedMarker = `revoked:${"ab".repeat(32)}`;
+    const { env, db, publicKey } = await testEnv({ token: revokedMarker });
+
+    const response = await postLogin(env);
+    const body = await response.json() as Record<string, unknown>;
+    const activeToken = String(body.token);
+
+    expect(response.status).toBe(200);
+    expect(activeToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(activeToken).not.toBe(revokedMarker);
+    expect(JSON.stringify(body)).not.toContain("revoked:");
+    expect(db.users[0].token).toBe(activeToken);
+    expect(await verifyEnvelope(publicKey, String(body.lease_payload), String(body.lease_signature))).toBe(true);
+    expect(decodeLeaseClaims(body)).toMatchObject({
+      kind: "login",
+      token_sha256: await tokenSha256(activeToken),
+      sequence: 1,
+    });
+    expect(db.sessionLeases.get("session-abc")?.sequence).toBe(1);
+  });
+
+  it("makes concurrent revoked logins share one CAS winner and bind both signed leases", async () => {
+    const revokedMarker = `revoked:${"bc".repeat(32)}`;
+    const { env, db, publicKey } = await testEnv({ token: revokedMarker });
+    db.synchronizeTokenCas(2);
+
+    const responses = await Promise.all([
+      postLogin(env, { session_id: "revived-session-a" }),
+      postLogin(env, { session_id: "revived-session-b" }),
+    ]);
+    const bodies = await Promise.all(
+      responses.map((response) => response.json() as Promise<Record<string, unknown>>),
+    );
+    const activeTokens = bodies.map((body) => String(body.token));
+    const activeToken = activeTokens[0];
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(new Set(activeTokens)).toEqual(new Set([activeToken]));
+    expect(activeToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(db.users[0].token).toBe(activeToken);
+    expect([...db.sessionLeases.keys()].sort()).toEqual(["revived-session-a", "revived-session-b"]);
+    for (const [index, body] of bodies.entries()) {
+      expect(JSON.stringify(body)).not.toContain("revoked:");
+      expect(await verifyEnvelope(publicKey, String(body.lease_payload), String(body.lease_signature))).toBe(true);
+      expect(decodeLeaseClaims(body)).toMatchObject({
+        token_sha256: await tokenSha256(activeToken),
+        session_id: index === 0 ? "revived-session-a" : "revived-session-b",
+        sequence: 1,
+      });
+    }
+  });
+
+  it("fails a still-revoked CAS closed without returning a token or signed lease", async () => {
+    const revokedMarker = `revoked:${"cd".repeat(32)}`;
+    const { env, db } = await testEnv({ token: revokedMarker });
+    db.rejectNextTokenCas();
+
+    const response = await postLogin(env);
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(409);
+    expect(body).not.toHaveProperty("token");
+    expect(body).not.toHaveProperty("lease_payload");
+    expect(body).not.toHaveProperty("lease_signature");
+    expect(JSON.stringify(body)).not.toContain(revokedMarker);
+    expect(db.sessionLeases.size).toBe(0);
+  });
+
+  it("keeps the version gate ahead of old-token auth and heartbeat rejection", async () => {
+    const supersededToken = "superseded-active-token";
+    const revokedMarker = `revoked:${"ef".repeat(32)}`;
+    const { env, db } = await testEnv({ token: supersededToken });
+    db.users[0].token = revokedMarker;
+    db.appVersions.push({
+      version: "2.0.0",
+      min_version: "1.4.0",
+      download_url: "https://example.test/nwflash",
+    });
+
+    for (const token of [supersededToken, revokedMarker]) {
+      const responses: Array<[Response, number]> = [
+        [await fetchWorker(env, "/api/me", {
+          headers: { Authorization: `Bearer ${token}`, "X-Nwflash-Version": "1.3.9" },
+        }), 426],
+        [await postHeartbeat(env, token, {}, "1.3.9"), 426],
+        [await fetchWorker(env, "/api/me", {
+          headers: { Authorization: `Bearer ${token}`, "X-Nwflash-Version": "1.4.0" },
+        }), 401],
+        [await postHeartbeat(env, token), 401],
+      ];
+
+      for (const [response, expectedStatus] of responses) {
+        const body = await response.json() as Record<string, unknown>;
+        const serialized = JSON.stringify(body);
+        expect(response.status).toBe(expectedStatus);
+        expect(body).not.toHaveProperty("token");
+        expect(serialized).not.toContain(token);
+        expect(serialized).not.toContain("revoked:");
+      }
+    }
+  });
+
+  it("rejects a login whose verified credential generation is replaced before it continues", async () => {
+    const originalToken = "credential-race-original-token";
+    const revokedMarker = `revoked:${"fa".repeat(32)}`;
+    const nextSalt = "ffeeddccbbaa99887766554433221100";
+    const { env, db } = await testEnv({ token: originalToken });
+    const credentialRead = db.pauseNextCredentialRead();
+
+    const loginPromise = postLogin(env);
+    await withTimeout(credentialRead.reached, "login credential read");
+    db.commitPasswordChange(
+      7,
+      await passwordHash("new correct horse", nextSalt),
+      nextSalt,
+      revokedMarker,
+    );
+    credentialRead.release();
+
+    const response = await withTimeout(loginPromise, "login after password change");
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(409);
+    expect(body).not.toHaveProperty("token");
+    expect(body).not.toHaveProperty("lease_payload");
+    expect(body).not.toHaveProperty("lease_signature");
+    expect(JSON.stringify(body)).not.toContain(originalToken);
+    expect(JSON.stringify(body)).not.toContain(revokedMarker);
+    expect(db.users[0].token).toBe(revokedMarker);
+    expect(db.sessionLeases.size).toBe(0);
+    expect(db.sessions.size).toBe(0);
   });
 
   it("persists login sequence one and advances the complete binding to heartbeat sequence two", async () => {

@@ -4,9 +4,9 @@ use std::{
 };
 
 use nwflash_application::{
-    HeartbeatInput, OperationAuthorization, OperationCoordinator, OperationIdleLease,
-    OperationLogger, OperationPermissionGate, SessionIntegrityReason, SessionLifecycle,
-    SessionTerminalClass, SessionTerminalDecision, SessionTerminalReason,
+    HeartbeatInput, OperationAuthorization, OperationCoordinator, OperationCoordinatorError,
+    OperationIdleLease, OperationLogger, OperationPermissionGate, SessionIntegrityReason,
+    SessionLifecycle, SessionTerminalClass, SessionTerminalDecision, SessionTerminalReason,
 };
 use nwflash_domain::{DomainError, OperationKind};
 use nwflash_infrastructure::{
@@ -88,6 +88,7 @@ pub struct AppState {
     pub firmware_extraction: commands::firmware::FirmwareExtractionRuntime,
     pub payload_inspection: commands::firmware::PayloadInspectionRuntime,
     pub remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime,
+    pub firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime,
     pub(crate) firmware_progress: commands::firmware::FirmwareProgressRuntime,
     pub prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
     pub prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
@@ -112,6 +113,7 @@ struct AppStateExitCleanup {
     root_ota_runtime: commands::root_ota::RootOtaRuntime,
     safe_flash_runtime: commands::safe_flash::SafeFlashRuntime,
     firmware_artifacts: commands::firmware::FirmwareArtifactRuntime,
+    firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime,
     prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
     prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
 }
@@ -126,6 +128,7 @@ impl AppStateExitCleanup {
             root_ota_runtime: state.root_ota_runtime.clone(),
             safe_flash_runtime: state.safe_flash_runtime.clone(),
             firmware_artifacts: state.firmware_artifacts.clone(),
+            firmware_output_directories: state.firmware_output_directories.clone(),
             prepared_firmware_artifact: state.prepared_firmware_artifact.clone(),
             prepared_dual_slot: state.prepared_dual_slot.clone(),
         }
@@ -138,6 +141,7 @@ impl AppStateExitCleanup {
             owned_roots.extend(self.root_ota_runtime.clear_owned());
             owned_roots.extend(self.safe_flash_runtime.clear_owned());
             owned_roots.extend(self.firmware_artifacts.clear_owned());
+            self.firmware_output_directories.clear();
             self.prepared_firmware_artifact.clear();
             self.prepared_dual_slot.clear();
             owned_roots
@@ -373,7 +377,9 @@ impl ProtectionContext {
         generation: Option<String>,
     ) {
         self.terminal_sink
-            .request(exit_supervisor::ExitRequest::immediate(generation, phase, reason));
+            .request(exit_supervisor::ExitRequest::immediate(
+                generation, phase, reason,
+            ));
     }
 }
 
@@ -639,6 +645,14 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
 }
 
 impl AppState {
+    pub(crate) async fn acquire_session_closeout(
+        &self,
+    ) -> Result<(OperationIdleLease, Option<String>), OperationCoordinatorError> {
+        let idle = self.operation_coordinator.try_acquire_idle()?;
+        let generation = self.session_lifecycle.generation().await;
+        Ok((idle, generation))
+    }
+
     pub fn try_new() -> Result<Self, CloudflareError> {
         let client = CloudflareClient::new_default()?;
         Self::try_with_client(client)
@@ -706,7 +720,11 @@ impl AppState {
             entries: operation_log_store.clone(),
         });
         let usage_reporter =
-            usage_reporter::UsageLogReporter::new(client.clone(), session_token.clone());
+            usage_reporter::UsageLogReporter::new(client.clone()).map_err(|_| {
+                CloudflareError::Transport(
+                    "本地 V1 使用日志兼容队列不可用，已拒绝启动。".to_string(),
+                )
+            })?;
         let remote_permission_gate = Arc::new(CloudflareOperationPermissionGate::new(
             client.clone(),
             session_token.clone(),
@@ -814,6 +832,7 @@ impl AppState {
             firmware_extraction: commands::firmware::FirmwareExtractionRuntime::new(),
             payload_inspection: commands::firmware::PayloadInspectionRuntime::new(),
             remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime::new(),
+            firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime::new(),
             firmware_progress: commands::firmware::FirmwareProgressRuntime::new(),
             prepared_firmware_artifact:
                 commands::quick_flash::PreparedFirmwareArtifactRuntime::with_scope(
@@ -853,6 +872,7 @@ impl AppState {
     pub fn bind_operation_events(&self, app_handle: AppHandle<Wry>) {
         let coordinator = self.operation_coordinator.clone();
         let device_runtime = self.device_runtime.clone();
+        let operation_log_store = self.operation_log_store.clone();
         spawn(async move {
             let mut receiver = coordinator.subscribe_state();
             let mut was_device_busy = false;
@@ -887,10 +907,15 @@ impl AppState {
                 if should_compensate_device_refresh(was_device_busy, is_busy) {
                     let app_handle = app_handle.clone();
                     let device_runtime = device_runtime.clone();
+                    let coordinator_for_refresh = coordinator.clone();
+                    let operation_log_store = operation_log_store.clone();
                     spawn(async move {
-                        let update =
-                            commands::device::automatic_device_refresh(&device_runtime, false)
-                                .await;
+                        let update = commands::device::automatic_device_refresh_guarded_with_log(
+                            &device_runtime,
+                            &coordinator_for_refresh,
+                            Some(&operation_log_store),
+                        )
+                        .await;
                         if update.should_emit {
                             let _ = app_handle.emit("device:snapshot", update.snapshot);
                         }
@@ -962,12 +987,16 @@ impl AppState {
         let coordinator = self.operation_coordinator.clone();
         let runtime = self.device_runtime.clone();
         let mirror_runtime = self.mirror_runtime.clone();
+        let operation_log_store = self.operation_log_store.clone();
         spawn(async move {
             loop {
                 sleep(Duration::from_secs(3)).await;
-                let update =
-                    commands::device::automatic_device_refresh(&runtime, coordinator.is_busy())
-                        .await;
+                let update = commands::device::automatic_device_refresh_guarded_with_log(
+                    &runtime,
+                    &coordinator,
+                    Some(&operation_log_store),
+                )
+                .await;
                 let _ = commands::mirror::reconcile_after_device_update(
                     &mirror_runtime,
                     &runtime,
@@ -1695,6 +1724,25 @@ mod device_monitor_tests {
         assert!(state.session_token.read().unwrap().is_none());
     }
 
+    #[test]
+    fn session_cleanup_invalidates_firmware_output_directory_capabilities() {
+        let state = AppState::new();
+        let selection = state
+            .firmware_output_directories
+            .replace(std::path::PathBuf::from(r"C:\private\firmware-output"));
+        assert!(state
+            .firmware_output_directories
+            .resolve(&selection.selection_id)
+            .is_ok());
+
+        AppStateExitCleanup::from_state(&state).revoke_capabilities();
+
+        assert!(state
+            .firmware_output_directories
+            .resolve(&selection.selection_id)
+            .is_err());
+    }
+
     #[tokio::test]
     async fn setup_started_receiver_handles_terminal_request_without_react_authority() {
         let terminator = Arc::new(RecordingTerminator::default());
@@ -1963,6 +2011,7 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
             commands::auth::auth_validate_token,
             commands::firmware::firmware_inspect_local,
             commands::firmware::firmware_inspect_remote,
+            commands::firmware::firmware_select_output_directory,
             commands::firmware::firmware_inspect_payload_local,
             commands::firmware::firmware_extract_payload_local,
             commands::firmware::firmware_inspect_line_flash_package,

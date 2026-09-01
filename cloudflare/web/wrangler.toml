@@ -2,9 +2,10 @@ name = "nwflash-web"
 main = "src/index.ts"
 compatibility_date = "2026-08-13"
 
-# 让 worker 能把 admin.html 当作纯文本导入
+# 管理后台静态资源仅作为构建期 Text module 装载;公开授权仍由 src/index.ts 的封闭 manifest 决定。
 rules = [
-  { type = "Text", globs = ["**/*.html"], fallthrough = true }
+  { type = "Text", globs = ["**/*.html", "**/*.css"], fallthrough = true },
+  { type = "Text", globs = ["**/admin/*.js", "**/admin/**/*.js"], fallthrough = false }
 ]
 
 [[d1_databases]]

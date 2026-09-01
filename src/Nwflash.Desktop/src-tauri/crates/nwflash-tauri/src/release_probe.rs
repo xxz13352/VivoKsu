@@ -1,8 +1,7 @@
 use nwflash_protection::{probe_release_image, IntegrityProbe};
 
 pub const PROTECTED_RELEASE_PROBE_ARGUMENT: &str = "--nwflash-protected-release-probe";
-pub const EFFECTIVE_CAPABILITIES_PROBE_ARGUMENT: &str =
-    "--nwflash-effective-capabilities-probe";
+pub const EFFECTIVE_CAPABILITIES_PROBE_ARGUMENT: &str = "--nwflash-effective-capabilities-probe";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtectedReleaseProbeAction {
@@ -39,10 +38,10 @@ impl ProtectedReleaseProbeReport {
             }
         }
 
-        let build_id = self
-            .build_id
-            .as_ref()
-            .map_or_else(|| "null".to_string(), |value| serde_json::to_string(value).unwrap());
+        let build_id = self.build_id.as_ref().map_or_else(
+            || "null".to_string(),
+            |value| serde_json::to_string(value).unwrap(),
+        );
         format!(
             concat!(
                 r#"{{"schema":1,"mode":"nwflash-protected-release-probe","probe_available":{},"#,

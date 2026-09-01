@@ -32,6 +32,8 @@ All responses are JSON. `/api/me` endpoints require the HttpOnly cookie. The log
 
 The frozen request and response shapes are in [docs/client-api-handoff.md](docs/client-api-handoff.md). The subsystem design and security boundaries are in [docs/architecture.md](docs/architecture.md).
 
+The shared API revoked-marker handoff is implemented. The user Workerd suite exercises password change, old session cleanup, shared API marker exchange, version-gate precedence, old-token 401 responses, signed login/heartbeat lease binding, and recreation of only the new session against one real D1 database.
+
 ## Local verification
 
 Run from `cloudflare/user`:
@@ -41,4 +43,4 @@ npm test
 npm run typecheck
 ```
 
-These commands run local tests and a dry-run Worker build only. Verification does **not** authorize or perform a deployment. Client integration remains on hold until the coordinating task implements and contract-tests the shared API Worker revoked-marker behavior.
+These commands run local tests and a dry-run Worker build only. Verification does **not** authorize or perform a deployment. The shared API contract is no longer a client-integration blocker; deployment and desktop rollout still require their own release approval.
