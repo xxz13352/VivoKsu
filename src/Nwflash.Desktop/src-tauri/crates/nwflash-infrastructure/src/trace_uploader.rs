@@ -1403,8 +1403,8 @@ mod tests {
         let root = TempDir::new().unwrap();
         let store = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
         let current = owner(1, 1);
-        let chunk = TraceItemKey::new(TraceSpoolEntity::OutputChunk, "chunk");
         let event = TraceItemKey::new(TraceSpoolEntity::Event, "event");
+        let chunk = TraceItemKey::new(TraceSpoolEntity::OutputChunk, "chunk");
         store
             .register_sealed_attempt(manifest(
                 1,
@@ -1518,7 +1518,6 @@ mod tests {
         let root = TempDir::new().unwrap();
         let current = owner(1, 1);
         let event = TraceItemKey::new(TraceSpoolEntity::Event, "event");
-        let chunk = TraceItemKey::new(TraceSpoolEntity::OutputChunk, "chunk");
         let uploader = TraceUploader::new(0);
         {
             let store = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
@@ -1554,37 +1553,9 @@ mod tests {
         }
 
         let reopened = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
-        let DispatchTickOutcome::RemediationRequired(remediation) = uploader
-            .next_dispatch(
-                &reopened,
-                &current,
-                &client_version(0x55),
-                UploadConnectivity::Online,
-                1,
-            )
-            .unwrap()
-        else {
-            panic!("expected durable remediation replay");
-        };
-        assert_eq!(remediation.items(), std::slice::from_ref(&chunk));
-        reopened
-            .register_remediated_attempt(
-                remediation.inflight_handle(),
-                manifest(
-                    2,
-                    current.clone(),
-                    vec![sealed_item(
-                        TraceSpoolEntity::OutputChunk,
-                        "chunk",
-                        Some(event),
-                        2,
-                    )],
-                ),
-                remediation.items(),
-            )
-            .unwrap();
-
-        assert!(matches!(
+        // The sealed HTTP body is process-local. A new process must fail closed
+        // and surface durable loss instead of replaying remediation metadata.
+        assert_eq!(
             uploader
                 .next_dispatch(
                     &reopened,
@@ -1594,8 +1565,8 @@ mod tests {
                     1,
                 )
                 .unwrap(),
-            DispatchTickOutcome::Dispatch(_)
-        ));
+            DispatchTickOutcome::Idle
+        );
     }
 
     #[test]

@@ -1677,7 +1677,13 @@ impl TraceSpoolStore {
                         | AttemptState::Paused(_)
                 )
             })
-            .flat_map(|attempt| attempt.manifest.items.iter().map(|item| item.trace_id.clone()))
+            .flat_map(|attempt| {
+                attempt
+                    .manifest
+                    .items
+                    .iter()
+                    .map(|item| item.trace_id.clone())
+            })
             .collect::<BTreeSet<_>>();
         if orphaned_trace_ids.is_empty() {
             return Ok(false);
@@ -1987,7 +1993,10 @@ impl TraceSpoolStore {
             let loss: TraceLossDiagnostic =
                 serde_json::from_slice(&self.read_bounded(&path, MAX_LOSS_BYTES)?)?;
             if loss.scope_hash != owner.scope_hash()
-                || !matches!(loss.reason.as_str(), RETENTION_REASON | STARTUP_ORPHAN_REASON)
+                || !matches!(
+                    loss.reason.as_str(),
+                    RETENTION_REASON | STARTUP_ORPHAN_REASON
+                )
             {
                 return Err(TraceSpoolError::ScopeMismatch);
             }
@@ -2779,13 +2788,11 @@ mod tests {
         drop(store);
         let reopened = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
         assert!(reopened.due_attempts(&current, 0).unwrap().is_empty());
-        assert_eq!(
-            reopened
-                .due_reseal_items(&current, 0, &version(9))
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(reopened
+            .due_reseal_items(&current, 0, &version(9))
+            .unwrap()
+            .is_empty());
+        assert_eq!(reopened.loss_paths_for_test(&current).len(), 1);
     }
 
     #[test]
@@ -2953,24 +2960,19 @@ mod tests {
         drop(handle);
         drop(store);
         let reopened = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
-        let outbox = reopened.due_remediations(&current, &version(9)).unwrap();
-        assert_eq!(outbox.len(), 1);
-        assert_eq!(outbox[0].affected(), std::slice::from_ref(&key));
-        reopened
-            .register_remediated_attempt(
-                outbox[0].handle(),
-                attempt(
-                    2,
-                    current.clone(),
-                    vec![item(TraceSpoolEntity::OutputChunk, "chunk", "trace", 2, 0)],
-                ),
-                std::slice::from_ref(&key),
-            )
-            .unwrap();
         assert!(reopened
             .due_remediations(&current, &version(9))
             .unwrap()
             .is_empty());
+        assert_eq!(reopened.loss_paths_for_test(&current).len(), 1);
+        assert!(matches!(
+            reopened.register_sealed_attempt(attempt(
+                2,
+                current,
+                vec![item(TraceSpoolEntity::OutputChunk, "chunk", "trace", 2, 0)],
+            )),
+            Err(TraceSpoolError::ExpiredTrace)
+        ));
     }
 
     #[test]
@@ -3137,7 +3139,8 @@ mod tests {
         store.fail_next_manifest_replace_for_test();
         assert!(store.pause_client_version_for_update(&handle).is_err());
         drop(handle);
-        drop(store);
+        // Keep the original live root state while reopening this handle so this
+        // test exercises update-gate persistence, not process-restart recovery.
         let store = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
         assert!(store.due_attempts(&other, 0).unwrap().is_empty());
         assert!(matches!(
@@ -3156,7 +3159,7 @@ mod tests {
                 .due_reseal_items(&first, 0, &version(8))
                 .unwrap()
                 .len(),
-            2
+            1
         );
         assert!(matches!(
             store.register_sealed_attempt(attempt_version(
@@ -3256,7 +3259,6 @@ mod tests {
         let reopened = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
         assert!(reopened
             .due_attempts_without_expiry_for_test(&current)
-            .unwrap()
             .is_empty());
         let losses = reopened.loss_paths_for_test(&current);
         assert_eq!(losses.len(), 1);
