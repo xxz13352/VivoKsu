@@ -186,10 +186,8 @@ pub struct RootOtaExtractResultDto {
 async fn read_online_ota_identity(
     serial: &str,
     coordinator: &OperationCoordinator,
-) -> Result<(String, String), String> {
-    let operation = coordinator.state().await.kind;
-    let admission = coordinator.admission_state();
-    crate::commands::device_identity::read_identity_if_admitted(serial, admission, operation).await
+) -> Result<(String, String), crate::commands::device_identity::IdentityReadFailure> {
+    crate::commands::device_identity::read_identity_if_admitted(serial, coordinator).await
 }
 
 fn needs_payload_dumper(kind: RemoteFirmwareKind) -> bool {
@@ -333,13 +331,33 @@ pub async fn root_ota_check(state: State<'_, AppState>) -> Result<RootOtaCheckDt
     let (pd, version) = match read_online_ota_identity(&serial, &state.operation_coordinator).await
     {
         Ok(identity) => identity,
-        Err(_) => {
+        Err(error) => {
+            if let Some(reason) = error.admission_reason() {
+                crate::commands::device::record_refresh_gate(
+                    &state.operation_log_store,
+                    "ROOT OTA 检测",
+                    reason,
+                );
+            }
             return Ok(RootOtaCheckDto {
                 available: false,
                 label: None,
-            })
+            });
         }
     };
+    let operation = state.operation_coordinator.state().await.kind;
+    let admission = state.operation_coordinator.admission_state();
+    if let Some(reason) = root_ota_check_block_reason(admission, operation) {
+        crate::commands::device::record_refresh_gate(
+            &state.operation_log_store,
+            "ROOT OTA 检测",
+            reason,
+        );
+        return Ok(RootOtaCheckDto {
+            available: false,
+            label: None,
+        });
+    }
     let rom = match client.resolve_rom(token.as_str(), &pd, &version).await {
         Ok(rom) => rom,
         Err(_) => {
@@ -882,6 +900,6 @@ mod tests {
             .await
             .expect_err("exit-pending identity refresh must be skipped before spawn");
 
-        assert!(error.contains("skipped:exit_pending"));
+        assert_eq!(error.admission_reason(), Some("skipped:exit_pending"));
     }
 }
