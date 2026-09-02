@@ -414,7 +414,7 @@ git diff -- src/Nwflash.Desktop/src-tauri/crates/nwflash-protection/src/trace_re
 
 先修复阶段 A 的 6 个编译错误，完成 focused tests 后再进入任何其他工作树。
 
-## 13. 本次执行记录（2026-08-31）
+## 13. 本次执行记录（2026-08-31 / 2026-09-02 续）
 
 已完成并集成到 `codex/integration-staging`：
 
@@ -442,9 +442,29 @@ git diff -- src/Nwflash.Desktop/src-tauri/crates/nwflash-protection/src/trace_re
 - VMP SDK verifier、六叶 link/layout contract、protected profile、Tauri release fixture、PowerShell runtime/protected behavior contract 通过。
 - VMP GUI、签名、部署、安装、登录和真机均未执行。
 
+### 2026-09-02 续：阶段 B2
+
+分支 `spool-lowlevel-contract`（基于 `b5e6ccb`），工作树 `.worktrees/spool-lowlevel-contract`。
+
+- `efdab90 test(trace): pin low-level spool ack contract`：为 `TraceSpoolStore` 补齐直接测试，此前 `apply_validated_ack_cas` 在 `trace_spool.rs` 内没有任何直接覆盖，facade 只能间接依赖它。
+  - `peek_due_attempts` 不执行 expiry、不执行 recovery、不落盘：调用前后 manifest 逐字节一致且 loss 目录无新增；同一 fixture 在 `expire()` 下确实产生 1 条保留期 loss，证明该断言非空转。
+  - `apply_validated_ack_cas` 对五类非法输入零变更并失败：重复 ack key、accepted/rejected 重叠、缺少已派发成员、未知成员、credential rejection 指向非 chunk 实体。每一类都断言 manifest 逐字节未变。
+  - mixed ACK 的 manifest 落盘被注入失败时：旧 manifest 逐字节保留，run item 未被部分 accepted；重开后三个 item 仍以原 revision 存在并全部回到 reseal outbox。
+
+已验证（`nwflash-infrastructure`）：
+
+- `cargo test -p nwflash-infrastructure --no-fail-fast`：全部通过，lib 111/111，各集成测试二进制 23/14/4/5/17/5/6/22/14/1/2/1/4/2/5/10/3 均通过，0 failed。
+- `cargo clippy -p nwflash-infrastructure --all-targets -- -D warnings`：通过。
+- `cargo fmt --all -- --check` 与 `git diff --check`：通过。
+
+执行环境注意事项（不影响源码，但会影响门禁结果）：
+
+- 本机 `HTTP_PROXY` / `HTTPS_PROXY` 指向 `http://127.0.0.1:2717`。`trace_http::tests::debug_and_errors_never_expose_token_body_or_response_ids` 会连 `http://127.0.0.1:9` 并期望连接失败；在代理存在时请求被代理接走并返回 `502`，该测试必然失败。运行 Rust 测试前需清除代理环境变量。
+- 当前环境下 `git update-ref` / `git worktree add -b` 无法在 `refs/heads/` 下新建含 `/` 的分支名（`codex/...`、`zzz-nested/...` 均静默无效果且返回 0），仅扁平分支名可用。既有 `codex/*` 分支位于 `packed-refs`，读取不受影响。因此本次新分支命名为 `spool-lowlevel-contract`。
+
 仍未完成：
 
+- 阶段 B3：completed-attempt 历史容量与去重账本（`MAX_STORED_ATTEMPTS = 256` 用尽后永久注册失败）；
 - durable sealed body/restart recovery 或明确 orphan → durable loss 闭环；
-- completed-attempt 历史容量与去重账本；
 - producer → spool → HTTP 的实际运行时接线、最终 Tauri spawn 接线；
 - 手工 VMProtect Lite 保护、compiler log/marker review、protected runtime/CRC、Authenticode、NSIS、安装卸载和真机 smoke。
