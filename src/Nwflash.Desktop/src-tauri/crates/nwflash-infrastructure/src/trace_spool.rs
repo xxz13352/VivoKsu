@@ -3287,4 +3287,238 @@ mod tests {
             ))
             .is_err());
     }
+
+    // ---- 阶段 B2：TraceSpoolStore 低层契约 ----
+
+    fn three_entity_items() -> Vec<SealedItemRevision> {
+        vec![
+            item(TraceSpoolEntity::Run, "run", "trace", 1, 0),
+            item(TraceSpoolEntity::Event, "event", "trace", 1, 0),
+            item(TraceSpoolEntity::OutputChunk, "chunk", "trace", 1, 0),
+        ]
+    }
+
+    fn dispatched_three_entity_store(
+        root: &TempDir,
+    ) -> (TraceSpoolStore, TraceOwnerGeneration, InflightAttemptHandle) {
+        let store = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
+        let current = owner(0x91, 5);
+        store
+            .register_sealed_attempt(attempt(1, current.clone(), three_entity_items()))
+            .unwrap();
+        let handle = store
+            .begin_dispatch(&SealedAttemptId::from_digest([1; 32]), &current)
+            .unwrap();
+        (store, current, handle)
+    }
+
+    fn manifest_bytes(store: &TraceSpoolStore, current: &TraceOwnerGeneration) -> Vec<u8> {
+        fs::read(store.manifest_path(current)).unwrap()
+    }
+
+    fn loss_entry_count(store: &TraceSpoolStore, current: &TraceOwnerGeneration) -> usize {
+        fs::read_dir(store.loss_directory(current))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+
+    fn key(entity: TraceSpoolEntity, id: &str) -> TraceItemKey {
+        TraceItemKey::new(entity, id)
+    }
+
+    #[test]
+    fn peek_due_attempts_performs_no_expiry_recovery_or_persist() {
+        let root = TempDir::new().unwrap();
+        let store = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
+        let current = owner(0x71, 3);
+        store
+            .register_sealed_attempt(attempt(
+                1,
+                current.clone(),
+                vec![item(TraceSpoolEntity::Run, "run", "trace", 1, 0)],
+            ))
+            .unwrap();
+        let before = manifest_bytes(&store, &current);
+        let now_ms = TRACE_SPOOL_RETENTION_MS.saturating_mul(4);
+
+        let due = store.peek_due_attempts(&current, now_ms).unwrap();
+        assert_eq!(
+            due.len(),
+            1,
+            "peek 不得因保留期已过而丢弃 due attempt：过期属于 expire 的职责"
+        );
+        assert_eq!(manifest_bytes(&store, &current), before, "peek 不得落盘");
+        assert_eq!(
+            loss_entry_count(&store, &current),
+            0,
+            "peek 不得写出 loss 诊断"
+        );
+        assert_eq!(
+            store.expire(&current, now_ms).unwrap().len(),
+            1,
+            "同一 fixture 在 expire 下必须真的产生保留期 loss，否则本断言无意义"
+        );
+    }
+
+    #[test]
+    fn apply_validated_ack_cas_rejects_duplicate_ack_key_without_mutation() {
+        let root = TempDir::new().unwrap();
+        let (store, current, handle) = dispatched_three_entity_store(&root);
+        let before = manifest_bytes(&store, &current);
+        let run = key(TraceSpoolEntity::Run, "run");
+        let event = key(TraceSpoolEntity::Event, "event");
+
+        assert!(matches!(
+            store.apply_validated_ack_cas(
+                &handle,
+                &[run.clone(), run.clone()],
+                &[event],
+                &[],
+                &[],
+                10,
+            ),
+            Err(TraceSpoolError::InvalidHandle)
+        ));
+        assert_eq!(manifest_bytes(&store, &current), before);
+        assert_eq!(store.current_revision_for_test(&current, &run), Some(1));
+    }
+
+    #[test]
+    fn apply_validated_ack_cas_rejects_accepted_rejected_overlap_without_mutation() {
+        let root = TempDir::new().unwrap();
+        let (store, current, handle) = dispatched_three_entity_store(&root);
+        let before = manifest_bytes(&store, &current);
+        let run = key(TraceSpoolEntity::Run, "run");
+        let event = key(TraceSpoolEntity::Event, "event");
+
+        assert!(matches!(
+            store.apply_validated_ack_cas(
+                &handle,
+                std::slice::from_ref(&run),
+                &[run.clone(), event],
+                &[],
+                &[],
+                10,
+            ),
+            Err(TraceSpoolError::InvalidHandle)
+        ));
+        assert_eq!(manifest_bytes(&store, &current), before);
+        assert_eq!(store.current_revision_for_test(&current, &run), Some(1));
+    }
+
+    #[test]
+    fn apply_validated_ack_cas_rejects_missing_dispatched_member_without_mutation() {
+        let root = TempDir::new().unwrap();
+        let (store, current, handle) = dispatched_three_entity_store(&root);
+        let before = manifest_bytes(&store, &current);
+        let run = key(TraceSpoolEntity::Run, "run");
+
+        assert!(matches!(
+            store.apply_validated_ack_cas(&handle, std::slice::from_ref(&run), &[], &[], &[], 10),
+            Err(TraceSpoolError::InvalidHandle)
+        ));
+        assert_eq!(manifest_bytes(&store, &current), before);
+        assert_eq!(store.current_revision_for_test(&current, &run), Some(1));
+    }
+
+    #[test]
+    fn apply_validated_ack_cas_rejects_unknown_member_without_mutation() {
+        let root = TempDir::new().unwrap();
+        let (store, current, handle) = dispatched_three_entity_store(&root);
+        let before = manifest_bytes(&store, &current);
+        let run = key(TraceSpoolEntity::Run, "run");
+        let event = key(TraceSpoolEntity::Event, "event");
+        let chunk = key(TraceSpoolEntity::OutputChunk, "chunk");
+        let ghost = key(TraceSpoolEntity::OutputChunk, "ghost");
+
+        assert!(matches!(
+            store.apply_validated_ack_cas(
+                &handle,
+                &[run.clone(), event],
+                std::slice::from_ref(&chunk),
+                std::slice::from_ref(&ghost),
+                &[],
+                10,
+            ),
+            Err(TraceSpoolError::InvalidHandle)
+        ));
+        assert_eq!(manifest_bytes(&store, &current), before);
+        assert_eq!(store.current_revision_for_test(&current, &run), Some(1));
+    }
+
+    #[test]
+    fn apply_validated_ack_cas_rejects_credential_rejection_on_non_chunk() {
+        let root = TempDir::new().unwrap();
+        let (store, current, handle) = dispatched_three_entity_store(&root);
+        let before = manifest_bytes(&store, &current);
+        let run = key(TraceSpoolEntity::Run, "run");
+        let event = key(TraceSpoolEntity::Event, "event");
+        let chunk = key(TraceSpoolEntity::OutputChunk, "chunk");
+
+        assert!(matches!(
+            store.apply_validated_ack_cas(
+                &handle,
+                std::slice::from_ref(&run),
+                std::slice::from_ref(&event),
+                std::slice::from_ref(&chunk),
+                std::slice::from_ref(&event),
+                10,
+            ),
+            Err(TraceSpoolError::InvalidHandle)
+        ));
+        assert_eq!(manifest_bytes(&store, &current), before);
+        assert_eq!(store.current_revision_for_test(&current, &run), Some(1));
+    }
+
+    #[test]
+    fn apply_validated_ack_cas_persist_failure_keeps_old_manifest_without_partial_accept() {
+        let root = TempDir::new().unwrap();
+        let (store, current, handle) = dispatched_three_entity_store(&root);
+        let before = manifest_bytes(&store, &current);
+        let run = key(TraceSpoolEntity::Run, "run");
+        let event = key(TraceSpoolEntity::Event, "event");
+        let chunk = key(TraceSpoolEntity::OutputChunk, "chunk");
+
+        store.fail_next_manifest_replace_for_test();
+        assert!(matches!(
+            store.apply_validated_ack_cas(
+                &handle,
+                std::slice::from_ref(&run),
+                std::slice::from_ref(&chunk),
+                std::slice::from_ref(&event),
+                std::slice::from_ref(&chunk),
+                10,
+            ),
+            Err(TraceSpoolError::InjectedAtomicReplace)
+        ));
+        assert_eq!(
+            manifest_bytes(&store, &current),
+            before,
+            "persist 失败后旧 manifest 必须逐字节保留"
+        );
+        assert_eq!(
+            store.current_revision_for_test(&current, &run),
+            Some(1),
+            "run 不得被部分 accepted"
+        );
+
+        drop(handle);
+        drop(store);
+        let reopened = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
+        for key in [&run, &event, &chunk] {
+            assert_eq!(
+                reopened.current_revision_for_test(&current, key),
+                Some(1),
+                "重开后每个 item 都必须仍在，既未 accepted 也未丢失"
+            );
+        }
+        assert_eq!(
+            reopened
+                .due_reseal_items(&current, 0, &version(9))
+                .unwrap()
+                .len(),
+            3,
+            "重开后三个 item 全部回到待重封状态，没有部分落盘"
+        );
+    }
 }
