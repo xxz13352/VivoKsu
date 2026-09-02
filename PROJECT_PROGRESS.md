@@ -1,26 +1,29 @@
 # VivoKsu / NWFlash Project Progress
 
-Last updated: 2026-08-30 (Asia/Shanghai)
+Last updated: 2026-09-02 (Asia/Shanghai)
 
 ## Executive status
 
-- Functional implementation and automated validation: approximately **92%**.
-- Release readiness: approximately **76%**.
-- Administrator backend and console: implemented, reviewed, tested, and integrated.
-- User backend and portal: implemented, reviewed, tested, and integrated.
+- Functional implementation and automated validation: approximately **90%**.
+- Release readiness: approximately **68%**.
+- Administrator backend and console: implemented, reviewed, tested, and integrated — **not deployed**; production still serves the previous admin page.
+- User backend and portal: implemented, reviewed, tested, and integrated — production serves an older build whose source is not in this repository.
 - Existing five-leaf VMP runtime/release hardening: integrated and automated gates pass.
-- Plan C structured trace client: Wave 1, Wave 2, producer core, process bridge, and initial Tauri gates are integrated.
-- Real release remains blocked by manual VMProtect GUI work, signing, installer, installation, and real-device validation.
+- Plan C structured trace client: Wave 1, Wave 2, producer core, process bridge, initial Tauri gates, attested metadata spool facade, producer sentinel-static boundary, process trace adapter, and the concrete metadata spool adapter are integrated through `01f55be`.
+- Operation dispatch authority is integrated (`33dc9aa` / `4f062f5`); final Tauri spawn wiring remains.
+- Stage B2 low-level spool contract tests are complete on `spool-lowlevel-contract@513cbbe`.
+- Real release remains blocked by manual VMProtect GUI work, signing, installer, installation, real-device validation, and the Cloudflare deployment prerequisites in the deployment section below.
 
 These percentages are engineering estimates, not test coverage. "Source-ready" or "gate-ready" does not mean that a binary has been protected, signed, installed, or approved for release.
 
 ## Canonical integration baseline
 
-- Worktree: `C:\Users\mi\Desktop\VivoKsu 工具\.worktrees\integration-staging`
-- Branch: `codex/integration-staging`
-- Committed tip: `35e0248 fix(tauri): close refresh and mirror release gates`.
-- The integration worktree is currently clean after the latest targeted wiring commits.
-- Do not reset, clean, checkout, or overwrite this worktree.
+- Authoritative newest tip: `codex/vmp-release-completion@b5e6ccb test(ui): wait for terminal operation snapshot` (outer checkout, clean).
+- Integration branch: `codex/integration-staging@01f55be feat(infrastructure): add concrete metadata spool adapter` (clean worktree).
+- The outer branch is ahead of integration by the merge `4f64a07`, docs commits `65c4cab` / `5168022`, the trace fix `a25e6ab`, and the UI test fix `b5e6ccb`; `a25e6ab` is the only effective code delta and still needs to be merged back into integration.
+- Stage B2 work lives on `spool-lowlevel-contract@513cbbe` (worktree `.worktrees/spool-lowlevel-contract`), branched from `b5e6ccb`.
+- Do not reset, clean, checkout, or overwrite the integration worktree.
+- Git environment warning: creating or deleting nested branch names (`refs/heads/<dir>/<name>`) via `git update-ref` / `git worktree add -b` is broken in this environment and can silently drop the whole `<dir>` directory of loose refs. Use flat branch names and move nested pointers by writing loose ref files directly.
 
 Integrated validation after the administrator merge:
 
@@ -149,6 +152,20 @@ Remaining Wave 2 integration work:
 - Bind actual `TraceOutputSession` sealed attempts from the producer to the metadata spool/uploader. The metadata state machine intentionally accepts no raw payload.
 - Add the full crash matrix at the producer-to-spool boundary, including re-seal after `credential_rejected` and seven-day durable loss.
 
+## Stage B2: TraceSpoolStore low-level contract tests (2026-09-02)
+
+Worktree: `.worktrees/spool-lowlevel-contract`, branch `spool-lowlevel-contract` (flat name on purpose; nested names cannot be created in this environment), based on `b5e6ccb`.
+
+- `efdab90 test(trace): pin low-level spool ack contract` adds the first direct coverage for `apply_validated_ack_cas`, which previously had none inside `trace_spool.rs`:
+  - `peek_due_attempts` performs no expiry, no recovery, and no persist — the manifest is byte-identical afterwards and no loss diagnostic is written, while the same fixture under `expire()` really does emit one retention loss.
+  - `apply_validated_ack_cas` rejects duplicate ack keys, accepted/rejected overlap, a missing dispatched member, an unknown member, and a credential rejection aimed at a non-chunk entity; every rejection leaves the manifest byte-identical.
+  - A mixed ACK whose manifest replace is injected to fail keeps the old manifest byte-for-byte and does not partially accept the run item; after reopening, all three items remain at their original revision and return to the reseal outbox.
+- `513cbbe docs: record stage B2 completion and environment gates` records the same evidence in `TERRA_IMPLEMENTATION_PLAN_2026-08-31.md` section 13.
+
+Gates: `nwflash-infrastructure` full test set passed with 0 failures (lib 111/111 plus every integration test binary), clippy `--all-targets -D warnings`, `cargo fmt --check`, and `git diff --check` all pass.
+
+Environment note: the local `HTTP_PROXY` / `HTTPS_PROXY` point at `http://127.0.0.1:2717`. `trace_http::tests::debug_and_errors_never_expose_token_body_or_response_ids` connects to `http://127.0.0.1:9` and expects the connection to fail; with the proxy present the request is routed to the proxy and returns `502`, so the test fails even though the code is correct. Clear the proxy environment variables before running Rust tests.
+
 ## Process observation and driver installation security
 
 Worktree: `C:\Users\mi\Desktop\VivoKsu 工具\.worktrees\planc-process-bridge`
@@ -235,21 +252,43 @@ Known bypasses still requiring producer/observer adapters:
 
 The durable V1 compatibility bridge is integrated as `0ca1ab1` plus `b87d9b5` and has 4/4 focused tests, but the Tauri `UsageLogReporter` is still active. It must be retired only after all producer adapters and the V2 projection path are live.
 
+## Cloudflare production deployment status (probed 2026-09-02, read-only)
+
+All four Worker domains are live. "No production deployment was performed" in the sections above refers to the recent integration rounds only; an earlier production deployment exists but is behind the current source.
+
+| Worker | Domain | Observed state |
+|---|---|---|
+| `nwflash-rom` (API) | `api.nwflash.cc.cd` | `/health` returns 200. Legacy routes are live: `/api/login`, `/api/heartbeat`, `/api/usage/logs`, `/api/operation/authorize` (empty POST returns 401/400, so the routes exist). **Not deployed:** `/api/security/pins`, `/api/integrity/report`, and `/api/usage/traces/v2` all return 404 — the VMP integrity reporting path and the entire trace V2 ingest backend are absent from production. |
+| `nwflash-web` (admin) | `web.nwflash.cc.cd` | Serves the **old** page "Nwflash · 控制中心", which corresponds to `cloudflare/web/src/admin.html` (deleted in `f8fe8cf`). The new "Nwflash · 运营控制台" console (`web/src/admin/index.html`) with the audit/overview/version workspaces is **not deployed**. |
+| `nwflash-user` (portal) | `user.nwflash.cc.cd` | Serves "Nwflash · 我的账户" with my-logs / online-sessions / password-change. **This build has no corresponding source anywhere in the repository** (`git log -S"我的账户" --all` is empty; every branch's portal `index.html` is titled "Personal Ops"). Provenance unknown. |
+| `nwflash-site` (website) | `nwflash.cc.cd` | "奶蛙Flash · Nwflash", consistent with `website/src/index.html`. |
+
+Verification limits: the `cloudflare/` directories have no `node_modules` (removed to reclaim disk), there is no local wrangler CLI, no `~/.wrangler` login state, and no `CLOUDFLARE_*` credentials, so remote deployment IDs, versions, and timestamps could not be queried. Everything above is inferred from HTTPS behavior plus source/history comparison — no deployment, secret write, or D1 mutation was performed.
+
+Deployment blockers, in order:
+
+1. Configure the production secret `SESSION_SIGNING_PRIVATE_KEY_PKCS8` (and `VOTA_API_TOKEN` if not yet present); `npm run deploy` preflight fails closed without it.
+2. Resolve the V2 A/B keyring acceptance gate from `sidecar-ed25519-key-rotation.md` before the first authorized production deployment of the hardened client/API.
+3. Decide the fate of the undocumented live `user.nwflash.cc.cd` build before replacing it: either recover its source or accept the repository's "Personal Ops" portal as the replacement.
+4. Apply `web/schema.sql` additions (`session_leases`, `integrity_event_claims`, `integrity_events`, `integrity_rate_limits`) and the trace V2 migrations to remote D1 before deploying the new API/admin.
+5. Only then deploy `nwflash-rom` + `nwflash-web` (+ `nwflash-user`) and re-run the documented post-deploy checks.
+
 ## Release blockers
 
 No release claim is permitted until all of the following pass:
 
-- Plan C Wave 1 final Ready YES review and clean commit (`0d65c0d`).
-- Wave 2 spool/uploader final review and metadata tests are integrated; producer payload/session adapter and crash matrix remain.
+- Plan C Wave 1 final Ready YES review and clean commit (`0d65c0d`) — integrated.
+- Wave 2 spool/uploader final review and metadata tests — integrated through `01f55be`; the crash/restart loss matrix and the completed-attempt ledger (stage B3/C) remain.
 - Producer/process/Tauri lifecycle wiring is complete for coordinator gates and mirror lifetime, but all seven operation classes still need actual sealed trace production adapters.
-- Driver archive-to-elevated-consumer P0 final review and commit (`c6a6494`), with the unintegrated observer helper removed by `da2f22f`.
+- Driver archive-to-elevated-consumer P0 final review and commit (`c6a6494`), with the unintegrated observer helper removed by `da2f22f` — integrated.
 - Sixth VMP leaf real link/MAP/dumpbin verification (`verify-link-layout.ps1` and `test-contracts.ps1`) passed.
-- Full Rust workspace fmt, clippy, and tests after the latest Tauri/producer integration (focused gates are green; full workspace release gate remains).
+- Full Rust workspace fmt, clippy, and tests on the newest tip (`b5e6ccb` / the merged B2 branch); the last full run predates the outer-branch merge.
 - Full desktop unit/build and native WDIO E2E after integration.
 - Cloudflare shared/admin/user Node, Workerd, typecheck, dry-run, and browser gates after integration.
+- The Cloudflare deployment prerequisites listed in the deployment section above (signing secret, V2 keyring gate, D1 migrations).
 - Manual VMProtect Lite 3.10.4 Build 2668 GUI protection and compiler-log review.
 - Protected output verification, `VMProtectIsProtected`, CRC, Authenticode signing, NSIS packaging, installer install/uninstall, login/heartbeat, and real-device smoke tests.
-- Explicit production deployment authorization. No deployment has been performed.
+- Explicit production deployment authorization.
 
 VMProtect SDK directory supplied by the user:
 
@@ -259,11 +298,12 @@ VMProtect SDK directory supplied by the user:
 
 Active worktrees:
 
-- Outer: `codex/vmp-release-completion@5622642`
-- `.worktrees/integration-staging` at the current integrated Tauri/Plan C tip.
-- `.worktrees/f-tauri-wiring` retains the independently reviewed F wiring history through `c465480`.
-- `.worktrees/plan-c-wave2-spool-uploader`, `.worktrees/planc-process-bridge`, and `.worktrees/planc-producer-core` retain clean source histories; their rebuildable targets were cleaned.
-- `.worktrees/vmp-plan-c-sentinel-gate` at clean `db21a7f`.
+- Outer: `codex/vmp-release-completion@b5e6ccb` (clean).
+- `.worktrees/integration-staging` at `01f55be` (clean).
+- `.worktrees/spool-lowlevel-contract` at `513cbbe` (clean) — stage B2.
+- `.worktrees/refresh-spawn-race-fix` at `35e0248` retains uncommitted stage E work (`device.rs`, `device_identity.rs`, `root_ota.rs`, +711/−46); do not reset or clean it.
+- `.worktrees/operation-dispatch-guard` (`8ca8731`), `.worktrees/planc-producer-spool-adapter` (`c420b77`), `.worktrees/process-trace-adapter` (`11d796a`), `.worktrees/producer-sentinel-static` (`ba7e81c`), and `.worktrees/sealed-spool-facade` (`d62d649`) are clean; their content is already integrated under different commit SHAs (verified by patch-id equivalence).
+- `.worktrees/planc-producer-core` is an empty leftover directory held by a Windows handle; it is not a Git worktree.
 
 Recovery bundles:
 
@@ -289,11 +329,13 @@ Workspace rules:
 
 ## Recommended next execution order
 
-1. Bind producer `TraceOutputSession` attempts to the metadata-only spool/uploader and add the crash/recovery matrix.
-2. Migrate every process-producing command to the observed adapter, including discovery, root OTA, mirror output, elevated driver, and internal taskkill evidence.
-3. Retire the active Tauri V1 reporter only after the producer adapter and V2 projection path are live.
-4. Run the full non-deploying integration matrix and create a new final Git bundle.
-5. Perform the separately authorized manual VMProtect/signing/installer/device release sequence.
+1. Merge `a25e6ab` (and the outer docs commits) back into `codex/integration-staging`, then merge `spool-lowlevel-contract` so stage B2 lands on the canonical branch.
+2. Stage B3: add the bounded completed-attempt ledger/tombstone so the 256-attempt ceiling no longer permanently fails registration for an owner generation; include the 300+ attempt stress tests and keep duplicate detection across active attempts and the ledger.
+3. Stage C: the restart loss closed loop — persist a process/build epoch per registered attempt, treat pending metadata from a previous epoch as orphans, write durable loss tombstones atomically, and cover the seven-crash matrix.
+4. Stage D3: wire the producer → metadata spool → sentinel-attested HTTP transport at runtime with a static identity provider and a bounded shutdown deadline.
+5. Stage E: finish the final spawn authority — rebase the uncommitted `refresh-spawn-race-fix` work onto the newest integration tip, apply `with_running_dispatch` at the real device/root OTA OS spawn points, then review and commit.
+6. Stage F: run the full non-deploying gate matrix on the final tip (Rust workspace, desktop frontend, Cloudflare, PowerShell/VMP gates) and cut a new verified Git bundle.
+7. Only after explicit authorization, the Cloudflare deployment sequence in the deployment section, followed by the manual VMProtect/signing/installer/device release sequence.
 
 ## Coordination note
 
