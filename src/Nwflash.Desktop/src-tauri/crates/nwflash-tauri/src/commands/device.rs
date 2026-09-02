@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use nwflash_application::{
     parse_adb_battery_level, parse_adb_device_details, result_to_domain_error, DeviceMonitor,
-    DeviceSession, MonitorRefreshResult, OperationAdmissionState,
+    DeviceSession, MonitorRefreshResult, OperationAdmissionState, OperationCoordinator,
 };
 use nwflash_domain::{
     DeviceConnectionState, DeviceRefreshMode, DeviceSnapshot, DomainError, OperationKind,
@@ -11,12 +11,132 @@ use nwflash_domain::{
 use nwflash_infrastructure::OperationLogStore;
 use nwflash_windows::{
     process::{run_command, run_command_with_cancel},
-    DeviceTransport, PlatformDeviceDiscovery, PlatformTools, ProcessCommand,
+    DeviceTransport, PlatformDeviceDiscovery, PlatformTools, ProcessCommand, ProcessExecutor,
+    ProcessOutput, SystemProcessExecutor,
 };
 use tauri::{AppHandle, Emitter, State};
 use tokio::task;
 
 use crate::AppState;
+
+const DEVICE_DISCOVERY_PUBLIC_ERROR: &str = "设备检测失败，请检查设备连接后重试。";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceDiscoveryFailure {
+    Admission(&'static str),
+    Scheduling,
+    Discovery,
+}
+
+impl DeviceDiscoveryFailure {
+    fn from_domain_error(error: DomainError) -> Self {
+        match admission_reason_from_domain_error(&error) {
+            Some(reason) => Self::Admission(reason),
+            None => Self::Discovery,
+        }
+    }
+
+    fn admission_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Admission(reason) => Some(reason),
+            Self::Scheduling | Self::Discovery => None,
+        }
+    }
+
+    fn public_message(self) -> &'static str {
+        match self {
+            Self::Admission(reason) => match reason {
+                "skipped:exit_pending" => "设备刷新已跳过（skipped:exit_pending）。",
+                "skipped:terminating" => "设备刷新已跳过（skipped:terminating）。",
+                "denied:flashing" => "设备刷新已跳过（denied:flashing）。",
+                _ => "设备刷新已跳过。",
+            },
+            Self::Scheduling | Self::Discovery => DEVICE_DISCOVERY_PUBLIC_ERROR,
+        }
+    }
+
+    fn log_reason(self) -> &'static str {
+        match self {
+            Self::Admission(reason) => reason,
+            Self::Scheduling => "failed:scheduling",
+            Self::Discovery => "failed:discovery",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AdmissionCheckedExecutor<E, H = fn()> {
+    coordinator: OperationCoordinator,
+    operation: OperationKind,
+    inner: E,
+    before_final_check: H,
+}
+
+impl<E> AdmissionCheckedExecutor<E> {
+    pub(crate) fn new(
+        coordinator: OperationCoordinator,
+        operation: OperationKind,
+        inner: E,
+    ) -> Self {
+        Self {
+            coordinator,
+            operation,
+            inner,
+            before_final_check: || {},
+        }
+    }
+}
+
+#[cfg(test)]
+impl<E, H> AdmissionCheckedExecutor<E, H> {
+    pub(crate) fn with_hook(
+        coordinator: OperationCoordinator,
+        inner: E,
+        before_final_check: H,
+    ) -> Self {
+        Self {
+            coordinator,
+            operation: OperationKind::Idle,
+            inner,
+            before_final_check,
+        }
+    }
+}
+
+impl<E, H> ProcessExecutor for AdmissionCheckedExecutor<E, H>
+where
+    E: ProcessExecutor,
+    H: Fn() + Send + Sync,
+{
+    fn run(&self, command: ProcessCommand) -> Result<ProcessOutput, DomainError> {
+        (self.before_final_check)();
+        if let Some(reason) =
+            device_refresh_block_reason(self.coordinator.admission_state(), self.operation)
+        {
+            return Err(DomainError::AuthorizationDenied(admission_denial_message(
+                reason,
+            )));
+        }
+        self.inner.run(command)
+    }
+}
+
+fn admission_denial_message(reason: &'static str) -> String {
+    format!("设备检测已跳过（{reason}）。")
+}
+
+pub(crate) fn admission_reason_from_domain_error(error: &DomainError) -> Option<&'static str> {
+    let DomainError::AuthorizationDenied(message) = error else {
+        return None;
+    };
+    [
+        "skipped:exit_pending",
+        "skipped:terminating",
+        "denied:flashing",
+    ]
+    .into_iter()
+    .find(|reason| message == &admission_denial_message(reason))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceSnapshotUpdate {
@@ -158,7 +278,7 @@ pub fn build_reboot_command_for_connection(
     command.map_err(|error| error.to_string())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub async fn automatic_device_refresh(
     runtime: &DeviceRuntime,
     is_device_busy: bool,
@@ -175,6 +295,7 @@ pub async fn automatic_device_refresh(
 /// Automatic refresh entry point for callers that can provide the coordinator
 /// admission snapshot. The legacy bool-only wrapper above maps busy to
 /// `Flashing` until the monitor binding is migrated to this function.
+#[cfg(test)]
 pub async fn automatic_device_refresh_with_admission(
     runtime: &DeviceRuntime,
     admission: OperationAdmissionState,
@@ -195,7 +316,7 @@ pub async fn automatic_device_refresh_with_admission(
 
 pub async fn automatic_device_refresh_guarded_with_log(
     runtime: &DeviceRuntime,
-    coordinator: &nwflash_application::OperationCoordinator,
+    coordinator: &OperationCoordinator,
     operation_log_store: Option<&OperationLogStore>,
 ) -> DeviceSnapshotUpdate {
     let Ok(_idle) = coordinator.try_acquire_idle() else {
@@ -210,14 +331,39 @@ pub async fn automatic_device_refresh_guarded_with_log(
             should_emit: false,
         };
     };
-    automatic_device_refresh_with_admission(
-        runtime,
-        OperationAdmissionState::Running,
-        OperationKind::Idle,
+    let result = discover_current_device_guarded_with(
+        coordinator,
+        operation_log_store,
+        "设备自动刷新",
+        || {},
+        {
+            let coordinator = coordinator.clone();
+            move || discover_current_device_blocking_guarded(coordinator)
+        },
     )
-    .await
+    .await;
+    project_automatic_discovery_result(runtime, result)
 }
 
+fn project_automatic_discovery_result(
+    runtime: &DeviceRuntime,
+    result: Result<DeviceSnapshot, DeviceDiscoveryFailure>,
+) -> DeviceSnapshotUpdate {
+    match result {
+        Ok(snapshot) => runtime.apply_snapshot(snapshot, false, DeviceRefreshMode::Automatic),
+        Err(error) if error.admission_reason().is_some() => DeviceSnapshotUpdate {
+            snapshot: runtime.snapshot(),
+            should_emit: false,
+        },
+        Err(_) => runtime.apply_snapshot(
+            discovery_error_snapshot(),
+            false,
+            DeviceRefreshMode::Automatic,
+        ),
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn device_refresh_is_blocked(
     admission: OperationAdmissionState,
     operation: OperationKind,
@@ -251,11 +397,60 @@ pub(crate) fn record_refresh_gate(
     );
 }
 
+fn record_refresh_failure(
+    operation_log_store: &OperationLogStore,
+    operation: &'static str,
+    reason: &'static str,
+) {
+    operation_log_store.write(
+        OperationLogLevel::Warning,
+        format!("{operation}失败（{reason}）。"),
+        None,
+    );
+}
+
+async fn discover_current_device_guarded_with<BeforeSpawn, Discover>(
+    coordinator: &OperationCoordinator,
+    operation_log_store: Option<&OperationLogStore>,
+    operation: &'static str,
+    before_spawn: BeforeSpawn,
+    discover: Discover,
+) -> Result<DeviceSnapshot, DeviceDiscoveryFailure>
+where
+    BeforeSpawn: FnOnce() + Send + 'static,
+    Discover: FnOnce() -> Result<DeviceSnapshot, DomainError> + Send + 'static,
+{
+    let coordinator = coordinator.clone();
+    let result = match task::spawn_blocking(move || {
+        before_spawn();
+        if let Some(reason) =
+            device_refresh_block_reason(coordinator.admission_state(), OperationKind::Idle)
+        {
+            return Err(DeviceDiscoveryFailure::Admission(reason));
+        }
+        discover().map_err(DeviceDiscoveryFailure::from_domain_error)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(DeviceDiscoveryFailure::Scheduling),
+    };
+
+    if let (Err(error), Some(log)) = (result.as_ref(), operation_log_store) {
+        if let Some(reason) = error.admission_reason() {
+            record_refresh_gate(log, operation, reason);
+        } else {
+            record_refresh_failure(log, operation, error.log_reason());
+        }
+    }
+    result
+}
+
 pub(crate) async fn discover_current_device() -> Result<DeviceSnapshot, String> {
     task::spawn_blocking(discover_current_device_blocking)
         .await
-        .map_err(|error| format!("设备检测调度失败：{error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|_| DEVICE_DISCOVERY_PUBLIC_ERROR.to_string())?
+        .map_err(|_| DEVICE_DISCOVERY_PUBLIC_ERROR.to_string())
 }
 
 fn discover_current_device_blocking() -> Result<DeviceSnapshot, DomainError> {
@@ -272,10 +467,45 @@ fn discover_current_device_blocking() -> Result<DeviceSnapshot, DomainError> {
     Ok(enrich_adb_snapshot(snapshot, &properties, &battery))
 }
 
+fn discover_current_device_blocking_guarded(
+    coordinator: OperationCoordinator,
+) -> Result<DeviceSnapshot, DomainError> {
+    let tools = PlatformTools::bundled();
+    let executor =
+        AdmissionCheckedExecutor::new(coordinator, OperationKind::Idle, SystemProcessExecutor);
+    let discovery = PlatformDeviceDiscovery::with_executor(tools.clone(), executor.clone());
+    let snapshot = DeviceSession::refresh(&discovery)?;
+    if snapshot.connection_state != DeviceConnectionState::AdbConnected {
+        return Ok(snapshot);
+    }
+
+    let transport = DeviceTransport::new(tools);
+    let properties = readonly_stdout_with_executor(
+        transport.build_adb_getprop_command(&snapshot.serial),
+        &executor,
+    )?;
+    let battery = readonly_stdout_with_executor(
+        transport.build_adb_battery_command(&snapshot.serial),
+        &executor,
+    )?;
+    Ok(enrich_adb_snapshot(snapshot, &properties, &battery))
+}
+
 fn readonly_stdout(command: Result<ProcessCommand, DomainError>) -> String {
     match command.and_then(run_command) {
         Ok(output) if output.exit_code == 0 => output.stdout,
         _ => String::new(),
+    }
+}
+
+fn readonly_stdout_with_executor<E: ProcessExecutor>(
+    command: Result<ProcessCommand, DomainError>,
+    executor: &E,
+) -> Result<String, DomainError> {
+    match command.and_then(|command| executor.run(command)) {
+        Ok(output) if output.exit_code == 0 => Ok(output.stdout),
+        Err(error) if admission_reason_from_domain_error(&error).is_some() => Err(error),
+        Ok(_) | Err(_) => Ok(String::new()),
     }
 }
 
@@ -320,7 +550,18 @@ pub async fn device_refresh(
             return Err(error.to_string());
         }
     };
-    let snapshot = discover_current_device().await?;
+    let snapshot = discover_current_device_guarded_with(
+        &state.operation_coordinator,
+        Some(&state.operation_log_store),
+        "设备刷新",
+        || {},
+        {
+            let coordinator = state.operation_coordinator.clone();
+            move || discover_current_device_blocking_guarded(coordinator)
+        },
+    )
+    .await
+    .map_err(|error| error.public_message().to_string())?;
 
     let update = state.device_runtime.apply_snapshot(
         snapshot,
@@ -401,6 +642,11 @@ async fn device_reboot(state: &AppState, target: DeviceRebootTarget) -> Result<(
 mod tests {
     use super::*;
     use nwflash_domain::{DeviceConnectionState, DeviceRefreshMode, DeviceSnapshot};
+    use nwflash_windows::{ProcessExecutor, ProcessOutput};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
+    };
 
     fn adb(serial: &str) -> DeviceSnapshot {
         DeviceSnapshot {
@@ -583,5 +829,220 @@ mod tests {
             entries[0].message,
             "设备刷新已跳过（skipped:exit_pending）。"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn final_discovery_spawn_rechecks_exit_pending_after_idle_admission() {
+        let coordinator = nwflash_application::OperationCoordinator::default();
+        let _idle = coordinator
+            .try_acquire_idle()
+            .expect("initial refresh admission should be idle");
+        let reached_boundary = Arc::new(Barrier::new(2));
+        let release_boundary = Arc::new(Barrier::new(2));
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let log = OperationLogStore::new(None, 10);
+
+        let task = tokio::spawn({
+            let coordinator = coordinator.clone();
+            let reached_boundary = reached_boundary.clone();
+            let release_boundary = release_boundary.clone();
+            let spawn_count = spawn_count.clone();
+            let log = log.clone();
+            async move {
+                discover_current_device_guarded_with(
+                    &coordinator,
+                    Some(&log),
+                    "设备刷新",
+                    move || {
+                        reached_boundary.wait();
+                        release_boundary.wait();
+                    },
+                    move || {
+                        spawn_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(DeviceSnapshot::disconnected())
+                    },
+                )
+                .await
+            }
+        });
+
+        tokio::task::spawn_blocking(move || reached_boundary.wait())
+            .await
+            .expect("boundary waiter should finish");
+        assert_eq!(
+            coordinator.request_exit_pending(),
+            OperationAdmissionState::ExitPending
+        );
+        tokio::task::spawn_blocking(move || release_boundary.wait())
+            .await
+            .expect("boundary release should finish");
+
+        let error = task
+            .await
+            .expect("guarded refresh task should join")
+            .expect_err("exit-pending refresh must stop before executor spawn");
+        assert_eq!(error.admission_reason(), Some("skipped:exit_pending"));
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 0);
+        let entries = log.snapshot();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].message,
+            "设备刷新已跳过（skipped:exit_pending）。"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_discovery_failure_never_returns_or_logs_raw_process_output() {
+        let coordinator = nwflash_application::OperationCoordinator::default();
+        let _idle = coordinator
+            .try_acquire_idle()
+            .expect("initial refresh admission should be idle");
+        let log = OperationLogStore::new(None, 10);
+        let sentinel =
+            "Bearer SECRET SERIAL-PRIVATE C:\\Users\\mi\\secret https://private.invalid/ota";
+
+        let error = discover_current_device_guarded_with(
+            &coordinator,
+            Some(&log),
+            "设备刷新",
+            || {},
+            move || Err(DomainError::ExternalTool(sentinel.to_string())),
+        )
+        .await
+        .expect_err("external discovery failure should be safely categorized");
+
+        assert_eq!(
+            error.public_message(),
+            "设备检测失败，请检查设备连接后重试。"
+        );
+        let rendered = format!("{error:?} {}", error.public_message());
+        assert!(!rendered.contains("SECRET"));
+        assert!(!rendered.contains("SERIAL-PRIVATE"));
+        assert!(!rendered.contains("Users"));
+        assert!(!rendered.contains("private.invalid"));
+        let entries = log.snapshot();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "设备刷新失败（failed:discovery）。");
+        assert!(!entries[0].message.contains("SECRET"));
+    }
+
+    #[derive(Clone)]
+    struct CountingProcessExecutor {
+        spawn_count: Arc<AtomicUsize>,
+    }
+
+    impl ProcessExecutor for CountingProcessExecutor {
+        fn run(&self, _command: ProcessCommand) -> Result<ProcessOutput, DomainError> {
+            self.spawn_count.fetch_add(1, Ordering::SeqCst);
+            Ok(ProcessOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn process_executor_rechecks_admission_at_the_actual_run_boundary() {
+        let coordinator = OperationCoordinator::default();
+        let _idle = coordinator
+            .try_acquire_idle()
+            .expect("initial process admission should be idle");
+        let reached_boundary = Arc::new(Barrier::new(2));
+        let release_boundary = Arc::new(Barrier::new(2));
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let executor = AdmissionCheckedExecutor::with_hook(
+            coordinator.clone(),
+            CountingProcessExecutor {
+                spawn_count: spawn_count.clone(),
+            },
+            {
+                let reached_boundary = reached_boundary.clone();
+                let release_boundary = release_boundary.clone();
+                move || {
+                    reached_boundary.wait();
+                    release_boundary.wait();
+                }
+            },
+        );
+
+        let run = std::thread::spawn(move || {
+            executor.run(ProcessCommand::new("unused", Vec::<String>::new()))
+        });
+        reached_boundary.wait();
+        assert_eq!(
+            coordinator.request_exit_pending(),
+            OperationAdmissionState::ExitPending
+        );
+        release_boundary.wait();
+
+        let error = run
+            .join()
+            .expect("executor thread should join")
+            .expect_err("exit-pending executor must refuse the process call");
+        assert!(matches!(error, DomainError::AuthorizationDenied(_)));
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 0);
+        let rendered = error.to_string();
+        assert!(rendered.contains("skipped:exit_pending"));
+        assert!(!rendered.contains("unused"));
+    }
+
+    #[tokio::test]
+    async fn actual_executor_admission_denial_is_not_reclassified_as_discovery_failure() {
+        let coordinator = OperationCoordinator::default();
+        let _idle = coordinator
+            .try_acquire_idle()
+            .expect("initial process admission should be idle");
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let executor = AdmissionCheckedExecutor::with_hook(
+            coordinator.clone(),
+            CountingProcessExecutor {
+                spawn_count: spawn_count.clone(),
+            },
+            {
+                let coordinator = coordinator.clone();
+                move || {
+                    coordinator.request_exit_pending();
+                }
+            },
+        );
+        let log = OperationLogStore::new(None, 10);
+
+        let error = discover_current_device_guarded_with(
+            &coordinator,
+            Some(&log),
+            "设备自动刷新",
+            || {},
+            move || {
+                executor.run(ProcessCommand::new("unused", Vec::<String>::new()))?;
+                Ok(DeviceSnapshot::disconnected())
+            },
+        )
+        .await
+        .expect_err("actual executor denial must remain an admission outcome");
+
+        assert_eq!(error.admission_reason(), Some("skipped:exit_pending"));
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 0);
+        let entries = log.snapshot();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].message,
+            "设备自动刷新已跳过（skipped:exit_pending）。"
+        );
+    }
+
+    #[test]
+    fn automatic_actual_executor_denial_preserves_the_authoritative_snapshot() {
+        let runtime = DeviceRuntime::new();
+        let original = adb("SN-AUTHORITATIVE");
+        runtime.apply_snapshot(original.clone(), false, DeviceRefreshMode::Manual);
+
+        let update = project_automatic_discovery_result(
+            &runtime,
+            Err(DeviceDiscoveryFailure::Admission("skipped:exit_pending")),
+        );
+
+        assert_eq!(update.snapshot, original);
+        assert!(!update.should_emit);
     }
 }
