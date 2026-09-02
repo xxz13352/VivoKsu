@@ -1,6 +1,6 @@
 # VivoKsu / NWFlash Project Progress
 
-Last updated: 2026-08-30 (Asia/Shanghai)
+Last updated: 2026-09-02 (Asia/Shanghai)
 
 ## Executive status
 
@@ -9,17 +9,17 @@ Last updated: 2026-08-30 (Asia/Shanghai)
 - Administrator backend and console: implemented, reviewed, tested, and integrated.
 - User backend and portal: implemented, reviewed, tested, and integrated.
 - Existing five-leaf VMP runtime/release hardening: integrated and automated gates pass.
-- Plan C structured trace client: Wave 1, Wave 2, producer core, process bridge, and initial Tauri gates are integrated.
+- Plan C structured trace client: Wave 1, Wave 2, producer core, process bridge, metadata-spool adapter, and initial Tauri gates are integrated.
 - Real release remains blocked by manual VMProtect GUI work, signing, installer, installation, and real-device validation.
 
 These percentages are engineering estimates, not test coverage. "Source-ready" or "gate-ready" does not mean that a binary has been protected, signed, installed, or approved for release.
 
 ## Canonical integration baseline
 
-- Worktree: `C:\Users\mi\Desktop\VivoKsu 工具\.worktrees\integration-staging`
+- Worktree: `C:\Users\17254\Desktop\存档\TOOL\VivoKsu 工具\.worktrees\integration-staging`
 - Branch: `codex/integration-staging`
-- Committed tip: `35e0248 fix(tauri): close refresh and mirror release gates`.
-- The integration worktree is currently clean after the latest targeted wiring commits.
+- Committed tip: `f565fc4 fix(trace): account for unrecoverable restart attempts` (includes `196a6c2` refresh/identity spawn-race closure).
+- The integration worktree is clean at the recorded tip; Rust toolchain validation is still pending because `cargo`, `rustc`, and `rustup` are unavailable on this host.
 - Do not reset, clean, checkout, or overwrite this worktree.
 
 Integrated validation after the administrator merge:
@@ -72,7 +72,7 @@ Latest non-deploying Rust gates on integration:
 
 ## Plan C Wave 1: domain and credential boundary
 
-Location: `C:\Users\mi\Desktop\VivoKsu 工具\.worktrees\integration-staging`
+Location: `C:\Users\17254\Desktop\存档\TOOL\VivoKsu 工具\.worktrees\integration-staging`
 
 Wave 1 source files (now committed):
 
@@ -235,16 +235,31 @@ Known bypasses still requiring producer/observer adapters:
 
 The durable V1 compatibility bridge is integrated as `0ca1ab1` plus `b87d9b5` and has 4/4 focused tests, but the Tauri `UsageLogReporter` is still active. It must be retired only after all producer adapters and the V2 projection path are live.
 
+## 2026-09-02 continuation checkpoint
+
+Integrated commits on `codex/integration-staging`:
+
+- `196a6c2 fix(tauri): close refresh and identity spawn race` adds a final admission check immediately before the real `ProcessExecutor::run` for discovery, ADB identity/battery reads, and ROOT OTA identity reads. The denied/skipped failure path remains redacted and does not expose serials, command lines, or remote URLs.
+- `f565fc4 fix(trace): account for unrecoverable restart attempts` adds startup orphan sweeping for metadata-only attempts and durable loss tombstones with reason `restart_payload_unrecoverable`; tombstone reads accept both retention loss and restart loss.
+
+Validation recorded for this continuation:
+
+- `git diff --check` passed against the integrated tip.
+- Rust gates (`cargo fmt --check`, `cargo test`, and `cargo clippy -- -D warnings`) could not be executed because `cargo`, `rustc`, and `rustup` are not installed or discoverable on this host.
+- No deployment, signing, VMProtect GUI run, installer run, or real-device access was performed.
+
+The restart behavior is intentionally honest: after a process restart, metadata alone cannot reconstruct the attested HTTP body. The implementation prevents unsafe replay and records durable loss; it does not claim recovery.
+
 ## Release blockers
 
 No release claim is permitted until all of the following pass:
 
 - Plan C Wave 1 final Ready YES review and clean commit (`0d65c0d`).
-- Wave 2 spool/uploader final review and metadata tests are integrated; producer payload/session adapter and crash matrix remain.
+- Wave 2 spool/uploader final review and metadata tests are integrated; producer-to-metadata adapter is integrated, while true restart payload replay remains blocked on a protected payload vault/run-record.
 - Producer/process/Tauri lifecycle wiring is complete for coordinator gates and mirror lifetime, but all seven operation classes still need actual sealed trace production adapters.
 - Driver archive-to-elevated-consumer P0 final review and commit (`c6a6494`), with the unintegrated observer helper removed by `da2f22f`.
 - Sixth VMP leaf real link/MAP/dumpbin verification (`verify-link-layout.ps1` and `test-contracts.ps1`) passed.
-- Full Rust workspace fmt, clippy, and tests after the latest Tauri/producer integration (focused gates are green; full workspace release gate remains).
+- Full Rust workspace fmt, clippy, and tests after the latest Tauri/producer integration (not run on 2026-09-02 because the Rust toolchain is unavailable; focused historical gates remain recorded separately).
 - Full desktop unit/build and native WDIO E2E after integration.
 - Cloudflare shared/admin/user Node, Workerd, typecheck, dry-run, and browser gates after integration.
 - Manual VMProtect Lite 3.10.4 Build 2668 GUI protection and compiler-log review.
@@ -289,11 +304,11 @@ Workspace rules:
 
 ## Recommended next execution order
 
-1. Bind producer `TraceOutputSession` attempts to the metadata-only spool/uploader and add the crash/recovery matrix.
-2. Migrate every process-producing command to the observed adapter, including discovery, root OTA, mirror output, elevated driver, and internal taskkill evidence.
-3. Retire the active Tauri V1 reporter only after the producer adapter and V2 projection path are live.
-4. Run the full non-deploying integration matrix and create a new final Git bundle.
-5. Perform the separately authorized manual VMProtect/signing/installer/device release sequence.
+1. Restore/install the pinned Rust toolchain, then run `cargo fmt --check`, focused tests, full workspace tests, and `cargo clippy -- -D warnings` from `src/Nwflash.Desktop/src-tauri`.
+2. Run the non-deploying desktop/Cloudflare/native validation matrix on `f565fc4`.
+3. Continue migrating the remaining legacy process observers and retire the active Tauri V1 reporter only after the V2 producer/projection path is complete.
+4. If restart replay is a product requirement, design and implement a protected payload vault or attested recoverable run-record; otherwise keep the durable-loss semantics and document it as an explicit product boundary.
+5. Create a new verified Git bundle, then perform the separately authorized manual VMProtect/signing/installer/device release sequence.
 
 ## Coordination note
 
