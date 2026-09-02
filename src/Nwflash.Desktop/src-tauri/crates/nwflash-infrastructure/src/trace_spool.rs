@@ -1,6 +1,11 @@
 #![allow(dead_code)] // Wave 2 seam consumed by the forthcoming concrete protection bridge.
 
 //! Crash-safe metadata spool for protection-sealed trace uploads.
+//!
+//! Sealed HTTP bodies are intentionally not persisted by this store. On a real
+//! process restart, any pending/inflight attempt whose body was only held by a
+//! live protection capability is therefore swept into a durable loss tombstone
+//! instead of being presented as replayable metadata.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) const TRACE_SPOOL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub(crate) const TRACE_SPOOL_MAX_WIRE_BYTES: u64 = 1_048_576;
@@ -20,6 +25,7 @@ pub(crate) const TRACE_SPOOL_MAX_CHUNKS: u16 = 200;
 
 const MANIFEST_VERSION: u32 = 2;
 const RETENTION_REASON: &str = "retention_expired_7d";
+const STARTUP_ORPHAN_REASON: &str = "restart_payload_unrecoverable";
 const ROOT_LOCK_FILE: &str = ".trace-spool.lock";
 const ROOT_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 const ROOT_LOCK_RETRY: Duration = Duration::from_millis(10);
@@ -1658,6 +1664,71 @@ impl TraceSpoolStore {
         Ok(losses)
     }
 
+    fn recover_orphan_attempts(&self, disk: &mut DiskManifest) -> Result<bool, TraceSpoolError> {
+        let orphaned_trace_ids = disk
+            .attempts
+            .iter()
+            .filter(|attempt| {
+                matches!(
+                    &attempt.state,
+                    AttemptState::Pending
+                        | AttemptState::Inflight
+                        | AttemptState::NeedsRemediation(_)
+                        | AttemptState::Paused(_)
+                )
+            })
+            .flat_map(|attempt| attempt.manifest.items.iter().map(|item| item.trace_id.clone()))
+            .collect::<BTreeSet<_>>();
+        if orphaned_trace_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let existing_tombstones = self.tombstones(&disk.owner)?;
+        let loss_time_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        for trace_id in &orphaned_trace_ids {
+            if existing_tombstones.contains(trace_id) {
+                continue;
+            }
+            let loss = TraceLossDiagnostic {
+                scope_hash: disk.owner.scope_hash(),
+                trace_id: trace_id.clone(),
+                item_count: disk
+                    .items
+                    .iter()
+                    .filter(|item| item.item.trace_id == *trace_id)
+                    .count(),
+                attempt_count: disk
+                    .attempts
+                    .iter()
+                    .filter(|attempt| {
+                        attempt
+                            .manifest
+                            .items
+                            .iter()
+                            .any(|item| item.trace_id == *trace_id)
+                    })
+                    .count(),
+                expired_at_ms: loss_time_ms,
+                reason: STARTUP_ORPHAN_REASON.to_string(),
+            };
+            self.persist_loss(&disk.owner, &loss)?;
+        }
+
+        disk.items
+            .retain(|item| !orphaned_trace_ids.contains(&item.item.trace_id));
+        disk.attempts.retain(|attempt| {
+            !attempt
+                .manifest
+                .items
+                .iter()
+                .any(|item| orphaned_trace_ids.contains(&item.trace_id))
+        });
+        Ok(true)
+    }
     fn recover_inflight(&self, disk: &mut DiskManifest) -> bool {
         let ids = disk
             .attempts
@@ -1730,7 +1801,10 @@ impl TraceSpoolStore {
                         .any(|item| tombstones.contains(item.trace_id()))
                 });
                 let gates = self.load_version_gates()?;
-                if self.recover_inflight(&mut disk) || reconcile_blocked_attempts(&mut disk, &gates)
+                let orphaned = self.recover_orphan_attempts(&mut disk)?;
+                if orphaned
+                    || self.recover_inflight(&mut disk)
+                    || reconcile_blocked_attempts(&mut disk, &gates)
                 {
                     self.persist(&disk)?;
                 }
@@ -1912,7 +1986,9 @@ impl TraceSpoolStore {
             }
             let loss: TraceLossDiagnostic =
                 serde_json::from_slice(&self.read_bounded(&path, MAX_LOSS_BYTES)?)?;
-            if loss.scope_hash != owner.scope_hash() || loss.reason != RETENTION_REASON {
+            if loss.scope_hash != owner.scope_hash()
+                || !matches!(loss.reason.as_str(), RETENTION_REASON | STARTUP_ORPHAN_REASON)
+            {
                 return Err(TraceSpoolError::ScopeMismatch);
             }
             found.insert(loss.trace_id);
@@ -3160,6 +3236,42 @@ mod tests {
             .pause_owner(&handle, OwnerPauseReason::Forbidden)
             .unwrap();
         assert!(store.due_attempts(&current, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_sweeps_unrecoverable_attempts_into_a_durable_loss_tombstone() {
+        let root = TempDir::new().unwrap();
+        let current = owner(9, 1);
+        {
+            let store = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
+            store
+                .register_sealed_attempt(attempt(
+                    1,
+                    current.clone(),
+                    vec![item(TraceSpoolEntity::Run, "run", "restart-loss", 1, 0)],
+                ))
+                .unwrap();
+        }
+
+        let reopened = TraceSpoolStore::open(root.path().to_path_buf()).unwrap();
+        assert!(reopened
+            .due_attempts_without_expiry_for_test(&current)
+            .unwrap()
+            .is_empty());
+        let losses = reopened.loss_paths_for_test(&current);
+        assert_eq!(losses.len(), 1);
+        let loss: TraceLossDiagnostic =
+            serde_json::from_slice(&fs::read(&losses[0]).unwrap()).unwrap();
+        assert_eq!(loss.reason, STARTUP_ORPHAN_REASON);
+        assert_eq!(loss.trace_id, "restart-loss");
+        assert!(matches!(
+            reopened.register_sealed_attempt(attempt(
+                2,
+                current,
+                vec![item(TraceSpoolEntity::Run, "revive", "restart-loss", 1, 0)],
+            )),
+            Err(TraceSpoolError::ExpiredTrace)
+        ));
     }
 
     #[test]

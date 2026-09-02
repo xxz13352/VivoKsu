@@ -7,9 +7,9 @@
 //! This facade does **not** solve durable HTTP replay. The attested body and
 //! its `RegisteredSealedAttempt` capability remain live-memory-only, while the
 //! disk spool stores metadata. After process restart there is no public claim
-//! path without that exact live capability. An orphan sweep and durable loss
-//! tombstone are also not implemented, so restart recovery remains a P0
-//! blocker rather than a completed recovery or loss-accounting guarantee.
+//! path without that exact live capability. The low-level spool now fail-closes
+//! this case by sweeping orphan attempts into durable loss tombstones; it does
+//! not pretend metadata-only manifests contain recoverable HTTP bodies.
 //!
 //! Production wiring is also blocked until protection exposes an attested
 //! run-record path, the legacy crate-internal metadata-only claim seam is
@@ -690,8 +690,10 @@ pub enum TraceMetadataUploadOutcome {
 }
 
 /// Concrete bridge from producer-owned protection receipts to the durable
-/// metadata spool.  The sealed body is never written to disk; a live upload
-/// remains necessary to claim and send a pending attempt.
+/// metadata spool. The sealed body is never written to disk; a live upload
+/// remains necessary to claim and send a pending attempt. If the process
+/// restarts first, the low-level spool records durable loss rather than making
+/// the metadata-only manifest appear replayable.
 pub struct TraceMetadataSpoolAdapter {
     facade: TraceSpoolFacade,
     owner: TraceMetadataOwnerScope,
