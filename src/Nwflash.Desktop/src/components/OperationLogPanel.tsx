@@ -13,26 +13,6 @@ type OperationLogEntry = {
 const formatTimestamp = (timestampUtc: number) =>
   new Date(timestampUtc * 1000).toLocaleTimeString('zh-CN', { hour12: false });
 
-const routineServerProbeMessages = [
-  '连接服务器',
-  '正在连接服务器',
-  '连接服务端',
-  '正在连接服务端',
-  '请求服务',
-  '正在请求服务',
-  '请求服务器',
-  '正在请求服务器',
-  '检测服务器',
-  '正在检测服务器',
-  '检测服务器 OTA',
-  '检测服务器 OTA完成。',
-  '检测服务器 OTA已取消。',
-  '正在解析服务器 OTA',
-  '正在获取在线 OTA 信息',
-  '正在请求 OTA 服务器',
-  '正在请求 OTA 服务端',
-];
-
 const normalizeLogMessage = (message: string) => {
   switch (message) {
     case '正在解析服务器 OTA':
@@ -53,17 +33,10 @@ const normalizeLogMessage = (message: string) => {
   }
 };
 
-const isRoutineServerProbeMessage = (message: string) => {
-  const normalized = message.trim();
-  return routineServerProbeMessages.some((candidate) =>
-    candidate === normalized || normalizeLogMessage(candidate) === normalized);
-};
-
 const isHiddenLogMessage = (message: string) => {
   const normalized = message.trim();
   return normalized.length === 0
-    || normalized.startsWith('准备 VIVO 线刷')
-    || isRoutineServerProbeMessage(normalized);
+    || normalized.startsWith('准备 VIVO 线刷');
 };
 
 const normalizeEntries = (entries: OperationLogEntry[]): OperationLogEntry[] =>

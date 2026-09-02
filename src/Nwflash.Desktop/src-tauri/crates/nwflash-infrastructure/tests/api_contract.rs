@@ -508,6 +508,7 @@ async fn upload_usage_logs_posts_the_batch() {
             started_at: 1000,
             ended_at: Some(1060),
             duration_ms: Some(60000),
+            details: Vec::new(),
         },
         UsageLogEntry {
             operation: "Rebooting".to_string(),
@@ -517,6 +518,7 @@ async fn upload_usage_logs_posts_the_batch() {
             started_at: 2000,
             ended_at: Some(2010),
             duration_ms: Some(10000),
+            details: Vec::new(),
         },
     ];
 

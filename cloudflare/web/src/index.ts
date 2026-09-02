@@ -629,7 +629,7 @@ async function listUsageLogs(url: URL, env: Env): Promise<Response> {
 
   const totalRow = await env.DB.prepare(`SELECT COUNT(*) AS n FROM usage_logs${where}`).bind(...bind).first<{ n: number }>();
   const rows = await env.DB.prepare(
-    `SELECT id, api_user_name, operation_kind, title, status, started_at, ended_at, duration_ms FROM usage_logs${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
+    `SELECT id, api_user_name, operation_kind, title, status, started_at, ended_at, duration_ms, details_json FROM usage_logs${where} ORDER BY id DESC LIMIT ? OFFSET ?`,
   )
     .bind(...bind, limit, offset)
     .all<UsageLogRow>();
@@ -749,4 +749,5 @@ interface UsageLogRow {
   started_at: number;
   ended_at: number | null;
   duration_ms: number | null;
+  details_json: string;
 }

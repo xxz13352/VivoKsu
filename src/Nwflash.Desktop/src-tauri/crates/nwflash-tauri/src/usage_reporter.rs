@@ -495,6 +495,7 @@ mod tests {
             started_at: 1,
             ended_at: Some(2),
             duration_ms: Some(1_000),
+            details: Vec::new(),
         }
     }
 

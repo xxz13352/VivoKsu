@@ -35,6 +35,12 @@ const FIRMWARE_OUTPUT_DIRECTORY_SELECTION_ERROR: &str = "提取输出目录选�
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FirmwareProgressDto {
     pub(crate) current_partition: Option<String>,
+    pub(crate) current_partition_index: Option<usize>,
+    pub(crate) total_partitions: usize,
+    pub(crate) completed_partitions: usize,
+    pub(crate) successful_partitions: usize,
+    pub(crate) failed_partitions: usize,
+    pub(crate) skipped_partitions: usize,
     pub(crate) bytes_completed: u64,
     pub(crate) bytes_total: u64,
     pub(crate) percentage: f64,
@@ -89,6 +95,7 @@ impl FirmwareProgressRuntime {
             sink,
             started_at: Instant::now(),
             last_emitted_at: Arc::new(Mutex::new(None)),
+            partition_stats: Arc::new(Mutex::new(FirmwarePartitionStats::default())),
         }
     }
 }
@@ -98,6 +105,18 @@ struct FirmwareProgressReporter {
     sink: Arc<FirmwareProgressSink>,
     started_at: Instant,
     last_emitted_at: Arc<Mutex<Option<Instant>>>,
+    partition_stats: Arc<Mutex<FirmwarePartitionStats>>,
+}
+
+#[derive(Default)]
+struct FirmwarePartitionStats {
+    total: usize,
+    completed: usize,
+    successful: usize,
+    failed: usize,
+    skipped: usize,
+    current_index: Option<usize>,
+    seen: HashSet<String>,
 }
 
 impl FirmwareProgressReporter {
@@ -108,6 +127,7 @@ impl FirmwareProgressReporter {
         bytes_total: u64,
         gzip_stream_bytes: Option<u64>,
     ) {
+        self.update_partition_stats(current_partition.as_deref(), false);
         self.emit(
             current_partition,
             bytes_completed,
@@ -124,6 +144,7 @@ impl FirmwareProgressReporter {
         bytes_total: u64,
         gzip_stream_bytes: Option<u64>,
     ) {
+        self.update_partition_stats(current_partition.as_deref(), true);
         self.emit(
             current_partition,
             bytes_completed,
@@ -131,6 +152,39 @@ impl FirmwareProgressReporter {
             gzip_stream_bytes,
             true,
         );
+    }
+
+    fn set_total_partitions(&self, total: usize) {
+        if let Ok(mut stats) = self.partition_stats.lock() {
+            stats.total = total;
+        }
+    }
+
+    fn total_partitions(&self) -> usize {
+        self.partition_stats
+            .lock()
+            .map(|stats| stats.total)
+            .unwrap_or_default()
+    }
+
+    fn update_partition_stats(&self, current_partition: Option<&str>, terminal: bool) {
+        let Ok(mut stats) = self.partition_stats.lock() else {
+            return;
+        };
+        if let Some(partition) = current_partition.filter(|value| !value.is_empty()) {
+            if stats.seen.insert(partition.to_string()) {
+                stats.current_index = Some(stats.seen.len());
+                if stats.seen.len() > 1 {
+                    stats.successful = stats.successful.saturating_add(1);
+                }
+                stats.completed = stats.seen.len().saturating_sub(1);
+            }
+        }
+        if terminal {
+            stats.completed = stats.total.max(stats.seen.len());
+            stats.successful = stats.completed;
+            stats.current_index = None;
+        }
     }
 
     fn emit(
@@ -166,8 +220,35 @@ impl FirmwareProgressReporter {
         } else {
             bytes_completed as f64 / elapsed.as_secs_f64()
         };
+        let (
+            current_partition_index,
+            total_partitions,
+            completed_partitions,
+            successful_partitions,
+            failed_partitions,
+            skipped_partitions,
+        ) = self
+            .partition_stats
+            .lock()
+            .map(|stats| {
+                (
+                    stats.current_index,
+                    stats.total,
+                    stats.completed,
+                    stats.successful,
+                    stats.failed,
+                    stats.skipped,
+                )
+            })
+            .unwrap_or_default();
         (self.sink)(FirmwareProgressDto {
             current_partition,
+            current_partition_index,
+            total_partitions,
+            completed_partitions,
+            successful_partitions,
+            failed_partitions,
+            skipped_partitions,
             bytes_completed,
             bytes_total,
             percentage,
@@ -845,11 +926,46 @@ async fn inspect_local_or_payload(
         .await;
     }
 
-    task::spawn_blocking(move || FirmwareExtractService::inspect_local(&source_path))
+    let inspection = Arc::new(Mutex::new(None));
+    let inspection_for_operation = inspection.clone();
+    coordinator
+        .run_async(
+            nwflash_domain::OperationKind::Hashing,
+            "检查本地固件",
+            move |context, cancellation| async move {
+                context.report_stage("正在检查本地固件");
+                let inspect_cancellation = cancellation.clone();
+                let inspection_result = task::spawn_blocking(move || {
+                    if inspect_cancellation.is_cancelled() {
+                        return Err(FirmwareExtractApplicationError::Canceled);
+                    }
+                    FirmwareExtractService::inspect_local(&source_path)
+                })
+                .await
+                .map_err(|error| {
+                    nwflash_domain::DomainError::Internal(format!("固件检查调度失败：{error}"))
+                })?;
+                let inspection_result = inspection_result.map_err(application_error_to_domain)?;
+                context.report_stage(format!(
+                    "本地固件检查完成：发现 {} 个分区",
+                    inspection_result.entries.len()
+                ));
+                context.report_progress(1.0);
+                *inspection_for_operation.lock().map_err(|_| {
+                    nwflash_domain::DomainError::Internal("固件检查结果锁不可用。".to_string())
+                })? = Some(inspection_result);
+                Ok(())
+            },
+        )
         .await
-        .map_err(|error| format!("固件检查调度失败：{error}"))?
-        .map(firmware_inspection_dto)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    let result = inspection
+        .lock()
+        .map_err(|_| "固件检查结果锁不可用。".to_string())?
+        .take()
+        .ok_or_else(|| "固件检查未产生结果。".to_string())?;
+    Ok(firmware_inspection_dto(result))
 }
 
 struct RemoteZipProgressTracker {
@@ -1039,6 +1155,7 @@ async fn extract_remote_firmware_operation(
             nwflash_domain::OperationKind::Hashing,
             "提取远程固件",
             move |context, cancellation| async move {
+                progress.set_total_partitions(selection.entries.len());
                 let images = match selection.kind {
                     RemoteFirmwareKind::DirectImageZip => {
                         context.report_stage("正在按需提取远程镜像");
@@ -1111,6 +1228,7 @@ async fn extract_remote_firmware_operation(
                         context.report_stage("正在按需提取远程 payload 分区");
                         let source_path = selection.source.clone();
                         let entries = selection.entries.clone();
+                        let total_partitions = entries.len();
                         let output_directory = request.output_directory.clone();
                         let extraction_progress = progress.clone();
                         let total_bytes = selection.total_bytes.max(1);
@@ -1143,6 +1261,11 @@ async fn extract_remote_firmware_operation(
                                 ))
                             })?
                             .map_err(remote_payload_application_error_to_domain)?;
+                        context.report_stage(format!(
+                            "远程 payload 分区提取完成：成功读取 {}/{} 个分区",
+                            images.len(),
+                            total_partitions
+                        ));
                         progress.report_terminal(None, total_bytes, total_bytes, None);
                         images
                     }
@@ -1152,6 +1275,11 @@ async fn extract_remote_firmware_operation(
                         ));
                     }
                 };
+                context.report_stage(format!(
+                    "远程固件提取完成：成功读取 {}/{} 个分区",
+                    images.len(),
+                    progress.total_partitions()
+                ));
                 context.report_progress(1.0);
                 *extracted_for_operation.lock().map_err(|_| {
                     nwflash_domain::DomainError::Internal(
@@ -1266,11 +1394,51 @@ pub async fn firmware_inspect_local(
 
 #[tauri::command]
 pub async fn firmware_inspect_line_flash_package(
+    state: State<'_, AppState>,
     package_path: String,
 ) -> Result<FirmwareInspectionDto, String> {
-    task::spawn_blocking(move || line_flash_package_inspection(&PathBuf::from(package_path)))
+    let inspection = Arc::new(Mutex::new(None));
+    let inspection_for_operation = inspection.clone();
+    state
+        .operation_coordinator
+        .run_async(
+            nwflash_domain::OperationKind::Hashing,
+            "检查线刷固件包",
+            move |context, cancellation| async move {
+                context.report_stage("正在检查线刷固件包");
+                let inspect_cancellation = cancellation.clone();
+                let inspection_result = task::spawn_blocking(move || {
+                    if inspect_cancellation.is_cancelled() {
+                        return Err("线刷固件包检查已取消。".to_string());
+                    }
+                    line_flash_package_inspection(&PathBuf::from(package_path))
+                })
+                .await
+                .map_err(|error| {
+                    nwflash_domain::DomainError::Internal(format!("线刷固件检查调度失败：{error}"))
+                })?;
+                let inspection_result = inspection_result
+                    .map_err(|error| nwflash_domain::DomainError::InvalidOperation(error))?;
+                context.report_stage(format!(
+                    "线刷固件包检查完成：发现 {} 个分区",
+                    inspection_result.entries.len()
+                ));
+                context.report_progress(1.0);
+                *inspection_for_operation.lock().map_err(|_| {
+                    nwflash_domain::DomainError::Internal("线刷固件检查结果锁不可用。".to_string())
+                })? = Some(inspection_result);
+                Ok(())
+            },
+        )
         .await
-        .map_err(|error| format!("线刷固件检查调度失败：{error}"))?
+        .map_err(|error| error.to_string())?;
+
+    let result = inspection
+        .lock()
+        .map_err(|_| "线刷固件检查结果锁不可用。".to_string())?
+        .take()
+        .ok_or_else(|| "线刷固件检查未产生结果。".to_string())?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1293,9 +1461,11 @@ pub async fn firmware_extract_vivo_local(
             nwflash_domain::OperationKind::Hashing,
             "提取本地固件",
             move |context, cancellation| async move {
+                let total_partitions = selected_ids.len();
+                progress.set_total_partitions(total_partitions);
                 context.report_stage("正在提取已选择的固件分区");
                 let source_path = PathBuf::from(source_path);
-                let progress = progress.clone();
+                let progress_for_extraction = progress.clone();
                 let extraction = task::spawn_blocking(move || {
                     FirmwareExtractService::extract_local_with_cancel_and_progress(
                         &source_path,
@@ -1310,14 +1480,14 @@ pub async fn firmware_extract_vivo_local(
                             if update.current_entry.is_empty()
                                 && update.completed_bytes == update.total_bytes
                             {
-                                progress.report_terminal(
+                                progress_for_extraction.report_terminal(
                                     current_partition,
                                     update.completed_bytes,
                                     update.total_bytes,
                                     Some(update.gzip_stream_bytes),
                                 );
                             } else {
-                                progress.report(
+                                progress_for_extraction.report(
                                     current_partition,
                                     update.completed_bytes,
                                     update.total_bytes,
@@ -1332,6 +1502,12 @@ pub async fn firmware_extract_vivo_local(
                     nwflash_domain::DomainError::Internal(format!("固件提取调度失败：{error}"))
                 })?;
                 let images = extraction.map_err(application_error_to_domain)?;
+                progress.report_terminal(None, 0, 0, None);
+                context.report_stage(format!(
+                    "本地固件提取完成：成功读取 {}/{} 个分区",
+                    images.len(),
+                    total_partitions
+                ));
                 context.report_progress(1.0);
                 *extracted_for_operation.lock().map_err(|_| {
                     nwflash_domain::DomainError::Internal("固件提取结果锁不可用。".to_string())
@@ -1456,6 +1632,10 @@ async fn extract_payload_with_provisioner_operation(
             nwflash_domain::OperationKind::Hashing,
             "提取 payload 分区",
             move |context, cancellation| async move {
+                let total_partitions = selection.entries.len();
+                if let Some(progress) = &progress {
+                    progress.set_total_partitions(total_partitions);
+                }
                 context.report_stage("正在准备 payload 提取工具");
                 let executable = provisioner
                     .ensure_installed(&cancellation, None)
@@ -1497,6 +1677,11 @@ async fn extract_payload_with_provisioner_operation(
                     nwflash_domain::DomainError::Internal(format!("payload 提取调度失败：{error}"))
                 })?;
                 let images = extraction.map_err(application_error_to_domain)?;
+                context.report_stage(format!(
+                    "payload 分区提取完成：成功读取 {}/{} 个分区",
+                    images.len(),
+                    total_partitions
+                ));
                 if let Some(progress) = &progress {
                     progress.report_terminal(None, total_bytes, total_bytes, None);
                 }
@@ -3034,6 +3219,69 @@ mod tests {
 
         assert_eq!(inspection.format, "payload");
         assert_eq!(inspection.entries[0].name, "boot");
+        fs::remove_dir_all(root).expect("fixture directory should be removed");
+    }
+
+    struct CapturingUsageReporter {
+        entries: Mutex<Vec<nwflash_domain::UsageLogEntry>>,
+    }
+
+    impl nwflash_application::UsageReporter for CapturingUsageReporter {
+        fn record(&self, entry: nwflash_domain::UsageLogEntry) {
+            self.entries
+                .lock()
+                .expect("usage entry capture lock should not be poisoned")
+                .push(entry);
+        }
+    }
+
+    fn capturing_coordinator() -> (
+        nwflash_application::OperationCoordinator,
+        Arc<CapturingUsageReporter>,
+    ) {
+        let reporter = Arc::new(CapturingUsageReporter {
+            entries: Mutex::new(Vec::new()),
+        });
+        let coordinator = nwflash_application::OperationCoordinator::new(
+            None,
+            None,
+            Some(reporter.clone()),
+            None,
+            None,
+        );
+        (coordinator, reporter)
+    }
+
+    #[tokio::test]
+    async fn local_firmware_inspection_records_usage_details_for_non_payload_sources() {
+        let root = temp_root("local-inspect-usage");
+        let source = root.join("images");
+        fs::create_dir_all(&source).expect("image directory should be created");
+        fs::write(source.join("boot.img"), b"boot").expect("image fixture should be written");
+
+        let (coordinator, reporter) = capturing_coordinator();
+        let inspection = inspect_local_or_payload(
+            coordinator,
+            PayloadInspectionRuntime::new(),
+            test_provisioner(&root, write_metadata_tool(&root)),
+            source,
+        )
+        .await
+        .expect("image directory source should be inspected");
+
+        assert_eq!(inspection.format, "imageDirectory");
+        let entries = reporter
+            .entries
+            .lock()
+            .expect("usage entry capture lock should not be poisoned");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].operation, "Hashing");
+        assert_eq!(entries[0].title, "检查本地固件");
+        assert_eq!(entries[0].status, "success");
+        assert!(entries[0]
+            .details
+            .iter()
+            .any(|detail| detail.message.contains("本地固件检查完成")));
         fs::remove_dir_all(root).expect("fixture directory should be removed");
     }
 }

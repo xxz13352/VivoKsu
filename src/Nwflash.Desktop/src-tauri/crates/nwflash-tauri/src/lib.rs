@@ -1095,36 +1095,11 @@ struct OperationLogBuffer {
 }
 
 fn normalize_operation_log_message(
-    level: nwflash_domain::OperationLogLevel,
+    _level: nwflash_domain::OperationLogLevel,
     message: String,
 ) -> Option<String> {
     let message = message.trim().to_string();
     if message.is_empty() || message.starts_with("准备 VIVO 线刷") {
-        return None;
-    }
-
-    if level == nwflash_domain::OperationLogLevel::Info
-        && matches!(
-            message.as_str(),
-            "连接服务器"
-                | "正在连接服务器"
-                | "连接服务端"
-                | "正在连接服务端"
-                | "请求服务"
-                | "正在请求服务"
-                | "请求服务器"
-                | "正在请求服务器"
-                | "检测服务器"
-                | "正在检测服务器"
-                | "检测服务器 OTA"
-                | "检测服务器 OTA完成。"
-                | "检测服务器 OTA已取消。"
-                | "正在解析服务器 OTA"
-                | "正在获取在线 OTA 信息"
-                | "正在请求 OTA 服务器"
-                | "正在请求 OTA 服务端"
-        )
-    {
         return None;
     }
 
@@ -1907,7 +1882,7 @@ mod device_monitor_tests {
     }
 
     #[test]
-    fn operation_log_omits_routine_server_probe_messages() {
+    fn operation_log_keeps_routine_server_probe_messages() {
         let entries = Arc::new(nwflash_infrastructure::OperationLogStore::new(None, 10));
         let buffer = OperationLogBuffer {
             entries: entries.clone(),
@@ -1934,7 +1909,18 @@ mod device_monitor_tests {
             .into_iter()
             .map(|entry| entry.message)
             .collect::<Vec<_>>();
-        assert_eq!(messages, ["正在下载在线固件"]);
+        assert_eq!(
+            messages,
+            [
+                "连接服务器",
+                "正在连接服务器",
+                "请求服务",
+                "正在请求服务器",
+                "请求服务器",
+                "正在请求服务器",
+                "正在下载在线固件",
+            ]
+        );
         assert!(messages.iter().all(|message| !message.contains("OTA")));
     }
 

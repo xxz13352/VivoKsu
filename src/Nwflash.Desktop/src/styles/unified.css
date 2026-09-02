@@ -1,0 +1,411 @@
+:root {
+  --nw-font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --nw-font-mono: "Cascadia Mono", Consolas, monospace;
+  --nw-bg-page: #f4f7f7;
+  --nw-surface: #ffffff;
+  --nw-surface-elevated: #f8fbfb;
+  --nw-surface-muted: #f1f6f5;
+  --nw-border: #d9e5e2;
+  --nw-border-strong: #c5d5d1;
+  --nw-text-primary: #153036;
+  --nw-text-subtle: #65777b;
+  --nw-text-muted: #8a999b;
+  --nw-accent: #0b776e;
+  --nw-accent-strong: #e4f3f0;
+  --nw-accent-hover: #086158;
+  --nw-danger: #bd5949;
+  --nw-danger-soft: #fff0ed;
+  --nw-success: #19856e;
+  --nw-warning: #b47734;
+  --nw-radius-large: 10px;
+  --nw-radius-small: 6px;
+  --nw-shadow-soft: 0 10px 26px rgb(24 57 57 / 0.06);
+  --nw-shadow-focus: 0 0 0 3px rgb(11 119 110 / 0.14);
+}
+
+html {
+  background: var(--nw-bg-page);
+}
+
+body {
+  color: var(--nw-text-primary);
+  background: var(--nw-bg-page);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+:where(button, input, select, textarea):focus-visible {
+  outline: 0;
+  box-shadow: var(--nw-shadow-focus);
+}
+
+.nw-shell {
+  background: var(--nw-bg-page);
+}
+
+.nw-titlebar {
+  min-height: 64px;
+  background: rgb(255 255 255 / 0.94);
+  box-shadow: 0 1px 0 rgb(21 48 54 / 0.02);
+}
+
+.nw-titlebar-brand {
+  gap: 10px;
+}
+
+.nw-titlebar-brand img {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--nw-border);
+  border-radius: 9px;
+}
+
+.nw-titlebar-brand strong {
+  color: var(--nw-text-primary);
+  letter-spacing: -0.02em;
+}
+
+.nw-titlebar-brand span,
+.nw-titlebar-connection,
+.nw-nav-workspace,
+.nw-device-status-eyebrow,
+.nw-progress-title,
+.nw-operation-log-eyebrow,
+.nw-operation-log-count,
+.nw-operation-log-footer {
+  font-family: var(--nw-font-mono);
+  letter-spacing: 0.04em;
+}
+
+.nw-titlebar-brand span {
+  color: var(--nw-text-muted);
+}
+
+.nw-titlebar-connection {
+  color: var(--nw-text-subtle);
+}
+
+.nw-titlebar-refresh {
+  border-color: var(--nw-border-strong);
+  background: var(--nw-surface);
+  color: var(--nw-text-primary);
+}
+
+.nw-titlebar-refresh:hover:not(:disabled),
+.nw-titlebar-controls button:hover:not(:disabled) {
+  border-color: var(--nw-accent);
+  background: var(--nw-accent-strong);
+  color: var(--nw-accent);
+}
+
+.nw-titlebar-controls button {
+  border-color: transparent;
+}
+
+.nw-shell-layout {
+  grid-template-columns: 176px minmax(0, 1fr) 296px;
+}
+
+.nw-sidebar,
+.nw-status-rail {
+  background: var(--nw-surface);
+}
+
+.nw-sidebar {
+  border-right-color: var(--nw-border);
+}
+
+.nw-sidebar-nav {
+  padding: 22px 12px 16px;
+}
+
+.nw-nav-workspace {
+  margin: 0 12px 14px;
+  color: var(--nw-text-muted);
+  font-size: 9px;
+}
+
+.nw-nav-title {
+  display: block;
+  margin: 0 12px 6px;
+  color: var(--nw-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.nw-nav-group + .nw-nav-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top-color: var(--nw-border);
+}
+
+.nw-nav-items {
+  gap: 3px;
+}
+
+.nw-nav-item {
+  min-height: 33px;
+  border-left-width: 2px;
+  border-radius: 7px;
+  color: var(--nw-text-subtle);
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.nw-nav-item:hover:not(.active) {
+  background: var(--nw-surface-muted);
+  color: var(--nw-text-primary);
+}
+
+.nw-nav-item.active {
+  border-left-color: var(--nw-accent);
+  background: var(--nw-accent-strong);
+  color: var(--nw-accent);
+}
+
+.nw-page-card {
+  background: var(--nw-bg-page);
+  padding: 28px 24px 32px;
+}
+
+.nw-page-card > section,
+.nw-page-card > article,
+.nw-page-card > .nw-page-content {
+  max-width: 980px;
+}
+
+.nw-page-eyebrow {
+  color: var(--nw-accent);
+  font-family: var(--nw-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.nw-overview-heading h1,
+.nw-quick-flash-heading h1,
+.nw-safe-flash-heading h1,
+.nw-firmware-heading h1,
+.nw-line-flash-heading h1,
+.nw-root-image-preflight h2,
+.nw-online-heading h1 {
+  color: var(--nw-text-primary);
+  letter-spacing: -0.035em;
+}
+
+.nw-overview-subtitle,
+.nw-quick-flash-heading div > p:last-child,
+.nw-safe-flash-heading div > p:last-child,
+.nw-online-heading > div > p:last-child {
+  color: var(--nw-text-subtle);
+}
+
+.nw-device-status-panel,
+.nw-progress-panel,
+.nw-operation-log-panel {
+  background: var(--nw-surface);
+}
+
+.nw-device-status-panel,
+.nw-progress-panel {
+  border-bottom-color: var(--nw-border);
+}
+
+.nw-device-status-title,
+.nw-operation-log-heading {
+  color: var(--nw-text-primary);
+}
+
+.nw-device-status-details,
+.nw-operation-log-footer {
+  border-color: var(--nw-border);
+}
+
+.nw-operation-log-header {
+  min-height: 64px;
+}
+
+.nw-operation-log-actions button,
+.nw-page-actions button,
+.nw-titlebar-refresh {
+  border-radius: var(--nw-radius-small);
+}
+
+.nw-operation-log-actions button:hover:not(:disabled),
+.nw-page-actions button:hover:not(:disabled) {
+  border-color: var(--nw-accent);
+  background: var(--nw-accent-strong);
+  color: var(--nw-accent);
+}
+
+.nw-sidebar-account {
+  border-top-color: var(--nw-border);
+  background: var(--nw-surface-muted);
+}
+
+.nw-sidebar-avatar {
+  border-color: var(--nw-border-strong);
+}
+
+.nw-sidebar-account-info span,
+.nw-sidebar-account time {
+  color: var(--nw-text-muted);
+}
+
+.nw-logout-button:hover:not(:disabled) {
+  border-color: var(--nw-border-strong);
+  background: var(--nw-surface);
+  color: var(--nw-danger);
+}
+
+.nw-overview-device-profile,
+.nw-overview-reboot-controls,
+.nw-quick-flash-preset-panel,
+.nw-safe-flash-console,
+.nw-online-workbench,
+.nw-root-workbench,
+.nw-firmware-workbench {
+  border-color: var(--nw-border);
+  box-shadow: var(--nw-shadow-soft);
+}
+
+.nw-overview-device-profile > footer,
+.nw-quick-flash-preset-panel > header,
+.nw-online-session-bar,
+.nw-sidebar-account,
+.nw-operation-log-footer {
+  background: var(--nw-surface-muted);
+}
+
+.nw-overview-reboot-controls article,
+.nw-test-online-item,
+.nw-firmware-entry,
+.nw-root-manager-kmi,
+.nw-root-vendor-image,
+.nw-safe-flash-options {
+  border-color: var(--nw-border);
+  background: var(--nw-surface-elevated);
+}
+
+.nw-overview-reboot-controls article:hover,
+.nw-test-online-item:hover,
+.nw-firmware-entry:hover {
+  border-color: var(--nw-border-strong);
+  box-shadow: 0 6px 18px rgb(24 57 57 / 0.05);
+}
+
+.nw-overview-fastboot-control,
+.nw-safe-flash-statusbar,
+.nw-test-root-cancel {
+  background: var(--nw-danger-soft);
+}
+
+.nw-error-text {
+  border-left-color: var(--nw-danger);
+  background: var(--nw-danger-soft);
+  color: var(--nw-danger);
+}
+
+.nw-success-text {
+  border-left-color: var(--nw-success);
+  background: var(--nw-accent-strong);
+  color: var(--nw-success);
+}
+
+.nw-modal-backdrop {
+  background: rgb(10 28 31 / 0.58);
+  backdrop-filter: blur(3px);
+}
+
+.nw-modal-card {
+  border-color: var(--nw-border-strong);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgb(10 28 31 / 0.22);
+  padding: 18px;
+}
+
+.nw-login-screen {
+  background: var(--nw-bg-page);
+}
+
+.nw-login-card {
+  border-color: var(--nw-border);
+  border-radius: 14px;
+  box-shadow: 0 18px 50px rgb(24 57 57 / 0.1);
+}
+
+.nw-login-brand p,
+.nw-login-heading span {
+  color: var(--nw-text-subtle);
+}
+
+.nw-login-heading p {
+  color: var(--nw-accent);
+}
+
+.nw-login-field input {
+  border-color: var(--nw-border);
+  border-radius: 8px;
+  background: var(--nw-surface-elevated);
+  color: var(--nw-text-primary);
+}
+
+.nw-login-field input:hover {
+  border-color: var(--nw-border-strong);
+}
+
+.nw-login-field input:focus-visible {
+  border-color: var(--nw-accent);
+  box-shadow: var(--nw-shadow-focus);
+}
+
+.nw-login-password-toggle:hover:not(:disabled) {
+  background: var(--nw-accent-strong);
+  color: var(--nw-accent);
+}
+
+.nw-login-submit {
+  border-radius: 8px;
+  background: var(--nw-accent);
+}
+
+.nw-login-submit:hover:not(:disabled) {
+  background: var(--nw-accent-hover);
+}
+
+.nw-login-notice {
+  color: var(--nw-danger);
+}
+
+@media (max-width: 1080px) {
+  .nw-shell-layout {
+    grid-template-columns: 164px minmax(0, 1fr) 260px;
+  }
+
+  .nw-page-card {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+}
+

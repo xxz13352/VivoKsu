@@ -36,3 +36,4 @@ Thumbs.db
 
 # ---- 本地隔离工作树 ----
 .worktrees/
+cloudflare/backups/

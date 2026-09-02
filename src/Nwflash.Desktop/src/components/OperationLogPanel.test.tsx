@@ -202,7 +202,7 @@ describe('OperationLogPanel', () => {
     expect(host.textContent).not.toContain('快照不可用');
   });
 
-  test('实时服务器探测不会写入操作日志', async () => {
+  test('实时服务器探测会写入操作日志', async () => {
     (invoke as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     flushSync(() => {
@@ -220,12 +220,10 @@ describe('OperationLogPanel', () => {
 
     await flushPromises();
     await flushPromises();
-    expect(host.textContent).not.toContain('正在请求服务器');
-    expect(host.textContent).not.toContain('OTA');
-    expect(host.querySelector('.nw-empty-log')).not.toBeNull();
+    expect(host.textContent).toContain('正在请求服务器');
   });
 
-  test('完成的服务器探测也不会写入操作日志', async () => {
+  test('完成的服务器探测也会写入操作日志', async () => {
     (invoke as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
     flushSync(() => {
@@ -243,8 +241,7 @@ describe('OperationLogPanel', () => {
 
     await flushPromises();
     await flushPromises();
-    expect(host.textContent).not.toContain('检测服务器 固件完成。');
-    expect(host.querySelector('.nw-empty-log')).not.toBeNull();
+    expect(host.textContent).toContain('检测服务器 固件完成。');
   });
 
   test('隐藏空日志和 VIVO 线刷准备标题', async () => {
@@ -279,7 +276,7 @@ describe('OperationLogPanel', () => {
     expect(host.textContent).not.toContain('准备 VIVO 线刷');
   });
 
-  test('隐藏旧会话中已归一化的服务器检测完成日志', async () => {
+  test('保留旧会话中已归一化的服务器检测完成日志', async () => {
     (invoke as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
         timestamp_utc: 1760000000,
@@ -306,9 +303,9 @@ describe('OperationLogPanel', () => {
     });
 
     await waitUntil(() => host.textContent?.includes('正在检查本地固件') ?? false);
-    expect(host.querySelectorAll('.nw-operation-log-preview li').length).toBe(1);
-    expect(host.textContent).not.toContain('检测服务器 固件完成。');
-    expect(host.textContent).not.toContain('检测服务器 固件已取消。');
+    expect(host.querySelectorAll('.nw-operation-log-preview li').length).toBe(3);
+    expect(host.textContent).toContain('检测服务器 固件完成。');
+    expect(host.textContent).toContain('检测服务器 固件已取消。');
   });
 
   test('空闲操作快照不会追加空白日志行', async () => {

@@ -254,6 +254,7 @@ mod tests {
             started_at: id as i64,
             ended_at: Some(id as i64 + 1),
             duration_ms: Some(1),
+            details: Vec::new(),
         }
     }
 

@@ -33,6 +33,12 @@ type FirmwareArtifactConfirmation = {
 
 type FirmwareProgress = {
   currentPartition: string | null;
+  currentPartitionIndex: number | null;
+  totalPartitions: number;
+  completedPartitions: number;
+  successfulPartitions: number;
+  failedPartitions: number;
+  skippedPartitions: number;
   bytesCompleted: number;
   bytesTotal: number;
   percentage: number;
@@ -358,7 +364,10 @@ export const FirmwareExtractPage: FC = () => {
           <strong className="nw-firmware-status">{statusText}</strong>
           {isWorking && progress ? (
             <p className="nw-firmware-progress" aria-live="polite">
-              {progress.currentPartition ? `${progress.currentPartition} ` : ''}
+              {progress.currentPartition
+                ? `${progress.currentPartition} (${progress.currentPartitionIndex ?? '--'}/${progress.totalPartitions || '--'}) `
+                : `${progress.completedPartitions}/${progress.totalPartitions || '--'} 个分区 `}
+              成功 {progress.successfulPartitions} · 失败 {progress.failedPartitions} · 跳过 {progress.skippedPartitions} ·
               {progress.percentage.toFixed(1)}% {Math.round(progress.bytesPerSecond)} B/s {Math.round(progress.elapsedMilliseconds / 1000)} s
             </p>
           ) : (

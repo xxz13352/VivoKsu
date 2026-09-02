@@ -720,10 +720,22 @@ async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
   };
 
   const statement = env.DB.prepare(
-    `INSERT INTO usage_logs (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at, ended_at, duration_ms)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO usage_logs (api_user_id, api_user_name, operation_kind, title, status, event_key, started_at, ended_at, duration_ms, details_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(event_key) WHERE source_schema = 1 DO NOTHING`,
   );
+  const detailsJson = (value: unknown): string => {
+    if (!Array.isArray(value)) return "[]";
+    const details = value.slice(0, 500).map((detail) => {
+      const item = detail && typeof detail === "object" ? detail as Record<string, unknown> : {};
+      return {
+        timestamp_utc: Number.isFinite(Number(item.timestamp_utc)) ? Number(item.timestamp_utc) : 0,
+        level: String(item.level || "Info").slice(0, 16),
+        message: String(item.message || "").slice(0, 16_384),
+      };
+    }).filter((detail) => detail.message.length > 0);
+    return JSON.stringify(details);
+  };
   const batch = logs.map((log) =>
     statement.bind(
       auth.id,
@@ -735,6 +747,7 @@ async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
       Number(log?.started_at) || 0,
       toInt(log?.ended_at),
       toInt(log?.duration_ms),
+      detailsJson(log?.details),
     ),
   );
 

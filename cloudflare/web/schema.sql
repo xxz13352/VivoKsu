@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   started_at INTEGER NOT NULL,            -- epoch 秒
   ended_at INTEGER,
   duration_ms INTEGER,
+  details_json TEXT NOT NULL DEFAULT '[]',
   source_schema INTEGER NOT NULL DEFAULT 1 CHECK(source_schema IN (1,2)),
   trace_run_id TEXT,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))

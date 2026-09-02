@@ -513,6 +513,7 @@ mod tests {
             started_at: 1,
             ended_at: Some(2),
             duration_ms: Some(1),
+            details: Vec::new(),
         };
 
         state.usage_reporter.record(entry.clone());
@@ -546,6 +547,7 @@ mod tests {
             started_at: 1,
             ended_at: Some(2),
             duration_ms: Some(1),
+            details: Vec::new(),
         };
         state.usage_reporter.record(entry.clone());
         assert_eq!(state.usage_reporter.pending_count(), 1);

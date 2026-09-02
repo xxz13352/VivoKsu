@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use nwflash_domain::{
     DomainError, OperationKind, OperationLogLevel, OperationStateSnapshot, PartitionTaskSnapshot,
-    PartitionTaskState, UsageLogEntry,
+    PartitionTaskState, UsageLogDetail, UsageLogEntry,
 };
 
 const PROGRESS_THROTTLE: Duration = Duration::from_millis(100);
@@ -301,6 +301,7 @@ struct OperationCoordinatorState {
     permission_gate: Option<Arc<dyn OperationPermissionGate>>,
     usage_reporter: Option<Arc<dyn UsageReporter>>,
     logger: Option<Arc<dyn OperationLogger>>,
+    operation_details: Arc<StdMutex<Vec<UsageLogDetail>>>,
     notify_blocked: Option<Arc<dyn Fn(String) + Send + Sync>>,
     current_gate: Arc<Mutex<Option<CancellationToken>>>,
 }
@@ -323,8 +324,14 @@ pub struct OperationContext {
 
 impl OperationContext {
     pub fn report_stage(&self, stage: impl Into<String>) {
+        let stage = stage.into();
+        self.state.log(
+            OperationLogLevel::Info,
+            stage.clone(),
+            Some(self.operation_id.clone()),
+        );
         self.state.report(StageUpdate {
-            stage: Some(stage.into()),
+            stage: Some(stage),
             kind: None,
             progress: None,
             monotonic_progress: false,
@@ -333,8 +340,14 @@ impl OperationContext {
     }
 
     pub fn report_stage_with_kind(&self, stage: impl Into<String>, kind: OperationKind) {
+        let stage = stage.into();
+        self.state.log(
+            OperationLogLevel::Info,
+            stage.clone(),
+            Some(self.operation_id.clone()),
+        );
         self.state.report(StageUpdate {
-            stage: Some(stage.into()),
+            stage: Some(stage),
             kind: Some(kind),
             progress: None,
             monotonic_progress: false,
@@ -368,6 +381,12 @@ impl OperationContext {
         state: PartitionTaskState,
         overall_progress: f64,
     ) {
+        let partition_name = partition_name.into();
+        self.state.log(
+            OperationLogLevel::Info,
+            format!("分区 {}：{:?}", partition_name, state),
+            Some(self.operation_id.clone()),
+        );
         self.state
             .report_now(StageUpdate {
                 stage: None,
@@ -375,7 +394,7 @@ impl OperationContext {
                 progress: Some(overall_progress),
                 monotonic_progress: false,
                 partition_task: Some(PartitionTaskSnapshot {
-                    partition_name: partition_name.into(),
+                    partition_name,
                     state,
                     overall_progress: overall_progress.clamp(0.0, 1.0),
                 }),
@@ -441,6 +460,7 @@ impl OperationCoordinator {
             permission_gate,
             usage_reporter,
             logger,
+            operation_details: Arc::new(StdMutex::new(Vec::new())),
             notify_blocked,
             current_gate: Arc::new(Mutex::new(None)),
         };
@@ -605,6 +625,9 @@ impl OperationCoordinator {
         self.is_busy.store(true, Ordering::Release);
         self.state
             .set_running(&title, kind, operation_id.clone(), true);
+        if let Ok(mut details) = self.state.operation_details.lock() {
+            details.clear();
+        }
         self.state.log(
             OperationLogLevel::Info,
             title.clone(),
@@ -624,6 +647,11 @@ impl OperationCoordinator {
             Ok(_) => {
                 self.state
                     .set_completed(operation_id.clone(), &title, &format!("{title}完成。"));
+                self.state.log(
+                    OperationLogLevel::Success,
+                    format!("{title}完成。"),
+                    Some(operation_id.clone()),
+                );
                 Some("success")
             }
             Err(DomainError::UserCancelled(_)) => {
@@ -661,6 +689,12 @@ impl OperationCoordinator {
                     started_at,
                     ended_at: Some(ended_at),
                     duration_ms,
+                    details: self
+                        .state
+                        .operation_details
+                        .lock()
+                        .map(|details| details.clone())
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -775,6 +809,23 @@ impl OperationCoordinatorState {
     }
 
     fn log(&self, level: OperationLogLevel, message: String, operation_id: Option<String>) {
+        if operation_id.is_some() {
+            if let Ok(mut details) = self.operation_details.lock() {
+                if details.last().map_or(true, |entry| {
+                    entry.level != level || entry.message != message
+                }) {
+                    details.push(UsageLogDetail {
+                        timestamp_utc: epoch_seconds_now(),
+                        level,
+                        message: message.clone(),
+                    });
+                }
+                if details.len() > 500 {
+                    let drain = details.len() - 500;
+                    details.drain(0..drain);
+                }
+            }
+        }
         if let Some(logger) = self.logger.as_ref() {
             logger.write(level, message, operation_id);
         }
@@ -813,14 +864,12 @@ impl OperationCoordinatorState {
 
     async fn report_now(&self, update: StageUpdate) {
         let mut emit = false;
-        let mut should_log = false;
 
         let mut current = self.snapshot.write().await;
 
         if let Some(stage) = update.stage {
             if stage != current.stage {
                 emit = true;
-                should_log = true;
             }
             current.stage = stage;
         }
@@ -828,7 +877,6 @@ impl OperationCoordinatorState {
         if let Some(kind) = update.kind {
             if kind != current.kind {
                 emit = true;
-                should_log = true;
             }
             current.kind = kind;
         }
@@ -873,21 +921,14 @@ impl OperationCoordinatorState {
             };
             if changed || current.partition_task.as_ref() != Some(&partition_task) {
                 emit = true;
-                should_log = true;
                 current.partition_task = Some(partition_task);
             }
         }
 
         if emit {
             let snapshot = current.clone();
-            let operation_id = snapshot.operation_id.clone();
             drop(current);
-            let stage = snapshot.stage.clone();
             let _ = self.state_changed.send(snapshot);
-
-            if should_log {
-                self.log(OperationLogLevel::Info, stage, operation_id);
-            }
         }
     }
 }
@@ -901,6 +942,7 @@ impl Clone for OperationCoordinatorState {
             permission_gate: self.permission_gate.clone(),
             usage_reporter: self.usage_reporter.clone(),
             logger: self.logger.clone(),
+            operation_details: self.operation_details.clone(),
             notify_blocked: self.notify_blocked.clone(),
             current_gate: self.current_gate.clone(),
         }

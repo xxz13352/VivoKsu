@@ -8,8 +8,8 @@ use std::{
 };
 
 use nwflash_application::{
-    result_to_domain_error, FileManagerService, OperationContext, RootManager,
-    RootPatchPreflightRequest, RootPatchReadiness, RootService, SafeFlashBuildOptions,
+    result_to_domain_error, FileManagerService, OperationContext, OperationCoordinator,
+    RootManager, RootPatchPreflightRequest, RootPatchReadiness, RootService, SafeFlashBuildOptions,
     SafeFlashExecutionRequest, SafeFlashExecutionService, SafeFlashPartitionSource,
     SafeFlashPreparedSource,
 };
@@ -2229,12 +2229,50 @@ pub async fn root_select_image(
         .capture()
         .map_err(|_| ROOT_CAPABILITY_UNAVAILABLE.to_string())?;
     let path = select_root_image(&app_handle).await?;
-    let image = tokio::task::spawn_blocking(move || inspect_root_image(&path))
+    let image_runtime = state.root_image_runtime.clone();
+    let inspected =
+        inspect_root_image_through_coordinator(&state.operation_coordinator, path).await?;
+    image_runtime.replace_with_target(lease, kind, inspected, kind.label().to_string())
+}
+
+async fn inspect_root_image_through_coordinator(
+    coordinator: &OperationCoordinator,
+    path: PathBuf,
+) -> Result<FlashImageInfo, String> {
+    let image = Arc::new(Mutex::new(None));
+    let image_for_operation = image.clone();
+    coordinator
+        .run_async(
+            OperationKind::Hashing,
+            "检查 ROOT 镜像",
+            move |context, cancellation| async move {
+                context.report_stage("正在检查所选 ROOT 镜像");
+                let inspect_cancellation = cancellation.clone();
+                let inspected = task::spawn_blocking(move || {
+                    if inspect_cancellation.is_cancelled() {
+                        return Err("ROOT 镜像检查已取消。".to_string());
+                    }
+                    inspect_root_image(&path)
+                })
+                .await
+                .map_err(|_| DomainError::Internal("ROOT 镜像检查任务已中断。".to_string()))?
+                .map_err(DomainError::InvalidOperation)?;
+                context.report_stage("ROOT 镜像检查完成。");
+                context.report_progress(1.0);
+                *image_for_operation.lock().map_err(|_| {
+                    DomainError::Internal("ROOT 镜像检查结果锁不可用。".to_string())
+                })? = Some(inspected);
+                Ok(())
+            },
+        )
         .await
-        .map_err(|_| "ROOT 镜像检查任务已中断。".to_string())??;
-    state
-        .root_image_runtime
-        .replace_with_target(lease, kind, image, kind.label().to_string())
+        .map_err(|error| error.to_string())?;
+    let result = image
+        .lock()
+        .map_err(|_| "ROOT 镜像检查结果锁不可用。".to_string())?
+        .take()
+        .ok_or_else(|| "ROOT 镜像检查未产生结果。".to_string())?;
+    Ok(result)
 }
 
 async fn select_root_image(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -2270,12 +2308,13 @@ mod tests {
         build_root_automatic_execution_request, build_vendor_boot_cleanup_command,
         build_vendor_boot_module_update_command, build_vendor_boot_repack_pull_commands,
         build_vendor_boot_setup_commands, build_vivo_ksu_patch_commands,
-        finalize_vendor_boot_workflow, inspect_root_image, manager_resource_key,
-        parse_kernel_release, publish_root_patch_candidate, quick_flash_partition_from_name,
-        root_execute_patched_artifact_flash_inner, root_preflight_from_runtime,
-        root_preflight_response, AutomaticRootStage, RootAutomaticOptionsDto, RootImageKind,
-        RootImageRuntime, RootOfficialVendorBootPatchOptionsDto, RootPatchedArtifactRuntime,
-        RootPreflightOptionsDto, RootVivoKsuPatchOptionsDto,
+        finalize_vendor_boot_workflow, inspect_root_image, inspect_root_image_through_coordinator,
+        manager_resource_key, parse_kernel_release, publish_root_patch_candidate,
+        quick_flash_partition_from_name, root_execute_patched_artifact_flash_inner,
+        root_preflight_from_runtime, root_preflight_response, AutomaticRootStage,
+        RootAutomaticOptionsDto, RootImageKind, RootImageRuntime,
+        RootOfficialVendorBootPatchOptionsDto, RootPatchedArtifactRuntime, RootPreflightOptionsDto,
+        RootVivoKsuPatchOptionsDto,
     };
     use crate::{session_capabilities::SessionCapabilityScope, AppState};
     use futures::future::BoxFuture;
@@ -3916,5 +3955,56 @@ mod tests {
                 "remoteRoot": "/data/local/tmp/evil"
             }));
         assert!(rejected.is_err());
+    }
+
+    struct CapturingUsageReporter {
+        entries: std::sync::Mutex<Vec<nwflash_domain::UsageLogEntry>>,
+    }
+
+    impl nwflash_application::UsageReporter for CapturingUsageReporter {
+        fn record(&self, entry: nwflash_domain::UsageLogEntry) {
+            self.entries
+                .lock()
+                .expect("usage entry capture lock should not be poisoned")
+                .push(entry);
+        }
+    }
+
+    #[tokio::test]
+    async fn root_image_inspection_records_usage_details_through_the_coordinator() {
+        let root = std::env::temp_dir().join(format!(
+            "nwflash-root-select-usage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("test root should be created");
+        let image_path = root.join("init_boot.img");
+        fs::write(&image_path, b"AAAA").expect("image should be written");
+
+        let reporter = Arc::new(CapturingUsageReporter {
+            entries: std::sync::Mutex::new(Vec::new()),
+        });
+        let coordinator = OperationCoordinator::new(None, None, Some(reporter.clone()), None, None);
+        let inspected = inspect_root_image_through_coordinator(&coordinator, image_path.clone())
+            .await
+            .expect("coordinated ROOT image inspection should succeed");
+        assert!(inspected.size_bytes > 0);
+
+        let entries = reporter
+            .entries
+            .lock()
+            .expect("usage entry capture lock should not be poisoned");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].operation, "Hashing");
+        assert_eq!(entries[0].title, "检查 ROOT 镜像");
+        assert_eq!(entries[0].status, "success");
+        assert!(entries[0]
+            .details
+            .iter()
+            .any(|detail| detail.message == "ROOT 镜像检查完成。"));
+
+        fs::remove_dir_all(&root).expect("test root should be removed");
     }
 }

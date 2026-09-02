@@ -15,6 +15,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 
 type Unmount = ReturnType<typeof createRoot>;
 
@@ -547,5 +548,129 @@ describe('FirmwareExtractPage', () => {
       artifactId: 'firmware-1',
     });
     expect(host.textContent ?? '').not.toContain('C:\\private');
+  });
+
+  test('提取进度显示当前分区序号和成功失败跳过统计', async () => {
+    const dialog = open as unknown as ReturnType<typeof vi.fn>;
+    const command = invoke as unknown as ReturnType<typeof vi.fn>;
+    const listenMock = listen as unknown as ReturnType<typeof vi.fn>;
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    let resolveExtraction: ((value: { images: Array<{ name: string; sizeBytes: number }> }) => void) | undefined;
+    const pendingExtraction = new Promise<{ images: Array<{ name: string; sizeBytes: number }> }>((resolve) => {
+      resolveExtraction = resolve;
+    });
+
+    listenMock.mockImplementation(
+      async (event: string, handler: (event: { payload: unknown }) => void) => {
+        listeners.set(event, handler);
+        return () => undefined;
+      },
+    );
+    dialog.mockResolvedValueOnce('C:\\private\\firmware\\vivo_ota.gz');
+    command
+      .mockResolvedValueOnce({
+        format: 'vivoGzipTar',
+        entries: [{ id: '0', name: 'boot.img', sizeBytes: 4 }, { id: '1', name: 'vendor.img', sizeBytes: 8 }],
+      })
+      .mockResolvedValueOnce({
+        selectionId: 'firmware-output-8d03772f-0062-4cc1-92ec-b10c85e75ca8',
+      })
+      .mockImplementationOnce(() => pendingExtraction);
+
+    renderFirmwareExtract();
+    await inspectSelectedLocalSource();
+    (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
+    (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
+    await waitUntil(() => listeners.has('firmware:progress'));
+
+    listeners.get('firmware:progress')?.({
+      payload: {
+        currentPartition: 'vendor.img',
+        currentPartitionIndex: 2,
+        totalPartitions: 3,
+        completedPartitions: 1,
+        successfulPartitions: 1,
+        failedPartitions: 0,
+        skippedPartitions: 0,
+        bytesCompleted: 4,
+        bytesTotal: 12,
+        percentage: 33.3,
+        bytesPerSecond: 1024,
+        elapsedMilliseconds: 2000,
+      },
+    });
+    await flushPromises();
+
+    const progressText = host.querySelector('.nw-firmware-progress')?.textContent ?? '';
+    expect(progressText).toContain('vendor.img (2/3)');
+    expect(progressText).toContain('成功 1');
+    expect(progressText).toContain('失败 0');
+    expect(progressText).toContain('跳过 0');
+    expect(progressText).toContain('33.3%');
+
+    resolveExtraction?.({ images: [{ name: 'boot.img', sizeBytes: 4 }] });
+    await waitUntil(() => host.textContent?.includes('已提取 1 个镜像') ?? false);
+  });
+
+  test('无当前分区的进度显示已完成分区计数', async () => {
+    const dialog = open as unknown as ReturnType<typeof vi.fn>;
+    const command = invoke as unknown as ReturnType<typeof vi.fn>;
+    const listenMock = listen as unknown as ReturnType<typeof vi.fn>;
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    let resolveExtraction: ((value: { images: Array<{ name: string; sizeBytes: number }> }) => void) | undefined;
+    const pendingExtraction = new Promise<{ images: Array<{ name: string; sizeBytes: number }> }>((resolve) => {
+      resolveExtraction = resolve;
+    });
+
+    listenMock.mockImplementation(
+      async (event: string, handler: (event: { payload: unknown }) => void) => {
+        listeners.set(event, handler);
+        return () => undefined;
+      },
+    );
+    dialog.mockResolvedValueOnce('C:\\private\\firmware\\vivo_ota.gz');
+    command
+      .mockResolvedValueOnce({
+        format: 'vivoGzipTar',
+        entries: [{ id: '0', name: 'boot.img', sizeBytes: 4 }],
+      })
+      .mockResolvedValueOnce({
+        selectionId: 'firmware-output-8d03772f-0062-4cc1-92ec-b10c85e75ca8',
+      })
+      .mockImplementationOnce(() => pendingExtraction);
+
+    renderFirmwareExtract();
+    await inspectSelectedLocalSource();
+    (host.querySelector('.nw-test-firmware-entry') as HTMLInputElement).click();
+    (host.querySelector('.nw-test-firmware-extract') as HTMLButtonElement).click();
+    await waitUntil(() => listeners.has('firmware:progress'));
+
+    listeners.get('firmware:progress')?.({
+      payload: {
+        currentPartition: null,
+        currentPartitionIndex: null,
+        totalPartitions: 4,
+        completedPartitions: 3,
+        successfulPartitions: 2,
+        failedPartitions: 1,
+        skippedPartitions: 1,
+        bytesCompleted: 9,
+        bytesTotal: 12,
+        percentage: 75,
+        bytesPerSecond: 512,
+        elapsedMilliseconds: 4000,
+      },
+    });
+    await flushPromises();
+
+    const progressText = host.querySelector('.nw-firmware-progress')?.textContent ?? '';
+    expect(progressText).toContain('3/4 个分区');
+    expect(progressText).toContain('成功 2');
+    expect(progressText).toContain('失败 1');
+    expect(progressText).toContain('跳过 1');
+    expect(progressText).toContain('75.0%');
+
+    resolveExtraction?.({ images: [{ name: 'boot.img', sizeBytes: 4 }] });
+    await waitUntil(() => host.textContent?.includes('已提取 1 个镜像') ?? false);
   });
 });

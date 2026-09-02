@@ -82,6 +82,13 @@ impl OperationLogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageLogDetail {
+    pub timestamp_utc: i64,
+    pub level: OperationLogLevel,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageLogEntry {
     pub operation: String,
     pub title: String,
@@ -90,4 +97,6 @@ pub struct UsageLogEntry {
     pub started_at: i64,
     pub ended_at: Option<i64>,
     pub duration_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<UsageLogDetail>,
 }
