@@ -15,6 +15,16 @@ import {
 } from "./security";
 import { ingestTraceUploadV2, traceErrorV2 } from "./trace-v2-ingest";
 import { purgeExpiredTraceData } from "./trace-v2-retention";
+import {
+  CrashBodyTooLargeError,
+  InvalidCrashReportError,
+  CRASH_RATE_WINDOW_SECONDS,
+  crashIpHash,
+  crashWindowStart,
+  purgeExpiredCrashData,
+  readCrashReport,
+  storeCrashReport,
+} from "./crash-diagnostics";
 
 /**
  * Cloudflare Worker —— Vivo ROM OTA 链接代理 + Nwflash 版本门禁。
@@ -26,6 +36,7 @@ import { purgeExpiredTraceData } from "./trace-v2-retention";
  *   GET /api/app/version?current=X       -> Nwflash 版本策略(免登录,启动拦截用)
  *   GET /api/security/pins               -> Ed25519 签名双 SPKI pin 清单
  *   POST /api/integrity/report           -> 严格限长/限流/幂等完整性遥测
+ *   POST /api/diagnostics/crash          -> 崩溃报告补传(限流/幂等,客户端先脱敏)
  *   POST /api/heartbeat                  -> 在线会话心跳 + 递增签名租约
  *   GET /api/online                      -> 在线用户列表(鉴权;仅显示名/版本/时长,不含 username/IP)
  *   GET /api/rom?pd=X&version=Y          -> { pd, version, url, name, sizeBytes, sha256 }
@@ -81,6 +92,13 @@ export default {
 
       if (url.pathname === "/api/integrity/report" && request.method === "POST") {
         return await acceptIntegrityReport(env, request);
+      }
+
+      // 崩溃报告补传:客户端下次启动时把上次 panic(crash.log)上报。匿名可报,
+      // 携带有效 bearer 时绑定用户并标 trusted;严格闭集字段 + IP 窗口限流 +
+      // event_id 幂等(与完整性遥测同一套防滥用骨架)。
+      if (url.pathname === "/api/diagnostics/crash" && request.method === "POST") {
+        return await acceptCrashReport(env, request);
       }
 
       // Nwflash 版本策略(免登录,桌面端启动拦截用)。
@@ -176,6 +194,7 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     await purgeStaleSessions(env, /* force */ true);
     await purgeIntegrityRateLimits(env);
+    await purgeExpiredCrashData(env.DB, Date.now());
     const retention = await purgeExpiredTraceData(env.DB, Date.now());
     console.log("trace-v2-retention", retention);
   },
@@ -406,6 +425,47 @@ async function purgeIntegrityRateLimits(env: Env): Promise<void> {
     await env.DB.prepare("DELETE FROM integrity_rate_limits WHERE window_start < ?").bind(cutoff).run();
   } catch {
     // 遥测限流清理失败不影响在线会话 Cron;后续 Cron 会再次尝试。
+  }
+}
+
+/** POST /api/diagnostics/crash —— 读取 → (可选)鉴权 → 单事务限流写入。 */
+async function acceptCrashReport(env: Env, request: Request): Promise<Response> {
+  let report;
+  try {
+    report = await readCrashReport(request);
+  } catch (error) {
+    if (error instanceof CrashBodyTooLargeError) return json({ error: "请求体过大。" }, 413);
+    if (error instanceof InvalidCrashReportError) return json({ error: "崩溃报告不合法。" }, 400);
+    throw error;
+  }
+
+  const authHeader = request.headers.get("Authorization");
+  let userId: number | null = null;
+  let trusted = false;
+  if (authHeader !== null) {
+    const auth = await authenticateUser(env, request);
+    if (auth instanceof Response) return auth;
+    if (auth === null) return json({ error: "API token 无效或已停用。" }, 401);
+    userId = auth.id;
+    trusted = true;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const windowStart = crashWindowStart(now);
+  const ipHash = await crashIpHash(request.headers.get("CF-Connecting-IP") || "unknown");
+  try {
+    const outcome = await storeCrashReport(env.DB, report, {
+      apiUserId: userId,
+      trusted,
+      ipHash,
+      windowStart,
+      now,
+    });
+    if (outcome.rateLimited) return json({ error: "崩溃报告上报过于频繁。" }, 429);
+    if (outcome.accepted && !outcome.duplicate) return json({ ok: true, accepted: true }, 202);
+    return json({ ok: true, duplicate: true }, 200);
+  } catch {
+    return json({ error: "崩溃报告写入失败。" }, 500);
   }
 }
 

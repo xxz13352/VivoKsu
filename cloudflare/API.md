@@ -86,6 +86,38 @@
 
 ---
 
+### `POST /api/diagnostics/crash`
+
+崩溃报告补传。客户端下次启动时把上次进程 panic(本地 `crash.log`)上报服务端。**匿名可报**(崩溃可能发生在登出后);携带有效 bearer token 时绑定 `api_user_id` 并标记 trusted。与完整性遥测共用防滥用骨架:请求体上限 **64 KiB**、闭集字段校验、`event_id` 幂等、IP 哈希窗口限流。
+
+**请求体**(六个标识/文本字段 + 时间戳,不允许任何额外字段)
+```json
+{
+  "event_id": "crash-550e8400-e29b-41d4-a716-446655440000",
+  "client_version": "1.4.0",
+  "build_id": "build-2026-08-23",
+  "session_id": "session-abc",
+  "panic_message": "panicked at src/main.rs:42",
+  "backtrace": "0: nwflash::main\n1: std::panicking::begin_panic",
+  "occurred_at": 1787444800
+}
+```
+
+| 字段 | 约束 |
+| --- | --- |
+| `event_id` / `session_id` | URL-safe 标识字符(`A-Za-z0-9._:-`),≤64;`event_id` 为重试幂等键 |
+| `build_id` | 同上字符集,≤128 |
+| `client_version` | `A-Za-z0-9._+-`,≤32,首字符为字母数字 |
+| `panic_message` | 必填非空,≤16 KiB |
+| `backtrace` | 可为空串,≤32 KiB |
+| `occurred_at` | 正整数 epoch 秒(JS safe integer) |
+
+**响应**:首次接受 `202 { "ok": true, "accepted": true }`;重复(并发或重试)`200 { "ok": true, "duplicate": true }`;字段非法 `400`;体超限 `413`;同 IP 10 分钟窗口内超过 **5** 条 `429`(仅存 IP 的 SHA-256 摘要,不存原始 IP);D1 写入失败 `500`;携带了 Authorization 但 token 无效时 `401`。
+
+> **客户端义务**:`panic_message`/`backtrace` 在发送前必须完成本地脱敏(路径、序列号、命令行等),服务端只做结构校验,不做二次脱敏。报告保留 90 天,由 Worker Cron 清理。
+
+---
+
 ### `GET /api/app/version?current=<客户端版本>`
 
 Nwflash **版本策略查询**(免登录,桌面端启动强制更新拦截用)。返回后台「版本号控制」的生效策略(启用的版本中最高者)。
@@ -318,7 +350,7 @@ goodbye 只需 `sessionId` 和 `active = false`;它删除当前用户的 `sessio
 | `started_at` / `ended_at` | number | epoch 秒 |
 | `duration_ms` | number \| null | 耗时 |
 
-**成功 200** `{ "ok": true, "received": 1 }`。单批最多 200 条。后台「使用日志」可查看/筛选。
+**成功 200** `{ "ok": true, "received": 1 }`。单批最多 100 条。后台「使用日志」可查看/筛选。
 
 ---
 
@@ -445,6 +477,7 @@ npm run deploy                            # 先检查远端签名 secret,再部�
 | 2026-08-14 | **操作许可门禁 + 使用日志**:`POST /api/operation/authorize`(客户端每个用户操作运行前询问,默认放行、封禁/停用拒绝);`POST /api/usage/logs`(使用日志批量上传,按 `operation_kind` 分类存储);D1 新增 `usage_logs` 表;管理端「使用日志」查看/筛选 |
 | 2026-08-23 | **签名租约 + pin 清单 + 完整性遥测**:登录/活动心跳签发绑定 token 摘要、build/process/session/sequence 的 Ed25519 租约;新增签名双 pin `/api/security/pins`;新增 4 KiB 严格遥测 `/api/integrity/report`,D1 event ID 幂等与 hash-IP 60s/20 次限流 |
 | 2026-08-26 | **密码撤销 token 交接**:共享 API 登录以完整凭据代际 D1 mutation 线性化,将 `revoked:*` marker CAS 为新的 32-byte hex token;并发登录共享唯一胜者 token,签前与 session 写入均复核代际,lease 绑定最终 token 摘要;通过版本门禁后的旧/marker bearer 认证与心跳均返回 401且绝不回显 marker |
+| 2026-09-03 | **崩溃报告补传**:新增 `POST /api/diagnostics/crash`(匿名可报、64 KiB 上限、event_id 幂等、IP 10 分钟/5 条限流、90 天保留);D1 新增 `crash_reports` / `crash_report_claims` / `crash_report_rate_limits`;Cron 清理并入 scheduled()。**文档修正**:`/api/usage/logs` 单批上限实际为 100 条(此前误写 200) |
 
 ## 管理后台
 
@@ -455,10 +488,12 @@ npm run deploy                            # 先检查远端签名 secret,再部�
 
 ```
 cloudflare/
-├─ src/index.ts        # Worker 入口:路由 + resolveRom + 心跳/在线 + 完整性遥测
+├─ src/index.ts        # Worker 入口:路由 + resolveRom + 心跳/在线 + 完整性遥测 + 崩溃补传
 ├─ src/security.ts     # Ed25519 签名、pin 清单、严格限长遥测解析
+├─ src/crash-diagnostics.ts # 崩溃报告解析、限流写入与 Cron 清理
 ├─ test/security.test.ts # 实际安全 helper + Worker/D1 边界测试
 ├─ test/security.workerd.test.ts # 实际 Workerd Worker route + D1 并发集成测试
+├─ test/crash-diagnostics.workerd.test.ts # 崩溃补传路由级集成测试
 ├─ vitest.workerd.config.ts # @cloudflare/vitest-plugin 独立配置 + 运行时临时密钥/迁移
 ├─ wrangler.toml       # 变量与自定义域路由 + Cron 触发器
 ├─ README.md           # 部署/使用说明
