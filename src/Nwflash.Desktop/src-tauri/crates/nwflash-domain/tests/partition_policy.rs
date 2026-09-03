@@ -310,6 +310,41 @@ fn parse_adb_devices_dash_l_detects_multiple_devices() {
     );
 }
 
+#[test]
+fn build_backup_rejects_path_syntax_in_partition_names() {
+    let partition = create_partition("..\\..\\Users\\Public\\evil", "/dev/block/sda1", None);
+    let err = PartitionExecutionPlanBuilder
+        .build_backup(
+            "ADB123",
+            PartitionTransportKind::AdbRoot,
+            &[partition],
+            "D:\\backups",
+        )
+        .expect_err("path syntax in a partition name must be rejected");
+    assert!(err.to_string().contains("分区名包含非法字符"));
+}
+
+#[test]
+fn build_write_rejects_a_selected_partition_without_an_image() {
+    let selected = [
+        create_partition("boot_a", "boot_a", None),
+        create_partition("vendor_boot_a", "vendor_boot_a", None),
+    ];
+    let mut image_paths = HashMap::new();
+    let path = create_temp_file(&[0x00; 4]);
+    image_paths.insert("boot_a".to_string(), path.display().to_string());
+
+    let err = PartitionExecutionPlanBuilder
+        .build_write(
+            "FAST123",
+            PartitionTransportKind::Fastboot,
+            &selected,
+            &image_paths,
+        )
+        .expect_err("a selected partition without an image must fail the plan");
+    assert!(err.to_string().contains("vendor_boot_a 未指定镜像文件"));
+}
+
 fn create_partition(
     name: &str,
     path: &str,

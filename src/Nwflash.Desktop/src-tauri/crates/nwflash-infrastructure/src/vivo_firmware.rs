@@ -65,11 +65,11 @@ impl VivoFirmwareExtractor {
             let (header_path, size, type_flag) = parse_header(&header)?;
             if type_flag == b'L' {
                 pending_long_path = Some(read_entry_text(&mut tar, size)?);
-                skip_exact(&mut tar, padded_size(size) - size)?;
+                skip_exact(&mut tar, padded_size(size)? - size)?;
                 continue;
             }
             if matches!(type_flag, b'x' | b'X' | b'g') {
-                skip_exact(&mut tar, padded_size(size))?;
+                skip_exact(&mut tar, padded_size(size)?)?;
                 continue;
             }
             let full_path = pending_long_path.take().unwrap_or(header_path);
@@ -85,7 +85,7 @@ impl VivoFirmwareExtractor {
                     size_bytes: i64::try_from(size).unwrap_or(i64::MAX),
                 });
             }
-            skip_exact(&mut tar, padded_size(size))?;
+            skip_exact(&mut tar, padded_size(size)?)?;
         }
         Ok(entries)
     }
@@ -150,11 +150,15 @@ impl VivoFirmwareExtractor {
                 let (header_path, size, type_flag) = parse_header(&header)?;
                 if type_flag == b'L' {
                     pending_long_path = Some(read_entry_text(&mut tar, size)?);
-                    skip_exact_with_cancel(&mut tar, padded_size(size) - size, &mut is_canceled)?;
+                    skip_exact_with_cancel(
+                        &mut tar,
+                        padded_size(size)? - size,
+                        &mut is_canceled,
+                    )?;
                     continue;
                 }
                 if matches!(type_flag, b'x' | b'X' | b'g') {
-                    skip_exact_with_cancel(&mut tar, padded_size(size), &mut is_canceled)?;
+                    skip_exact_with_cancel(&mut tar, padded_size(size)?, &mut is_canceled)?;
                     continue;
                 }
                 let full_path = pending_long_path.take().unwrap_or(header_path);
@@ -184,7 +188,11 @@ impl VivoFirmwareExtractor {
                             });
                         },
                     )?;
-                    skip_exact_with_cancel(&mut tar, padded_size(size) - size, &mut is_canceled)?;
+                    skip_exact_with_cancel(
+                        &mut tar,
+                        padded_size(size)? - size,
+                        &mut is_canceled,
+                    )?;
                     completed_bytes = completed_bytes.saturating_add(size);
                     partials.push((full_path, output_path, partial_path, size));
                 } else {
@@ -194,7 +202,7 @@ impl VivoFirmwareExtractor {
                         .map(str::to_string);
                     skip_exact_with_cancel_and_progress(
                         &mut tar,
-                        padded_size(size),
+                        padded_size(size)?,
                         &mut is_canceled,
                         || {
                             report_progress(VivoFirmwareProgress {
@@ -337,8 +345,13 @@ fn header_text(bytes: &[u8]) -> String {
         .to_string()
 }
 
-fn padded_size(size: u64) -> u64 {
-    size + ((512 - (size % 512)) % 512)
+/// Rounds a tar entry size up to the 512-byte header block grid. A hostile
+/// header can declare a size near u64::MAX, so overflow is surfaced as a
+/// truncation error instead of silently wrapping the skip offset.
+fn padded_size(size: u64) -> Result<u64, VivoFirmwareError> {
+    let padding = (512 - (size % 512)) % 512;
+    size.checked_add(padding)
+        .ok_or_else(|| VivoFirmwareError::Truncated("tar entry size".to_string()))
 }
 
 fn skip_exact(stream: &mut impl Read, remaining: u64) -> Result<(), VivoFirmwareError> {

@@ -16,6 +16,7 @@ use nwflash_infrastructure::{
 };
 use serde::Serialize;
 use tauri::{async_runtime::spawn, AppHandle, Emitter, Manager, Wry};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::time::sleep;
 
@@ -415,6 +416,7 @@ impl OperationPermissionGate for LocalProtectionGate {
         &self,
         operation: OperationKind,
         _title: String,
+        _cancellation: tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
         let authorization =
             match requires_high_risk_recheck(operation).then(|| self.context.admit_operation()) {
@@ -447,15 +449,19 @@ impl OperationPermissionGate for CompositeOperationPermissionGate {
         &self,
         operation: OperationKind,
         title: String,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
         let local = self.local.clone();
         let remote = self.remote.clone();
         Box::pin(async move {
-            let local_authorization = local.authorize(operation, title.clone()).await?;
+            let local_authorization =
+                local
+                    .authorize(operation, title.clone(), tokio_util::sync::CancellationToken::new())
+                    .await?;
             if !local_authorization.allowed {
                 return Ok(local_authorization);
             }
-            remote.authorize(operation, title).await
+            remote.authorize(operation, title, cancellation).await
         })
     }
 }
@@ -609,6 +615,7 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
         &self,
         operation: OperationKind,
         title: String,
+        cancellation: tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
         let client = self.client.clone();
         let session_token = self.session_token.clone();
@@ -626,7 +633,17 @@ impl OperationPermissionGate for CloudflareOperationPermissionGate {
 
             let operation_label = format!("{operation:?}");
             let request = client.authorize_operation(token.as_str(), &operation_label, &title);
-            match tokio::time::timeout(AUTHORIZE_TIMEOUT, request).await {
+            // 授权等待可被取消（对应 C# 把取消令牌传入 AuthorizeAsync）：
+            // Stop 在授权期也能立即中断等待，而不是等它自然返回。
+            let cancelled = cancellation.cancelled();
+            tokio::pin!(cancelled);
+            match tokio::select! {
+                biased;
+                _ = &mut cancelled => return Err(DomainError::UserCancelled(
+                    "授权等待被用户取消。".to_string(),
+                )),
+                outcome = tokio::time::timeout(AUTHORIZE_TIMEOUT, request) => outcome,
+            } {
                 Ok(Ok(authorization)) => Ok(OperationAuthorization {
                     allowed: authorization.allowed,
                     reason: authorization.reason,
@@ -876,7 +893,15 @@ impl AppState {
         spawn(async move {
             let mut receiver = coordinator.subscribe_state();
             let mut was_device_busy = false;
-            while let Ok(snapshot) = receiver.recv().await {
+            // A slow consumer can fall behind the broadcast backlog; Lagged
+            // is recoverable (the receiver stays live) but treated as a
+            // snapshot loss, while only Closed terminates the loop.
+            loop {
+                let snapshot = match receiver.recv().await {
+                    Ok(snapshot) => snapshot,
+                    Err(broadcast::error::RecvError::Lagged(_missed)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
                 let is_busy = matches!(
                     snapshot.kind,
                     OperationKind::Discovering
@@ -910,12 +935,15 @@ impl AppState {
                     let coordinator_for_refresh = coordinator.clone();
                     let operation_log_store = operation_log_store.clone();
                     spawn(async move {
-                        let update = commands::device::automatic_device_refresh_guarded_with_log(
-                            &device_runtime,
-                            &coordinator_for_refresh,
-                            Some(&operation_log_store),
-                        )
-                        .await;
+                        // 补偿刷新强制广播（C# forceFire）：即使设备身份未变，
+                        // 也要让前端在刷写/操作结束后重读分区表等下游状态。
+                        let update =
+                            commands::device::compensating_device_refresh_guarded_with_log(
+                                &device_runtime,
+                                &coordinator_for_refresh,
+                                Some(&operation_log_store),
+                            )
+                            .await;
                         if update.should_emit {
                             let _ = app_handle.emit("device:snapshot", update.snapshot);
                         }
@@ -997,13 +1025,16 @@ impl AppState {
                     Some(&operation_log_store),
                 )
                 .await;
-                let _ = commands::mirror::reconcile_after_device_update(
-                    &mirror_runtime,
-                    &runtime,
-                    &coordinator,
-                )
-                .await;
+                // 镜像 reconcile 只在设备身份变化时触发（对应 C# 挂在
+                // DeviceRefreshed 事件上、心跳身份未变不触发）：避免 scrcpy
+                // 异常退出后每 3 秒重启一次并刷操作快照事件。
                 if update.should_emit {
+                    let _ = commands::mirror::reconcile_after_device_update(
+                        &mirror_runtime,
+                        &runtime,
+                        &coordinator,
+                    )
+                    .await;
                     let _ = app_handle.emit("device:snapshot", update.snapshot);
                 }
             }
@@ -1220,6 +1251,7 @@ mod protection_context_tests {
             &self,
             _operation: OperationKind,
             _title: String,
+            _cancellation: tokio_util::sync::CancellationToken,
         ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             futures::future::ready(Ok(OperationAuthorization::allow())).boxed()
@@ -1474,7 +1506,11 @@ mod protection_context_tests {
         )));
         let remote = Arc::new(RecordingRemoteGate::default());
         let authorization = CompositeOperationPermissionGate::new(local, remote.clone())
-            .authorize(OperationKind::Flashing, "logged-out".to_string())
+            .authorize(
+                OperationKind::Flashing,
+                "logged-out".to_string(),
+                tokio_util::sync::CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -1590,6 +1626,7 @@ mod device_monitor_tests {
             &self,
             _operation: OperationKind,
             _title: String,
+            _cancellation: tokio_util::sync::CancellationToken,
         ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
             Box::pin(async { Ok(OperationAuthorization::deny("测试授权拒绝")) })
         }
@@ -1978,6 +2015,34 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
     #[cfg(feature = "e2e")]
     let app_builder = app_builder.plugin(tauri_plugin_wdio_webdriver::init());
     let app_builder = app_builder
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 刷写/下载进行中绝不直接放行关闭（对应 C# “绝不直接杀进程，
+                // 会把设备留在半刷状态”）：拦截本次关闭，等操作自然结束后
+                // 由后台协程真正关闭窗口。
+                let state = window.state::<AppState>();
+                if state.operation_coordinator.is_busy() {
+                    api.prevent_close();
+                    let window = window.clone();
+                    let coordinator = state.operation_coordinator.clone();
+                    spawn(async move {
+                        let _ = window.emit(
+                            "window:close-blocked",
+                            serde_json::json!({
+                                "reason": "有任务正在进行中，完成后将自动关闭窗口。",
+                            }),
+                        );
+                        // 与 exit_supervisor 相同语义：等待时间不计入收尾预算，
+                        // 绝不打断进行中的刷写；空闲租约等待完立即释放。
+                        {
+                            let _idle = coordinator.wait_until_idle().await;
+                            drop(_idle);
+                        }
+                        let _ = window.close();
+                    });
+                }
+            }
+        })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("奶蛙Flash");
@@ -2023,6 +2088,7 @@ pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
             commands::root::root_patch_official_vendor_boot,
             commands::root::root_prepare_patched_artifact_flash,
             commands::root::root_execute_patched_artifact_flash,
+            commands::root::root_export_patched_artifact,
             commands::root::root_run_automatic,
             commands::root_ota::root_ota_check,
             commands::root_ota::root_ota_extract_images,

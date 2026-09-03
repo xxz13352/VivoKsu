@@ -335,6 +335,17 @@ fn validate_device_path(device_path: &str) -> Result<(), DomainError> {
             "设备路径包含非法字符。".to_string(),
         ));
     }
+    // `.`/`..` and empty components would let a device-controlled path
+    // escape /dev/block/ (e.g. `/dev/block/../sda` targets the whole disk),
+    // and root dd/blkdiscard commands run with whatever path survives here.
+    if device_path
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(DomainError::InvalidOperation(
+            "设备路径包含非法路径组件。".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -389,6 +400,23 @@ mod tests {
             )
             .expect_err("bad device path rejected");
         assert!(err.to_string().contains("设备路径必须以 /dev/block/ 开头"));
+    }
+
+    #[test]
+    fn device_transport_rejects_dot_components_under_dev_block() {
+        let transport = DeviceTransport::new(PlatformTools::new("adb.exe", "fastboot.exe"));
+        let err = transport
+            .build_adb_root_erase_command("ABC123", "/dev/block/../sda")
+            .expect_err("dot components must not escape /dev/block/");
+        assert!(err.to_string().contains("设备路径包含非法路径组件"));
+        let err = transport
+            .build_adb_root_copy_staged_file_to_device_command(
+                "ABC123",
+                "/data/local/tmp/nwflash-stage-1-0.img",
+                "/dev/block/./boot_a",
+            )
+            .expect_err("dot components must be rejected");
+        assert!(err.to_string().contains("设备路径包含非法路径组件"));
     }
 
     #[test]

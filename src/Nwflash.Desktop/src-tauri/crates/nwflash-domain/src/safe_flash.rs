@@ -40,6 +40,9 @@ pub fn compute_targets(
 
     match mode {
         SafeFlashSlotMode::CurrentSlot => vec![partition_name.to_string()],
+        // current-slot 读不到时回退分区原名（C# SafeFlashSlotPlanner 的
+        // “回退原样刷写，安全降级不砖机”决策）：瞬态 getvar 失败绝不能让
+        // 整次刷写丢目标。
         SafeFlashSlotMode::OtherSlot => {
             vec![append_slot(partition_name, other_slot(current_slot))]
         }
@@ -55,6 +58,14 @@ fn append_slot(partition_name: &str, slot: Option<&str>) -> String {
         .unwrap_or_else(|| partition_name.to_string())
 }
 
+/// `lk` 与 `preloader` 都是引导加载分区：安全刷写模式下不仅基名要跳过，
+/// 带槽位后缀的变体（`lk_a`/`lk_b`）同样必须跳过，与 preloader 的子串
+/// 匹配语义对齐。lk 用 前缀+`_`/数字 边界判定，避免误伤 `lksec` 等普通分区。
 pub fn should_skip_safe_flash_partition(partition_name: &str) -> bool {
-    partition_name.eq_ignore_ascii_case("lk") || partition_name.to_lowercase().contains("preloader")
+    let name = partition_name.to_lowercase();
+    name == "lk"
+        || name
+            .strip_prefix("lk")
+            .is_some_and(|rest| rest.starts_with('_') || rest.starts_with(|c: char| c.is_ascii_digit()))
+        || name.contains("preloader")
 }

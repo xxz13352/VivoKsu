@@ -110,7 +110,13 @@ fn split_device_line(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     // Both `adb devices` and `adb devices -l` print this banner first.
-    if line.len() >= 15 && line[..15].eq_ignore_ascii_case("list of devices") {
+    // Byte comparison: the prefix may not land on a UTF-8 char boundary
+    // when a device-controlled line starts with multi-byte characters.
+    if line
+        .as_bytes()
+        .get(..15)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"list of devices"))
+    {
         return None;
     }
     // `* daemon not running; starting now at tcp:5037` and friends.
@@ -142,9 +148,17 @@ pub fn parse_fastboot_rs_output(output: &str) -> DeviceSnapshot {
     }
 
     let (serial, raw_mode) = &devices[0];
-    let mode = raw_mode.to_lowercase();
+    // 状态判定只作用于状态列（第一个词），绝不能扫整行尾巴：`adb devices -l`
+    // 的 product:/model:/device: 列值可能恰好包含 "fastboot"/"unauthorized"
+    // 等子串，会把健康设备误判成异常状态（C# 参考在 native 层先裁成两列）。
+    // 多词状态 "no permissions (…)" 的判定主体同样是第一个词。
+    let mode = raw_mode
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
 
-    if mode.contains("unauthorized") {
+    if mode.starts_with("unauthorized") {
         return DeviceSnapshot {
             connection_state: DeviceConnectionState::Unauthorized,
             serial: serial.to_string(),
@@ -155,29 +169,27 @@ pub fn parse_fastboot_rs_output(output: &str) -> DeviceSnapshot {
         };
     }
 
-    if mode.contains("fastbootd") {
+    if mode.starts_with("fastboot") {
+        // `fastbootd devices` 的状态列同样是 "fastboot"，fastbootd 身份由行内
+        // 括号标注（如 "fastboot (fastbootd)"）。仅在状态列确为 fastboot 时
+        // 才看尾巴里的 fastbootd 标注——健康 adb "device" 行不会走到这里，
+        // 不受尾巴子串误判影响。
+        let is_fastbootd = raw_mode.contains("fastbootd");
         return DeviceSnapshot {
             connection_state: DeviceConnectionState::FastbootConnected,
             serial: serial.to_string(),
-            connection_label: "Fastbootd 已连接".to_string(),
+            connection_label: if is_fastbootd {
+                "Fastbootd 已连接".to_string()
+            } else {
+                "Fastboot 已连接".to_string()
+            },
             model: "未检测到设备".to_string(),
             android_version: "--".to_string(),
             battery_level: "--".to_string(),
         };
     }
 
-    if mode.contains("fastboot") {
-        return DeviceSnapshot {
-            connection_state: DeviceConnectionState::FastbootConnected,
-            serial: serial.to_string(),
-            connection_label: "Fastboot 已连接".to_string(),
-            model: "未检测到设备".to_string(),
-            android_version: "--".to_string(),
-            battery_level: "--".to_string(),
-        };
-    }
-
-    if mode.contains("offline") {
+    if mode.starts_with("offline") {
         return DeviceSnapshot {
             connection_state: DeviceConnectionState::Disconnected,
             serial: serial.to_string(),
@@ -188,7 +200,7 @@ pub fn parse_fastboot_rs_output(output: &str) -> DeviceSnapshot {
         };
     }
 
-    if mode.contains("no permissions") {
+    if mode.starts_with("no") && raw_mode.to_lowercase().starts_with("no permissions") {
         return DeviceSnapshot {
             connection_state: DeviceConnectionState::Unauthorized,
             serial: serial.to_string(),

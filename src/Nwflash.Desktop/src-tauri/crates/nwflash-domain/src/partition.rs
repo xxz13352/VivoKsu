@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -123,23 +124,27 @@ impl PartitionExecutionPlanBuilder {
         selected_partitions: &[DevicePartition],
         image_paths: &HashMap<String, String>,
     ) -> DomainResult<PartitionExecutionPlan> {
-        let tasks: Vec<PartitionTask> = selected_partitions
-            .iter()
-            .filter_map(|partition| {
-                let image_path = image_paths.get(&partition.name)?;
-                if image_path.trim().is_empty() {
-                    return None;
-                }
+        let mut tasks: Vec<PartitionTask> = Vec::with_capacity(selected_partitions.len());
+        for partition in selected_partitions {
+            validate_partition_name(&partition.name)?;
+            let image_path = image_paths.get(&partition.name)?;
+            if image_path.trim().is_empty() {
+                // Silently dropping a selected partition would flash fewer
+                // targets than the user confirmed.
+                return Err(DomainError::InvalidInput(format!(
+                    "分区 {} 未指定镜像文件，无法执行刷写。",
+                    partition.name
+                )));
+            }
 
-                Some(PartitionTask {
-                    partition_name: partition.name.clone(),
-                    device_path: partition.device_path.clone(),
-                    image_path: Some(image_path.clone()),
-                    output_path: None,
-                    size_bytes: partition.size_bytes,
-                })
-            })
-            .collect();
+            tasks.push(PartitionTask {
+                partition_name: partition.name.clone(),
+                device_path: partition.device_path.clone(),
+                image_path: Some(image_path.clone()),
+                output_path: None,
+                size_bytes: partition.size_bytes,
+            });
+        }
 
         if matches!(transport, PartitionTransportKind::AdbRoot) {
             validate_adb_root_write_tasks(&tasks)?;
@@ -159,20 +164,25 @@ impl PartitionExecutionPlanBuilder {
             return Err(DomainError::InvalidInput("输出目录不能为空。".to_string()));
         }
 
-        let tasks: Vec<PartitionTask> = selected_partitions
-            .iter()
-            .map(|partition| PartitionTask {
+        let directory = Path::new(output_directory.trim_end_matches(['\\', '/']));
+        let mut tasks: Vec<PartitionTask> = Vec::with_capacity(selected_partitions.len());
+        for partition in selected_partitions {
+            // Partition names come from device-reported tables; they must not
+            // carry path syntax into the backup output path.
+            validate_partition_name(&partition.name)?;
+            tasks.push(PartitionTask {
                 partition_name: partition.name.clone(),
                 device_path: partition.device_path.clone(),
                 image_path: None,
-                output_path: Some(format!(
-                    "{}\\{}.img",
-                    output_directory.trim_end_matches('\\'),
-                    partition.name
-                )),
+                output_path: Some(
+                    directory
+                        .join(format!("{}.img", partition.name))
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 size_bytes: partition.size_bytes,
-            })
-            .collect();
+            });
+        }
 
         create_plan(serial, transport, PartitionOperationKind::Backup, tasks)
     }
@@ -183,16 +193,17 @@ impl PartitionExecutionPlanBuilder {
         transport: PartitionTransportKind,
         selected_partitions: &[DevicePartition],
     ) -> DomainResult<PartitionExecutionPlan> {
-        let tasks: Vec<PartitionTask> = selected_partitions
-            .iter()
-            .map(|partition| PartitionTask {
+        let mut tasks: Vec<PartitionTask> = Vec::with_capacity(selected_partitions.len());
+        for partition in selected_partitions {
+            validate_partition_name(&partition.name)?;
+            tasks.push(PartitionTask {
                 partition_name: partition.name.clone(),
                 device_path: partition.device_path.clone(),
                 image_path: None,
                 output_path: None,
                 size_bytes: partition.size_bytes,
-            })
-            .collect();
+            });
+        }
 
         create_plan(serial, transport, PartitionOperationKind::Erase, tasks)
     }
@@ -288,6 +299,24 @@ fn validate_adb_root_write_tasks(tasks: &[PartitionTask]) -> DomainResult<()> {
     }
 
     Ok(())
+}
+
+/// Partition names originate from device-reported tables (fastboot getvar or
+/// by-name listings). Anything outside the conservative partition charset is
+/// rejected before the name reaches a fastboot argument or an output path.
+pub fn validate_partition_name(partition_name: &str) -> DomainResult<()> {
+    let is_valid = !partition_name.is_empty()
+        && partition_name.len() <= 64
+        && partition_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+    if is_valid {
+        Ok(())
+    } else {
+        Err(DomainError::InvalidInput(format!(
+            "分区名包含非法字符：{partition_name}"
+        )))
+    }
 }
 
 pub fn is_high_risk_partition(partition_name: &str) -> bool {

@@ -147,6 +147,12 @@ pub struct DeviceSnapshotUpdate {
 #[derive(Clone)]
 pub struct DeviceRuntime {
     monitor: Arc<Mutex<DeviceMonitor>>,
+    // 独立的刷新互斥（try-lock 即跳过），对应 C# DeviceMonitorService.refreshGate：
+    // 手动刷新与自动心跳绝不并发跑 adb，也不占用全局操作门。
+    refresh_gate: Arc<Mutex<()>>,
+    // 连续自动发现失败计数：用于日志节流（首次 Warning、第三次 Error、
+    // 其余静默），对应 C# DeviceSessionService 的失败记录节奏。
+    automatic_refresh_failures: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl DeviceRuntime {
@@ -155,7 +161,31 @@ impl DeviceRuntime {
             monitor: Arc::new(Mutex::new(DeviceMonitor::new(
                 DeviceSnapshot::disconnected(),
             ))),
+            refresh_gate: Arc::new(Mutex::new(())),
+            automatic_refresh_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+
+    /// 自动发现失败的日志节流：返回本条失败是否应写日志及级别。
+    /// 首次失败 Warning、第三次 Error、其余静默；成功后计数清零。
+    fn note_automatic_refresh_failure(
+        &self,
+    ) -> (bool, OperationLogLevel) {
+        use std::sync::atomic::Ordering;
+        let count = self
+            .automatic_refresh_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        match count {
+            1 => (true, OperationLogLevel::Warning),
+            3 => (true, OperationLogLevel::Error),
+            _ => (false, OperationLogLevel::Warning),
+        }
+    }
+
+    fn reset_automatic_refresh_failures(&self) {
+        self.automatic_refresh_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn apply_snapshot(
@@ -173,6 +203,12 @@ impl DeviceRuntime {
             snapshot: monitor.snapshot().clone(),
             should_emit: matches!(result, MonitorRefreshResult::AppliedAndBroadcast),
         }
+    }
+
+    /// 尝试独占本轮设备刷新；已有一轮刷新在跑时返回 None（跳过本轮），
+    /// 与 C# `refreshGate.WaitAsync(0)` 的“不排队直接跳过”语义一致。
+    pub fn try_begin_refresh(&self) -> Option<std::sync::MutexGuard<'_, ()>> {
+        self.refresh_gate.lock().ok()
     }
 
     pub fn active_adb_serial(&self) -> Result<String, String> {
@@ -319,19 +355,64 @@ pub async fn automatic_device_refresh_guarded_with_log(
     coordinator: &OperationCoordinator,
     operation_log_store: Option<&OperationLogStore>,
 ) -> DeviceSnapshotUpdate {
-    let Ok(_idle) = coordinator.try_acquire_idle() else {
-        let operation = coordinator.state().await.kind;
-        let reason = device_refresh_block_reason(coordinator.admission_state(), operation)
-            .unwrap_or("denied:busy");
-        if let Some(log) = operation_log_store {
-            record_refresh_gate(log, "设备自动刷新", reason);
+    automatic_device_refresh_guarded_with_options(
+        runtime,
+        coordinator,
+        operation_log_store,
+        false,
+    )
+    .await
+}
+
+/// 补偿刷新（操作 busy→idle 沿触发）：即使设备身份未变也强制广播，
+/// 对应 C# `RefreshAutomaticallyAsync` 的 `forceFire: true`——刷写完成后
+/// 下游（分区表等）必须重读，不能因“序列号没变”被吞掉。
+pub async fn compensating_device_refresh_guarded_with_log(
+    runtime: &DeviceRuntime,
+    coordinator: &OperationCoordinator,
+    operation_log_store: Option<&OperationLogStore>,
+) -> DeviceSnapshotUpdate {
+    automatic_device_refresh_guarded_with_options(runtime, coordinator, operation_log_store, true)
+        .await
+}
+
+async fn automatic_device_refresh_guarded_with_options(
+    runtime: &DeviceRuntime,
+    coordinator: &OperationCoordinator,
+    operation_log_store: Option<&OperationLogStore>,
+    force_broadcast: bool,
+) -> DeviceSnapshotUpdate {
+    // 自动刷新绝不占用全局操作门（C# 参考只做只读 IsBusy 检查）：
+    // 占门会产生“每 3 秒随机拒绝用户操作”的假忙窗口，发现命令挂死时
+    // 还会演变为无法恢复的全局死锁。
+    let operation = if coordinator.is_busy() {
+        OperationKind::Flashing
+    } else {
+        OperationKind::Idle
+    };
+    if let Some(reason) = device_refresh_block_reason(coordinator.admission_state(), operation) {
+        // busy 期间的跳过是常态（C# 参考静默返回），不写日志防刷屏；
+        // 退出/终止态的跳过仍记录一次。
+        if reason != "denied:flashing" {
+            if let Some(log) = operation_log_store {
+                record_refresh_gate(log, "设备自动刷新", reason);
+            }
         }
         return DeviceSnapshotUpdate {
             snapshot: runtime.snapshot(),
             should_emit: false,
         };
+    }
+
+    // 独立刷新互斥：手动刷新/上一轮心跳在跑时直接跳过本轮，不并发跑 adb。
+    let Some(_refresh_guard) = runtime.try_begin_refresh() else {
+        return DeviceSnapshotUpdate {
+            snapshot: runtime.snapshot(),
+            should_emit: false,
+        };
     };
-    let result = discover_current_device_guarded_with(
+
+    let result = discover_current_device_guarded_with_log_policy(
         coordinator,
         operation_log_store,
         "设备自动刷新",
@@ -340,9 +421,21 @@ pub async fn automatic_device_refresh_guarded_with_log(
             let coordinator = coordinator.clone();
             move || discover_current_device_blocking_guarded(coordinator)
         },
+        || runtime.note_automatic_refresh_failure(),
     )
     .await;
-    project_automatic_discovery_result(runtime, result)
+    if result.is_ok() {
+        runtime.reset_automatic_refresh_failures();
+    }
+    let update = project_automatic_discovery_result(runtime, result);
+    if force_broadcast {
+        DeviceSnapshotUpdate {
+            should_emit: true,
+            ..update
+        }
+    } else {
+        update
+    }
 }
 
 fn project_automatic_discovery_result(
@@ -397,18 +490,6 @@ pub(crate) fn record_refresh_gate(
     );
 }
 
-fn record_refresh_failure(
-    operation_log_store: &OperationLogStore,
-    operation: &'static str,
-    reason: &'static str,
-) {
-    operation_log_store.write(
-        OperationLogLevel::Warning,
-        format!("{operation}失败（{reason}）。"),
-        None,
-    );
-}
-
 async fn discover_current_device_guarded_with<BeforeSpawn, Discover>(
     coordinator: &OperationCoordinator,
     operation_log_store: Option<&OperationLogStore>,
@@ -419,6 +500,34 @@ async fn discover_current_device_guarded_with<BeforeSpawn, Discover>(
 where
     BeforeSpawn: FnOnce() + Send + 'static,
     Discover: FnOnce() -> Result<DeviceSnapshot, DomainError> + Send + 'static,
+{
+    let result = discover_current_device_guarded_with_log_policy(
+        coordinator,
+        operation_log_store,
+        operation,
+        before_spawn,
+        discover,
+        || (true, OperationLogLevel::Warning),
+    )
+    .await;
+    result
+}
+
+/// `log_policy` 在非准入类失败时被调用，决定本条失败是否写日志及级别。
+/// 自动刷新传入节流策略（首次 Warning / 第三次 Error / 其余静默），
+/// 手动刷新保持每条都记。
+async fn discover_current_device_guarded_with_log_policy<BeforeSpawn, Discover, LogPolicy>(
+    coordinator: &OperationCoordinator,
+    operation_log_store: Option<&OperationLogStore>,
+    operation: &'static str,
+    before_spawn: BeforeSpawn,
+    discover: Discover,
+    log_policy: LogPolicy,
+) -> Result<DeviceSnapshot, DeviceDiscoveryFailure>
+where
+    BeforeSpawn: FnOnce() + Send + 'static,
+    Discover: FnOnce() -> Result<DeviceSnapshot, DomainError> + Send + 'static,
+    LogPolicy: FnOnce() -> (bool, OperationLogLevel),
 {
     let coordinator = coordinator.clone();
     let result = match task::spawn_blocking(move || {
@@ -440,7 +549,14 @@ where
         if let Some(reason) = error.admission_reason() {
             record_refresh_gate(log, operation, reason);
         } else {
-            record_refresh_failure(log, operation, error.log_reason());
+            let (should_log, level) = log_policy();
+            if should_log {
+                log.write(
+                    level,
+                    format!("{operation}失败（{}）。", error.log_reason()),
+                    None,
+                );
+            }
         }
     }
     result
@@ -457,6 +573,14 @@ fn discover_current_device_blocking() -> Result<DeviceSnapshot, DomainError> {
     let tools = PlatformTools::bundled();
     let discovery = PlatformDeviceDiscovery::new(tools.clone());
     let snapshot = DeviceSession::refresh(&discovery)?;
+    if snapshot.connection_state == DeviceConnectionState::FastbootConnected {
+        return enrich_fastboot_snapshot(snapshot, &tools, |command| {
+            match command.and_then(run_command) {
+                Ok(output) if output.exit_code == 0 => Ok(output.stdout),
+                Ok(_) | Err(_) => Ok(String::new()),
+            }
+        });
+    }
     if snapshot.connection_state != DeviceConnectionState::AdbConnected {
         return Ok(snapshot);
     }
@@ -475,6 +599,17 @@ fn discover_current_device_blocking_guarded(
         AdmissionCheckedExecutor::new(coordinator, OperationKind::Idle, SystemProcessExecutor);
     let discovery = PlatformDeviceDiscovery::with_executor(tools.clone(), executor.clone());
     let snapshot = DeviceSession::refresh(&discovery)?;
+    if snapshot.connection_state == DeviceConnectionState::FastbootConnected {
+        let executor_for_details = executor.clone();
+        return enrich_fastboot_snapshot(snapshot, &tools, move |command| {
+            match command.and_then(|command| executor_for_details.run(command)) {
+                Ok(output) if output.exit_code == 0 => Ok(output.stdout),
+                Ok(_) => Ok(String::new()),
+                Err(error) if admission_reason_from_domain_error(&error).is_some() => Err(error),
+                Err(_) => Ok(String::new()),
+            }
+        });
+    }
     if snapshot.connection_state != DeviceConnectionState::AdbConnected {
         return Ok(snapshot);
     }
@@ -489,6 +624,81 @@ fn discover_current_device_blocking_guarded(
         &executor,
     )?;
     Ok(enrich_adb_snapshot(snapshot, &properties, &battery))
+}
+
+/// Fastboot 设备信息增强：读取 current-slot / unlocked / product getvar，
+/// 可选变量失败降级为“未读取”，不让整个刷新抛错（对应 C#
+/// DeviceInfoService.ReadFastbootAsync）。
+fn enrich_fastboot_snapshot<E>(
+    mut snapshot: DeviceSnapshot,
+    tools: &PlatformTools,
+    mut read_variable: E,
+) -> Result<DeviceSnapshot, DomainError>
+where
+    E: FnMut(Result<ProcessCommand, DomainError>) -> Result<String, DomainError>,
+{
+    let transport = DeviceTransport::new(tools.clone());
+    let current_slot = extract_fastboot_variable_value(&read_variable(
+        transport.build_fastboot_getvar_command(&snapshot.serial, "current-slot"),
+    )?);
+    let unlocked = extract_fastboot_variable_value(&read_variable(
+        transport.build_fastboot_getvar_command(&snapshot.serial, "unlocked"),
+    )?);
+    let product = extract_fastboot_variable_value(&read_variable(
+        transport.build_fastboot_getvar_command(&snapshot.serial, "product"),
+    )?);
+
+    let mut details = nwflash_application::parse_adb_device_details(&snapshot.serial, "");
+    details = nwflash_application::apply_fastboot_device_details(
+        details,
+        &current_slot,
+        &unlocked,
+        &product,
+    );
+    if !is_unavailable_value(&details.model) {
+        snapshot.model = details.model;
+    }
+    if details.bootloader_state == "unlocked" || details.bootloader_state == "locked" {
+        let state_label = if details.bootloader_state == "unlocked" {
+            "已解锁"
+        } else {
+            "已锁定"
+        };
+        snapshot.connection_label = format!("{}（Bootloader {}）", snapshot.connection_label, state_label);
+        snapshot.android_version = format!(
+            "槽位 {}",
+            if details.active_slot.is_empty() || details.active_slot == "Not available" {
+                "--".to_string()
+            } else {
+                details.active_slot.clone()
+            }
+        );
+    }
+    Ok(snapshot)
+}
+
+/// 从 fastboot getvar 输出提取变量值（剥离 `(bootloader)` 前缀），
+/// 读取失败/空输出时返回空串，由上层按“未读取”降级。
+fn extract_fastboot_variable_value(output: &str) -> String {
+    for source_line in output.lines() {
+        let line = source_line.trim();
+        let line = line
+            .strip_prefix("(bootloader)")
+            .unwrap_or(line)
+            .trim_start();
+        let line = line.strip_prefix("INFO").unwrap_or(line).trim_start();
+        if let Some((_, value)) = line.rsplit_once(':') {
+            let value = value.trim();
+            if !value.is_empty() && !value.eq_ignore_ascii_case("yes command failed") {
+                return value.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn is_unavailable_value(value: &str) -> bool {
+    value.trim().is_empty() || matches!(value, "--" | "Not available" | "未检测到设备")
 }
 
 fn readonly_stdout(command: Result<ProcessCommand, DomainError>) -> String {
@@ -543,12 +753,10 @@ pub async fn device_refresh(
         record_refresh_gate(&state.operation_log_store, "设备刷新", reason);
         return Err(format!("设备刷新已跳过（{reason}）。"));
     }
-    let _idle = match state.operation_coordinator.try_acquire_idle() {
-        Ok(lease) => lease,
-        Err(error) => {
-            record_refresh_gate(&state.operation_log_store, "设备刷新", "denied:busy");
-            return Err(error.to_string());
-        }
+    // 手动刷新同样不占用全局操作门；用与自动刷新共享的独立互斥
+    // 防止并发跑 adb（C# refreshGate 对所有刷新入口生效）。
+    let Some(_refresh_guard) = state.device_runtime.try_begin_refresh() else {
+        return Err("设备刷新正在进行中，请稍后重试。".to_string());
     };
     let snapshot = discover_current_device_guarded_with(
         &state.operation_coordinator,
@@ -568,6 +776,11 @@ pub async fn device_refresh(
         state.operation_coordinator.is_busy(),
         DeviceRefreshMode::Manual,
     );
+    // The discovery helper above acquires the idle permit only for the
+    // duration of the discovery; releasing the refresh guard before the
+    // mirror reconcile lets an auto-mirror start take the operation permit
+    // instead of failing with InProgress under a still-held refresh lock.
+    drop(_refresh_guard);
     let _ = crate::commands::mirror::reconcile_after_device_update(
         &state.mirror_runtime,
         &state.device_runtime,
@@ -1044,5 +1257,59 @@ mod tests {
 
         assert_eq!(update.snapshot, original);
         assert!(!update.should_emit);
+    }
+
+    #[test]
+    fn refresh_gate_skips_a_second_concurrent_refresh_and_never_holds_the_operation_gate() {
+        // 独立刷新互斥（对应 C# refreshGate）：持锁期间第二轮直接跳过；
+        // 自动/手动刷新都不占用全局操作门——门在空闲时必须仍可被抢占。
+        let runtime = DeviceRuntime::new();
+        let first = runtime
+            .try_begin_refresh()
+            .expect("an idle runtime should admit a refresh");
+        assert!(
+            runtime.try_begin_refresh().is_none(),
+            "a second concurrent refresh must be skipped"
+        );
+
+        let coordinator = nwflash_application::OperationCoordinator::default();
+        let idle = coordinator.try_acquire_idle();
+        assert!(
+            idle.is_ok(),
+            "the operation gate must stay acquirable while a refresh is in flight"
+        );
+        drop(idle);
+        drop(first);
+        assert!(
+            runtime.try_begin_refresh().is_some(),
+            "releasing the refresh gate should admit the next refresh"
+        );
+    }
+
+    #[test]
+    fn automatic_refresh_failure_logging_is_throttled_to_first_and_third() {
+        // 日志节流（对应 C# 首次 Warning / 第三次 Error / 其余静默）。
+        let runtime = DeviceRuntime::new();
+        assert_eq!(
+            runtime.note_automatic_refresh_failure(),
+            (true, OperationLogLevel::Warning)
+        );
+        assert_eq!(
+            runtime.note_automatic_refresh_failure(),
+            (false, OperationLogLevel::Warning)
+        );
+        assert_eq!(
+            runtime.note_automatic_refresh_failure(),
+            (true, OperationLogLevel::Error)
+        );
+        assert_eq!(
+            runtime.note_automatic_refresh_failure(),
+            (false, OperationLogLevel::Warning)
+        );
+        runtime.reset_automatic_refresh_failures();
+        assert_eq!(
+            runtime.note_automatic_refresh_failure(),
+            (true, OperationLogLevel::Warning)
+        );
     }
 }

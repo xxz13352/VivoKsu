@@ -83,6 +83,10 @@ fn is_slot_based_mode_is_true_for_non_current_modes() {
 #[test]
 fn safe_flash_partition_filters_preloader_and_lk() {
     assert!(nwflash_domain::should_skip_safe_flash_partition("lk"));
+    assert!(nwflash_domain::should_skip_safe_flash_partition("LK_A"));
+    assert!(nwflash_domain::should_skip_safe_flash_partition("lk_b"));
+    assert!(nwflash_domain::should_skip_safe_flash_partition("lk2"));
+    assert!(!nwflash_domain::should_skip_safe_flash_partition("lksec"));
     assert!(nwflash_domain::should_skip_safe_flash_partition(
         "preloader"
     ));
