@@ -1,0 +1,24 @@
+{
+  "source_schema": 1,
+  "detail_available": false,
+  "detail_unavailable_reason": "legacy_client_no_step_data",
+  "run": {
+    "source_schema": 1,
+    "trace_ref": "v1:42",
+    "run_id": null,
+    "legacy_id": 42,
+    "user_id": 7,
+    "username": "alice",
+    "user_name": "Alice Zhang",
+    "operation_kind": "fastboot_flash",
+    "title": "Legacy VIVO line flash",
+    "outcome": "unknown",
+    "client_version": "1.3.0",
+    "started_at_ms": 1787490000000,
+    "ended_at_ms": null,
+    "duration_ms": null,
+    "trace_complete": false,
+    "trace_loss_reason": "legacy_client_no_step_data"
+  },
+  "events": []
+}

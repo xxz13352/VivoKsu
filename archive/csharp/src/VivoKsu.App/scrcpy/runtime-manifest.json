@@ -1,0 +1,88 @@
+{
+  "files": [
+    {
+      "path": "AdbWinApi.dll",
+      "sha256": "120bef587119c6cb926b86b9be90fdfbce38937588eae28cd91a94ce63c7b965",
+      "size": 108184
+    },
+    {
+      "path": "AdbWinUsbApi.dll",
+      "sha256": "6ca69a2ca0e31309c087d288f058977d421ad03500e4c3e1dbd981241a069c60",
+      "size": 73368
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "01c12035bf35af37241298dc7ad538eb2a07e5c940437bc6876feeaa9d1951d0",
+      "size": 11387
+    },
+    {
+      "path": "SDL3.dll",
+      "sha256": "f8bb1698f618949498ac517a0766eaa91972ecc818d80deb00634e197ee923cf",
+      "size": 22907350
+    },
+    {
+      "path": "adb.exe",
+      "sha256": "957e46b8615f7af5b7292a2ddabe98d2e61940c3fb2b0545756507f080613e71",
+      "size": 8485016
+    },
+    {
+      "path": "avcodec-62.dll",
+      "sha256": "893237890f744ea1eb447f56e8ac9d803deb48170bb456a11a10edf8c08a1eaa",
+      "size": 6607872
+    },
+    {
+      "path": "avformat-62.dll",
+      "sha256": "d46e9b99b27c743b8ae73eacfd76004fba218b65eba5a1ce9cdf494a7030a4a4",
+      "size": 724480
+    },
+    {
+      "path": "avutil-60.dll",
+      "sha256": "2933c61bd5c3f0c2bec22310de8b9a22969030fb1ee204eae1a4948e7599f59d",
+      "size": 1039360
+    },
+    {
+      "path": "disconnected.png",
+      "sha256": "e394873cd3e2cc3ab0cca6212b10ed2a8a0fad11a05675c8a9fa6f26f3ae12c0",
+      "size": 4703
+    },
+    {
+      "path": "libusb-1.0.dll",
+      "sha256": "5c0f67a78e47cb61cffff62876e35c10178525d0dcaf68c780d37592057397d3",
+      "size": 215741
+    },
+    {
+      "path": "open_a_terminal_here.bat",
+      "sha256": "843758795a84d0d035a7d277ad29cc1ff1702048b4b61ae74b9e3439ae683423",
+      "size": 5
+    },
+    {
+      "path": "scrcpy-noconsole.vbs",
+      "sha256": "3ccda94c161f18cef07c50d4d3c4913eb883d4b0fe3b939c35fae52784fb1d2b",
+      "size": 212
+    },
+    {
+      "path": "scrcpy-server",
+      "sha256": "84924bd564a1eb6089c872c7521f968058977f91f5ff02514a8c74aff3210f3a",
+      "size": 732226
+    },
+    {
+      "path": "scrcpy.exe",
+      "sha256": "894fd12f5b66fe73009c37c5e2520dde400730869722df11c1f144ac74deeeb2",
+      "size": 715950
+    },
+    {
+      "path": "scrcpy.png",
+      "sha256": "8e8ca237898faa16014cdd118396af53405b423f3db0508c50cc3edce08eb313",
+      "size": 6530
+    },
+    {
+      "path": "swresample-6.dll",
+      "sha256": "91c2595781581c61144262fc596dcdbdca7f72b6315d28e31becc67d35b2cf59",
+      "size": 139776
+    }
+  ],
+  "source_archive": "scrcpy-win64-v4.0.zip",
+  "source_archive_sha256": "75dbeb5b00e6f64292f26f70900ae55ca397786bdfb0b9bbeb481a0549047457",
+  "source_url": "https://github.com/Genymobile/scrcpy/releases/download/v4.0/scrcpy-win64-v4.0.zip",
+  "version": "4.0"
+}

@@ -1,0 +1,2367 @@
+use std::{
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc, Mutex, OnceLock, RwLock,
+    },
+    time::Duration,
+};
+
+use nwflash_application::{
+    HeartbeatInput, OperationAuthorization, OperationCoordinator, OperationCoordinatorError,
+    OperationIdleLease, OperationLogger, OperationPermissionGate, SessionIntegrityReason,
+    SessionLifecycle, SessionTerminalClass, SessionTerminalDecision, SessionTerminalReason,
+};
+use nwflash_domain::{DomainError, OperationKind};
+use nwflash_infrastructure::{
+    api_client::UpdateRequiredInfo, AuthService, CloudflareClient, CloudflareError,
+    HeartbeatAdmission, OperationLogStore, ProcessIdentity, SecretToken, VersionCheckResult,
+    VersionClient,
+};
+use serde::Serialize;
+use tauri::{async_runtime::spawn, AppHandle, Emitter, Manager, Wry};
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::time::sleep;
+
+mod command_timeout;
+mod commands;
+mod crash_uploader;
+mod exit_supervisor;
+mod integrity_reporter;
+mod release_probe;
+#[allow(dead_code)]
+mod session_capabilities;
+
+pub use release_probe::{
+    effective_capabilities_json, evaluate_protected_release_probe, ProtectedReleaseProbeAction,
+    ProtectedReleaseProbeReport, EFFECTIVE_CAPABILITIES_PROBE_ARGUMENT,
+    PROTECTED_RELEASE_PROBE_ARGUMENT,
+};
+
+#[doc(hidden)]
+pub use commands::mirror::{start_plan, MirrorRuntime};
+mod usage_reporter;
+
+#[cfg(not(test))]
+use exit_supervisor::ProductionProcessTerminator;
+use exit_supervisor::{
+    build_exit_supervisor_worker, create_exit_supervisor_control, ExitCleanup, ExitPhase,
+    ExitReason, ExitRequest, ExitSupervisorHandle, IntegrityReason, ProcessTerminator,
+};
+use integrity_reporter::IntegrityReporter;
+
+pub const APP_LABEL: &str = "奶蛙Flash";
+const SESSION_FORCE_EXIT_EVENT: &str = "session:force-exit";
+const SESSION_UPDATE_REQUIRED_EVENT: &str = "session:update-required";
+
+/// Mirrors `ServerOperationGate.AuthorizeTimeout` in the WPF build.  Server
+/// authorization is advisory: a ban answers "denied", but an unreachable or slow
+/// server must not block device work, and must never pin the single-permit
+/// operation gate while a request hangs.
+const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
+enum SessionLifecycleEvent {
+    ForceExit(String, String),
+    UpdateRequired(String, UpdateRequiredInfo),
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct AppStateTestTerminator {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl ProcessTerminator for AppStateTestTerminator {
+    fn terminate(&self, _exit_code: i32) {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub struct AppState {
+    pub client: CloudflareClient,
+    pub auth_service: AuthService,
+    pub version_client: VersionClient,
+    pub session_token: Arc<RwLock<Option<SecretToken>>>,
+    pub process_identity: ProcessIdentity,
+    pub usage_reporter: Arc<usage_reporter::UsageLogReporter>,
+    pub session_lifecycle: SessionLifecycle,
+    pub operation_coordinator: OperationCoordinator,
+    pub(crate) exit_supervisor: ExitSupervisorHandle,
+    pub device_runtime: commands::device::DeviceRuntime,
+    pub firmware_artifacts: commands::firmware::FirmwareArtifactRuntime,
+    pub firmware_extraction: commands::firmware::FirmwareExtractionRuntime,
+    pub payload_inspection: commands::firmware::PayloadInspectionRuntime,
+    pub remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime,
+    pub firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime,
+    pub(crate) firmware_progress: commands::firmware::FirmwareProgressRuntime,
+    pub prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
+    pub prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
+    pub partition_workspace: commands::partitions::PartitionWorkspaceRuntime,
+    pub mirror_runtime: commands::mirror::MirrorRuntime,
+    pub(crate) session_capabilities: Arc<session_capabilities::SessionCapabilityScope>,
+    pub(crate) protection: Arc<ProtectionContext>,
+    pub root_image_runtime: commands::root::RootImageRuntime,
+    pub root_patched_artifacts: commands::root::RootPatchedArtifactRuntime,
+    pub root_ota_runtime: commands::root_ota::RootOtaRuntime,
+    pub safe_flash_runtime: commands::safe_flash::SafeFlashRuntime,
+    pub(crate) session_events_rx: Mutex<Option<UnboundedReceiver<SessionLifecycleEvent>>>,
+    pub(crate) exit_supervisor_rx: Mutex<Option<UnboundedReceiver<()>>>,
+    pub(crate) operation_log_store: Arc<OperationLogStore>,
+}
+
+struct AppStateExitCleanup {
+    session_capabilities: Arc<session_capabilities::SessionCapabilityScope>,
+    mirror_runtime: commands::mirror::MirrorRuntime,
+    session_token: Arc<RwLock<Option<SecretToken>>>,
+    root_image_runtime: commands::root::RootImageRuntime,
+    root_patched_artifacts: commands::root::RootPatchedArtifactRuntime,
+    root_ota_runtime: commands::root_ota::RootOtaRuntime,
+    safe_flash_runtime: commands::safe_flash::SafeFlashRuntime,
+    firmware_artifacts: commands::firmware::FirmwareArtifactRuntime,
+    firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime,
+    prepared_firmware_artifact: commands::quick_flash::PreparedFirmwareArtifactRuntime,
+    prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime,
+}
+
+impl AppStateExitCleanup {
+    fn from_state(state: &AppState) -> Self {
+        Self {
+            session_capabilities: state.session_capabilities.clone(),
+            mirror_runtime: state.mirror_runtime.clone(),
+            session_token: state.session_token.clone(),
+            root_image_runtime: state.root_image_runtime.clone(),
+            root_patched_artifacts: state.root_patched_artifacts.clone(),
+            root_ota_runtime: state.root_ota_runtime.clone(),
+            safe_flash_runtime: state.safe_flash_runtime.clone(),
+            firmware_artifacts: state.firmware_artifacts.clone(),
+            firmware_output_directories: state.firmware_output_directories.clone(),
+            prepared_firmware_artifact: state.prepared_firmware_artifact.clone(),
+            prepared_dual_slot: state.prepared_dual_slot.clone(),
+        }
+    }
+
+    fn revoke_capabilities(&self) {
+        // 退出时先停投屏（对齐 C# OnExit 的 mirrorService.StopAsync）：scrcpy 是
+        // 独立 SDL 窗口子进程，主进程退出后不清理会残留窗口/进程。
+        self.mirror_runtime.stop();
+        let owned_roots = self.session_capabilities.invalidate(|| {
+            let mut owned_roots = self.root_image_runtime.clear_owned();
+            owned_roots.extend(self.root_patched_artifacts.clear_owned());
+            owned_roots.extend(self.root_ota_runtime.clear_owned());
+            owned_roots.extend(self.safe_flash_runtime.clear_owned());
+            owned_roots.extend(self.firmware_artifacts.clear_owned());
+            self.firmware_output_directories.clear();
+            self.prepared_firmware_artifact.clear();
+            self.prepared_dual_slot.clear();
+            owned_roots
+        });
+
+        for owned_root in owned_roots {
+            let _ = std::fs::remove_dir_all(owned_root);
+        }
+    }
+}
+
+impl ExitCleanup for AppStateExitCleanup {
+    fn revoke_and_clear(&self, _idle: &OperationIdleLease) {
+        self.revoke_capabilities();
+        let mut token = self
+            .session_token
+            .write()
+            .expect("session token lock should not be poisoned");
+        let _ = commands::auth::clear_session_token(&mut token);
+    }
+}
+
+trait EpochClock: Send + Sync {
+    fn unix_seconds(&self) -> i64;
+}
+
+/// 本地租约复检容忍的墙钟回退幅度。正常 NTP 校正只有秒级;超过该幅度的
+/// 回退只能来自人为拨钟,按篡改处理(租约时间判定不可信)。
+const MAX_WALL_CLOCK_REGRESSION_SECONDS: i64 = 120;
+
+struct SystemEpochClock;
+
+impl EpochClock for SystemEpochClock {
+    fn unix_seconds(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .min(i64::MAX as u64) as i64
+    }
+}
+
+/// 租约过期判定的单调回退锚点:记录本进程见过的最大墙钟时间,墙钟回退
+/// 超过容忍幅度时拒绝本地准入。防止"断网 + 拨回系统时间"无限延长
+/// 签名租约的 expires_at(审查发现:admit_local_operation 只依赖墙钟)。
+#[derive(Debug, Default)]
+struct ClockRegressionAnchor {
+    max_observed: AtomicI64,
+}
+
+impl ClockRegressionAnchor {
+    /// 观测一次墙钟时间。返回 `Err(之前见过的最大时间)` 当本次观测比
+    /// 锚点回退超过容忍幅度(首次观测不触发);此时调用方必须按完整性
+    /// 失败处理,且不得用回退后的时间做租约判定。`Ok` 返回本次可用
+    /// 的时间:正常前进时更新锚点;小幅回退(NTP 校正量级)沿用锚点
+    /// 中的历史最大值,让租约判定只朝"更早过期"方向收敛。
+    fn observe(&self, now: i64) -> Result<i64, i64> {
+        let previous_max = self.max_observed.load(Ordering::Acquire);
+        if previous_max == 0 {
+            self.max_observed.store(now, Ordering::Release);
+            return Ok(now);
+        }
+        if now + MAX_WALL_CLOCK_REGRESSION_SECONDS < previous_max {
+            return Err(previous_max);
+        }
+        if now > previous_max {
+            self.max_observed.store(now, Ordering::Release);
+            return Ok(now);
+        }
+        Ok(previous_max)
+    }
+}
+
+trait ProtectionTerminalSink: Send + Sync {
+    fn request(&self, request: exit_supervisor::ExitRequest);
+}
+
+struct SupervisorProtectionTerminalSink {
+    supervisor: Arc<OnceLock<ExitSupervisorHandle>>,
+}
+
+impl ProtectionTerminalSink for SupervisorProtectionTerminalSink {
+    fn request(&self, request: exit_supervisor::ExitRequest) {
+        if let Some(supervisor) = self.supervisor.get() {
+            let _ = supervisor.request(request);
+        }
+    }
+}
+
+struct RuntimeProtectionDependencies {
+    probe: Arc<dyn nwflash_protection::IntegrityProbe>,
+    clock: Arc<dyn EpochClock>,
+    terminal_sink: Option<Arc<dyn ProtectionTerminalSink>>,
+    allow_unavailable_probe: bool,
+}
+
+impl RuntimeProtectionDependencies {
+    fn production() -> Self {
+        Self {
+            probe: Arc::new(nwflash_protection::VmpIntegrityProbe),
+            clock: Arc::new(SystemEpochClock),
+            terminal_sink: None,
+            allow_unavailable_probe: cfg!(debug_assertions),
+        }
+    }
+
+    #[cfg(test)]
+    fn injected(
+        probe: Arc<dyn nwflash_protection::IntegrityProbe>,
+        clock: Arc<dyn EpochClock>,
+        terminal_sink: Arc<dyn ProtectionTerminalSink>,
+    ) -> Self {
+        Self {
+            probe,
+            clock,
+            terminal_sink: Some(terminal_sink),
+            allow_unavailable_probe: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalProtectionFailure {
+    NotAuthenticated,
+    StaleCapability,
+    SequenceMismatch,
+    LeaseExpired,
+    BuildIdMismatch,
+    ProcessNonceMismatch,
+    ImageIntegrity,
+    ProbeUnavailable,
+}
+
+struct ProtectionContext {
+    process_identity: ProcessIdentity,
+    capabilities: Arc<session_capabilities::SessionCapabilityScope>,
+    probe: Arc<dyn nwflash_protection::IntegrityProbe>,
+    clock: Arc<dyn EpochClock>,
+    clock_anchor: ClockRegressionAnchor,
+    terminal_sink: Arc<dyn ProtectionTerminalSink>,
+    allow_unavailable_probe: bool,
+}
+
+impl ProtectionContext {
+    fn new(
+        process_identity: ProcessIdentity,
+        capabilities: Arc<session_capabilities::SessionCapabilityScope>,
+        probe: Arc<dyn nwflash_protection::IntegrityProbe>,
+        clock: Arc<dyn EpochClock>,
+        terminal_sink: Arc<dyn ProtectionTerminalSink>,
+        allow_unavailable_probe: bool,
+    ) -> Self {
+        Self {
+            process_identity,
+            capabilities,
+            probe,
+            clock,
+            clock_anchor: ClockRegressionAnchor::default(),
+            terminal_sink,
+            allow_unavailable_probe,
+        }
+    }
+
+    fn verify_safe_point(
+        &self,
+        phase: exit_supervisor::ExitPhase,
+    ) -> Result<(), LocalProtectionFailure> {
+        self.verify_safe_point_for_generation(phase, None)
+    }
+
+    fn verify_safe_point_for_generation(
+        &self,
+        phase: exit_supervisor::ExitPhase,
+        generation: Option<String>,
+    ) -> Result<(), LocalProtectionFailure> {
+        use nwflash_protection::{ImageIntegrityFailure, ImageIntegrityStatus};
+
+        match nwflash_protection::verify_image_integrity(self.probe.as_ref()).status {
+            ImageIntegrityStatus::Valid => Ok(()),
+            ImageIntegrityStatus::ProbeUnavailable if self.allow_unavailable_probe => Ok(()),
+            ImageIntegrityStatus::ProbeUnavailable => {
+                self.request_integrity_exit(
+                    phase,
+                    exit_supervisor::IntegrityReason::ImageCrcInvalid,
+                    generation,
+                );
+                Err(LocalProtectionFailure::ProbeUnavailable)
+            }
+            ImageIntegrityStatus::Failure(
+                ImageIntegrityFailure::ImageNotProtected | ImageIntegrityFailure::InvalidImageCrc,
+            ) => {
+                self.request_integrity_exit(
+                    phase,
+                    exit_supervisor::IntegrityReason::ImageCrcInvalid,
+                    generation,
+                );
+                Err(LocalProtectionFailure::ImageIntegrity)
+            }
+        }
+    }
+
+    fn admit_operation(&self) -> Result<(), LocalProtectionFailure> {
+        use session_capabilities::LocalLeaseAdmissionFailure;
+
+        let generation = self
+            .capabilities
+            .security()
+            .ok()
+            .map(|security| security.generation);
+        // 墙钟先经回退锚点过滤:拨回系统时间超过容忍幅度时,租约的
+        // expires_at 判定不可信,按完整性失败立即退出,不做本地准入。
+        let now = match self.clock_anchor.observe(self.clock.unix_seconds()) {
+            Ok(now) => now,
+            Err(_regressed_to) => {
+                self.request_integrity_exit(
+                    exit_supervisor::ExitPhase::OperationAdmission,
+                    exit_supervisor::IntegrityReason::LeaseExpired,
+                    generation,
+                );
+                return Err(LocalProtectionFailure::LeaseExpired);
+            }
+        };
+        let admission = match self
+            .capabilities
+            .admit_local(&self.process_identity, now)
+        {
+            Ok(admission) => admission,
+            Err(LocalLeaseAdmissionFailure::Inactive) => {
+                return Err(LocalProtectionFailure::NotAuthenticated)
+            }
+            Err(LocalLeaseAdmissionFailure::StaleEpoch) => {
+                self.request_integrity_exit(
+                    exit_supervisor::ExitPhase::OperationAdmission,
+                    exit_supervisor::IntegrityReason::LeaseBindingInvalid,
+                    generation,
+                );
+                return Err(LocalProtectionFailure::StaleCapability);
+            }
+            Err(LocalLeaseAdmissionFailure::SequenceMismatch) => {
+                self.request_integrity_exit(
+                    exit_supervisor::ExitPhase::OperationAdmission,
+                    exit_supervisor::IntegrityReason::SequenceRollback,
+                    generation,
+                );
+                return Err(LocalProtectionFailure::SequenceMismatch);
+            }
+            Err(LocalLeaseAdmissionFailure::Expired) => {
+                self.request_integrity_exit(
+                    exit_supervisor::ExitPhase::OperationAdmission,
+                    exit_supervisor::IntegrityReason::LeaseExpired,
+                    generation,
+                );
+                return Err(LocalProtectionFailure::LeaseExpired);
+            }
+            Err(LocalLeaseAdmissionFailure::BuildIdMismatch) => {
+                self.request_integrity_exit(
+                    exit_supervisor::ExitPhase::OperationAdmission,
+                    exit_supervisor::IntegrityReason::LeaseBindingInvalid,
+                    generation,
+                );
+                return Err(LocalProtectionFailure::BuildIdMismatch);
+            }
+            Err(LocalLeaseAdmissionFailure::ProcessNonceMismatch) => {
+                self.request_integrity_exit(
+                    exit_supervisor::ExitPhase::OperationAdmission,
+                    exit_supervisor::IntegrityReason::LeaseBindingInvalid,
+                    generation,
+                );
+                return Err(LocalProtectionFailure::ProcessNonceMismatch);
+            }
+        };
+
+        self.verify_safe_point_for_generation(
+            exit_supervisor::ExitPhase::OperationAdmission,
+            Some(admission.generation),
+        )
+    }
+
+    fn request_integrity_exit(
+        &self,
+        phase: exit_supervisor::ExitPhase,
+        reason: exit_supervisor::IntegrityReason,
+        generation: Option<String>,
+    ) {
+        self.terminal_sink
+            .request(exit_supervisor::ExitRequest::immediate(
+                generation, phase, reason,
+            ));
+    }
+}
+
+#[derive(Clone)]
+struct LocalProtectionGate {
+    context: Arc<ProtectionContext>,
+}
+
+impl LocalProtectionGate {
+    fn new(context: Arc<ProtectionContext>) -> Self {
+        Self { context }
+    }
+}
+
+/// 本地分类仅供 UI/日志参考;运行时高危复检的判定唯一以保护圈内
+/// `requires_protected_recheck` 的结果为准(该叶子把分类表收进
+/// VMProtect 区域,防止圈外一行补丁把刷写类操作改走无租约复检通道)。
+/// 域枚举到保护圈映射失败(None)时恒取 true:分类必须 fail-closed。
+fn requires_high_risk_recheck(operation: OperationKind) -> bool {
+    match nwflash_protection::ProtectedOperationKind::from_domain(operation) {
+        Some(kind) => nwflash_protection::requires_protected_recheck(kind as u32),
+        None => true,
+    }
+}
+
+impl OperationPermissionGate for LocalProtectionGate {
+    fn authorize(
+        &self,
+        operation: OperationKind,
+        _title: String,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+        let authorization =
+            match requires_high_risk_recheck(operation).then(|| self.context.admit_operation()) {
+                None | Some(Ok(())) => OperationAuthorization::allow(),
+                Some(Err(LocalProtectionFailure::NotAuthenticated)) => {
+                    OperationAuthorization::deny("未登录，无法执行受控操作。")
+                }
+                Some(Err(_)) => {
+                    OperationAuthorization::deny("本地保护状态未通过校验，已拒绝本次操作。")
+                }
+            };
+        Box::pin(futures::future::ready(Ok(authorization)))
+    }
+}
+
+#[derive(Clone)]
+struct CompositeOperationPermissionGate {
+    local: Arc<LocalProtectionGate>,
+    remote: Arc<dyn OperationPermissionGate>,
+}
+
+impl CompositeOperationPermissionGate {
+    fn new(local: Arc<LocalProtectionGate>, remote: Arc<dyn OperationPermissionGate>) -> Self {
+        Self { local, remote }
+    }
+}
+
+impl OperationPermissionGate for CompositeOperationPermissionGate {
+    fn authorize(
+        &self,
+        operation: OperationKind,
+        title: String,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+        let local = self.local.clone();
+        let remote = self.remote.clone();
+        Box::pin(async move {
+            let local_authorization = local
+                .authorize(
+                    operation,
+                    title.clone(),
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await?;
+            if !local_authorization.allowed {
+                return Ok(local_authorization);
+            }
+            remote.authorize(operation, title, cancellation).await
+        })
+    }
+}
+
+/// The dedicated native E2E binary admits only the three file operations
+/// exercised by its deterministic executor.  This gate is absent from both
+/// production builds and Rust test builds, so it cannot weaken the shipped
+/// session/capability checks or silently change unit-test coverage.
+#[cfg(all(feature = "e2e", not(test)))]
+#[derive(Debug, Clone, Copy)]
+struct E2eFileOperationPermissionGate;
+
+#[cfg(all(feature = "e2e", not(test)))]
+impl OperationPermissionGate for E2eFileOperationPermissionGate {
+    fn authorize(
+        &self,
+        operation: OperationKind,
+        title: String,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+        let allowed = matches!(
+            (operation, title.as_str()),
+            (OperationKind::Transferring, "上传设备文件" | "下载设备文件")
+                | (OperationKind::Installing, "安装 APK")
+        );
+        Box::pin(futures::future::ready(Ok(if allowed {
+            OperationAuthorization::allow()
+        } else {
+            OperationAuthorization::deny("dedicated E2E gate only allows file transactions")
+        })))
+    }
+}
+
+#[derive(Clone)]
+struct CloudflareOperationPermissionGate {
+    client: CloudflareClient,
+    session_token: Arc<RwLock<Option<SecretToken>>>,
+    exit_supervisor: Arc<OnceLock<ExitSupervisorHandle>>,
+}
+
+impl CloudflareOperationPermissionGate {
+    fn new(
+        client: CloudflareClient,
+        session_token: Arc<RwLock<Option<SecretToken>>>,
+        exit_supervisor: Arc<OnceLock<ExitSupervisorHandle>>,
+    ) -> Self {
+        Self {
+            client,
+            session_token,
+            exit_supervisor,
+        }
+    }
+}
+
+/// Maps an authorization request failure onto a permission decision.
+///
+/// Server authorization is advisory (`ServerOperationGate` in the WPF build):
+/// an explicit 401 (session revoked), 426 (client too old), or local API
+/// integrity failure blocks the user. Network faults and 5xx remain advisory,
+/// because an unreachable server must not stop someone from flashing a phone
+/// that is already in hand; a banned account is still force-exited by the
+/// heartbeat within seconds.
+fn authorization_for_error(error: &CloudflareError) -> OperationAuthorization {
+    if matches!(error, CloudflareError::Integrity(_)) {
+        return OperationAuthorization::deny("网络完整性校验失败，已拒绝本次操作。");
+    }
+    match error.status_code() {
+        Some(401) => OperationAuthorization::deny("登录已失效，请联系管理员。"),
+        Some(426) => OperationAuthorization::deny(format!("需要更新 {APP_LABEL} 后才能继续使用。")),
+        _ => OperationAuthorization::allow(),
+    }
+}
+
+fn classify_integrity_failure(
+    failure: &nwflash_infrastructure::IntegrityFailure,
+) -> (ExitPhase, IntegrityReason) {
+    use nwflash_infrastructure::IntegrityFailure;
+
+    match failure {
+        IntegrityFailure::InvalidApiEndpoint
+        | IntegrityFailure::InvalidPinset
+        | IntegrityFailure::SpkiMismatch
+        | IntegrityFailure::PinsetSignature
+        | IntegrityFailure::PinsetHost
+        | IntegrityFailure::PinsetTime
+        | IntegrityFailure::PinsetRollback
+        | IntegrityFailure::PinsetCache
+        | IntegrityFailure::PinsetEnvelope
+        | IntegrityFailure::TlsConfiguration => {
+            (ExitPhase::PinValidation, IntegrityReason::PinMismatch)
+        }
+        IntegrityFailure::LeaseEnvelope
+        | IntegrityFailure::LeaseSignature
+        | IntegrityFailure::LeaseClaims => {
+            (ExitPhase::Heartbeat, IntegrityReason::LeaseSignatureInvalid)
+        }
+        IntegrityFailure::LeaseTime => (ExitPhase::Heartbeat, IntegrityReason::LeaseExpired),
+        IntegrityFailure::LeaseSequence => {
+            (ExitPhase::Heartbeat, IntegrityReason::SequenceRollback)
+        }
+        IntegrityFailure::MissingVerificationKey
+        | IntegrityFailure::InvalidVerificationKey
+        | IntegrityFailure::LeaseBinding
+        | IntegrityFailure::LeaseKind
+        | IntegrityFailure::MissingBuildIdentity
+        | IntegrityFailure::InvalidProcessIdentity
+        | IntegrityFailure::ProcessRandomness => {
+            (ExitPhase::Heartbeat, IntegrityReason::LeaseBindingInvalid)
+        }
+    }
+}
+
+pub(crate) fn exit_request_for_integrity_at(
+    generation: Option<String>,
+    failure: nwflash_infrastructure::IntegrityFailure,
+    context_phase: ExitPhase,
+) -> ExitRequest {
+    let (default_phase, reason) = classify_integrity_failure(&failure);
+    let phase = if default_phase == ExitPhase::PinValidation {
+        default_phase
+    } else {
+        context_phase
+    };
+    ExitRequest::immediate(generation, phase, reason)
+}
+
+fn authorization_for_error_and_exit(
+    error: &CloudflareError,
+    supervisor: Option<&ExitSupervisorHandle>,
+) -> OperationAuthorization {
+    if let CloudflareError::Integrity(failure) = error {
+        if let Some(supervisor) = supervisor {
+            let _ = supervisor.request(exit_request_for_integrity_at(
+                None,
+                failure.clone(),
+                ExitPhase::OperationAdmission,
+            ));
+        }
+    }
+    authorization_for_error(error)
+}
+
+/// 心跳空闲退出的「忙」判定:有任务(刷写/下载等)在协调器里执行时不计数、不退出。
+/// 必须用 `is_busy()`:它由许可通道派生——`run_async`/`run_shared_async` 在进入
+/// 授权往返之前就持有通道许可,因此授权等待期与共享通道操作运行期均为真,
+/// 终态收尾(许可归还)后复位。
+/// 不能用 `admission_state() == Running`——那是进程存活期默认值,恒为真,会让
+/// 空闲心跳 10 连败永不触发退出(用户决策 2026-09-12 修复,handoff §3.1)。
+fn operation_coordinator_busy_check(
+    coordinator: OperationCoordinator,
+) -> nwflash_application::OperationBusyCheck {
+    Arc::new(move || coordinator.is_busy())
+}
+
+fn exit_request_from_session_terminal(decision: SessionTerminalDecision) -> ExitRequest {
+    match decision.class {
+        SessionTerminalClass::Delayed(reason) => ExitRequest::delayed(
+            decision.generation,
+            match reason {
+                SessionTerminalReason::ServerForced => ExitReason::ServerForced,
+                SessionTerminalReason::SessionUnauthorized => ExitReason::SessionUnauthorized,
+                SessionTerminalReason::SessionConflict => ExitReason::SessionConflict,
+                SessionTerminalReason::UpdateRequired => ExitReason::UpdateRequired,
+                SessionTerminalReason::HeartbeatUnavailable => ExitReason::HeartbeatUnavailable,
+            },
+        ),
+        SessionTerminalClass::ImmediateIntegrity(reason) => {
+            let (phase, reason) = match reason {
+                SessionIntegrityReason::LeaseSignatureInvalid => {
+                    (ExitPhase::Heartbeat, IntegrityReason::LeaseSignatureInvalid)
+                }
+                SessionIntegrityReason::LeaseBindingInvalid => {
+                    (ExitPhase::Heartbeat, IntegrityReason::LeaseBindingInvalid)
+                }
+                SessionIntegrityReason::LeaseExpired => {
+                    (ExitPhase::Heartbeat, IntegrityReason::LeaseExpired)
+                }
+                SessionIntegrityReason::SequenceRollback => {
+                    (ExitPhase::Heartbeat, IntegrityReason::SequenceRollback)
+                }
+                SessionIntegrityReason::PinMismatch => {
+                    (ExitPhase::PinValidation, IntegrityReason::PinMismatch)
+                }
+            };
+            ExitRequest::immediate(Some(decision.generation), phase, reason)
+        }
+    }
+}
+
+impl OperationPermissionGate for CloudflareOperationPermissionGate {
+    fn authorize(
+        &self,
+        operation: OperationKind,
+        title: String,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+        let client = self.client.clone();
+        let session_token = self.session_token.clone();
+        let exit_supervisor = self.exit_supervisor.clone();
+        Box::pin(async move {
+            let token = session_token
+                .read()
+                .expect("session token lock should not be poisoned")
+                .as_ref()
+                .filter(|token| !token.is_empty())
+                .map(SecretToken::request_scope)
+                .ok_or_else(|| {
+                    DomainError::AuthorizationDenied("未登录，无法执行受控操作。".to_string())
+                })?;
+
+            let operation_label = format!("{operation:?}");
+            let request = client.authorize_operation(token.as_str(), &operation_label, &title);
+            // 授权等待可被取消（对应 C# 把取消令牌传入 AuthorizeAsync）：
+            // Stop 在授权期也能立即中断等待，而不是等它自然返回。
+            let cancelled = cancellation.cancelled();
+            tokio::pin!(cancelled);
+            match tokio::select! {
+                biased;
+                _ = &mut cancelled => return Err(DomainError::UserCancelled(
+                    "授权等待被用户取消。".to_string(),
+                )),
+                outcome = tokio::time::timeout(AUTHORIZE_TIMEOUT, request) => outcome,
+            } {
+                Ok(Ok(authorization)) => Ok(OperationAuthorization {
+                    allowed: authorization.allowed,
+                    reason: authorization.reason,
+                }),
+                // Only an explicit "this account may not do this" answer blocks the
+                // user; everything else defaults to allow.
+                Ok(Err(error)) => Ok(authorization_for_error_and_exit(
+                    &error,
+                    exit_supervisor.get(),
+                )),
+                // Black-holed request: never hold the global operation gate for it.
+                Err(_) => Ok(OperationAuthorization::allow()),
+            }
+        })
+    }
+}
+
+impl AppState {
+    pub(crate) async fn acquire_session_closeout(
+        &self,
+    ) -> Result<(OperationIdleLease, Option<String>), OperationCoordinatorError> {
+        let idle = self.operation_coordinator.try_acquire_idle()?;
+        let generation = self.session_lifecycle.generation().await;
+        Ok((idle, generation))
+    }
+
+    pub fn try_new() -> Result<Self, CloudflareError> {
+        let client = CloudflareClient::new_default()?;
+        Self::try_with_client(client)
+    }
+
+    #[cfg(not(test))]
+    pub fn new() -> Self {
+        Self::try_new().unwrap_or_else(|_| panic!("pinned API client initialization failed closed"))
+    }
+
+    #[cfg(test)]
+    pub fn new() -> Self {
+        Self::try_with_client(CloudflareClient::new_injected(
+            nwflash_infrastructure::DEFAULT_BASE_URL,
+            nwflash_infrastructure::DEFAULT_APP_VERSION,
+        ))
+        .expect("debug AppState identity should initialize")
+    }
+
+    fn try_with_client(client: CloudflareClient) -> Result<Self, CloudflareError> {
+        #[cfg(not(test))]
+        let terminator: Arc<dyn ProcessTerminator> = Arc::new(ProductionProcessTerminator);
+        #[cfg(test)]
+        let terminator: Arc<dyn ProcessTerminator> = Arc::new(AppStateTestTerminator::default());
+        Self::try_with_client_and_terminator(client, terminator)
+    }
+
+    fn try_with_client_and_terminator(
+        client: CloudflareClient,
+        terminator: Arc<dyn ProcessTerminator>,
+    ) -> Result<Self, CloudflareError> {
+        Self::try_with_client_and_runtime_protection(
+            client,
+            terminator,
+            RuntimeProtectionDependencies::production(),
+        )
+    }
+
+    fn try_with_client_and_runtime_protection(
+        client: CloudflareClient,
+        terminator: Arc<dyn exit_supervisor::ProcessTerminator>,
+        protection_dependencies: RuntimeProtectionDependencies,
+    ) -> Result<Self, CloudflareError> {
+        let (session_events_tx, session_events_rx) = unbounded_channel();
+        let process_identity = ProcessIdentity::generate().map_err(CloudflareError::Integrity)?;
+        let session_token = Arc::new(RwLock::new(None));
+        let session_capabilities = Arc::new(session_capabilities::SessionCapabilityScope::new());
+        let supervisor_slot = Arc::new(OnceLock::new());
+        let terminal_sink = protection_dependencies.terminal_sink.unwrap_or_else(|| {
+            Arc::new(SupervisorProtectionTerminalSink {
+                supervisor: supervisor_slot.clone(),
+            })
+        });
+        let protection = Arc::new(ProtectionContext::new(
+            process_identity.clone(),
+            session_capabilities.clone(),
+            protection_dependencies.probe,
+            protection_dependencies.clock,
+            terminal_sink,
+            protection_dependencies.allow_unavailable_probe,
+        ));
+        let operation_log_store = Arc::new(OperationLogStore::with_default_path(500));
+        operation_log_store.start_new_session();
+        let operation_log_buffer = Arc::new(OperationLogBuffer {
+            entries: operation_log_store.clone(),
+        });
+        let usage_reporter =
+            usage_reporter::UsageLogReporter::new(client.clone()).map_err(|_| {
+                CloudflareError::Transport(
+                    "本地 V1 使用日志兼容队列不可用，已拒绝启动。".to_string(),
+                )
+            })?;
+        let remote_permission_gate = Arc::new(CloudflareOperationPermissionGate::new(
+            client.clone(),
+            session_token.clone(),
+            supervisor_slot.clone(),
+        ));
+        let production_permission_gate: Arc<dyn OperationPermissionGate> =
+            Arc::new(CompositeOperationPermissionGate::new(
+                Arc::new(LocalProtectionGate::new(protection.clone())),
+                remote_permission_gate,
+            ));
+        #[cfg(any(not(feature = "e2e"), test))]
+        let permission_gate = production_permission_gate;
+        #[cfg(all(feature = "e2e", not(test)))]
+        let permission_gate: Arc<dyn OperationPermissionGate> = {
+            // Construct the production gate above so the E2E feature cannot
+            // accidentally bit-rot its graph; only the dedicated runtime uses
+            // this narrowly scoped deterministic replacement.
+            drop(production_permission_gate);
+            Arc::new(E2eFileOperationPermissionGate)
+        };
+        let operation_coordinator = OperationCoordinator::new(
+            None,
+            Some(permission_gate),
+            Some(usage_reporter.clone()),
+            Some(operation_log_buffer),
+            None,
+        );
+        let reporter = IntegrityReporter::new(
+            client.clone(),
+            session_token.clone(),
+            client.app_version().to_string(),
+            process_identity.build_id().to_string(),
+        );
+        let (exit_supervisor, exit_supervisor_rx) =
+            create_exit_supervisor_control(
+                operation_coordinator.clone(),
+                reporter,
+                Arc::clone(&terminator),
+            );
+        supervisor_slot.set(exit_supervisor.clone()).map_err(|_| {
+            CloudflareError::InvalidInput("exit supervisor already installed".into())
+        })?;
+        let _ = protection.verify_safe_point(ExitPhase::Startup);
+
+        let heartbeat_fn = {
+            let heartbeat_auth = AuthService::with_client(client.clone());
+            let heartbeat_identity = process_identity.clone();
+            let heartbeat_capabilities = session_capabilities.clone();
+            std::sync::Arc::new(move |input: HeartbeatInput| {
+                let heartbeat_auth = heartbeat_auth.clone();
+                let heartbeat_identity = heartbeat_identity.clone();
+                let heartbeat_capabilities = heartbeat_capabilities.clone();
+                let future: futures::future::BoxFuture<
+                    'static,
+                    Result<HeartbeatAdmission, CloudflareError>,
+                > = Box::pin(async move {
+                    let capability = if input.active {
+                        Some(heartbeat_capabilities.capture().map_err(|_| {
+                            CloudflareError::Integrity(
+                                nwflash_infrastructure::IntegrityFailure::LeaseBinding,
+                            )
+                        })?)
+                    } else {
+                        None
+                    };
+                    let previous_sequence = input.lease.sequence();
+                    let admission = heartbeat_auth
+                        .heartbeat(
+                            &input.token,
+                            &input.username,
+                            &heartbeat_identity,
+                            &input.lease,
+                            input.active,
+                        )
+                        .await?;
+                    if let (Some(capability), HeartbeatAdmission::Accepted(next)) =
+                        (capability, &admission)
+                    {
+                        heartbeat_capabilities
+                            .refresh_verified(capability, previous_sequence, next.clone())
+                            .map_err(|_| {
+                                CloudflareError::Integrity(
+                                    nwflash_infrastructure::IntegrityFailure::LeaseSequence,
+                                )
+                            })?;
+                    }
+                    Ok(admission)
+                });
+                future
+            })
+        };
+
+        let tx_force_exit = session_events_tx.clone();
+        let force_exit_terminator = terminator.clone();
+        let force_exit_log = operation_log_store.clone();
+        let on_force_exit = std::sync::Arc::new(move |generation: String, reason: String| {
+            // 服务端 force_exit = 唯一的进程终止路径:无条件立即执行。
+            // 不走 exit_supervisor(不等在途操作、无 goodbye/flush 收尾)、
+            // 不向前端发事件(没有弹窗),只落一条日志后直接终止进程。
+            force_exit_log.write(
+                nwflash_domain::OperationLogLevel::Warning,
+                format!("服务端强制退出: {reason}"),
+                None,
+            );
+            let _ = tx_force_exit.send(SessionLifecycleEvent::ForceExit(generation, reason));
+            force_exit_terminator.terminate(0);
+        });
+        let tx_update_required = session_events_tx.clone();
+        let on_update_required =
+            std::sync::Arc::new(move |generation: String, update: UpdateRequiredInfo| {
+                let _ = tx_update_required
+                    .send(SessionLifecycleEvent::UpdateRequired(generation, update));
+            });
+        let terminal_supervisor = exit_supervisor.clone();
+        let on_terminal = Arc::new(move |decision: SessionTerminalDecision| {
+            let request = exit_request_from_session_terminal(decision);
+            let _ = terminal_supervisor.request(request);
+        });
+
+        Ok(Self {
+            client: client.clone(),
+            auth_service: AuthService::with_client(client.clone()),
+            version_client: VersionClient::with_client(client.clone()),
+            session_token,
+            process_identity,
+            usage_reporter: usage_reporter.clone(),
+            operation_coordinator: operation_coordinator.clone(),
+            exit_supervisor,
+            device_runtime: commands::device::DeviceRuntime::new(),
+            firmware_artifacts: commands::firmware::FirmwareArtifactRuntime::new(),
+            firmware_extraction: commands::firmware::FirmwareExtractionRuntime::new(),
+            payload_inspection: commands::firmware::PayloadInspectionRuntime::new(),
+            remote_firmware_inspection: commands::firmware::RemoteFirmwareInspectionRuntime::new(),
+            firmware_output_directories: commands::firmware::FirmwareOutputDirectoryRuntime::new(),
+            firmware_progress: commands::firmware::FirmwareProgressRuntime::new(),
+            prepared_firmware_artifact:
+                commands::quick_flash::PreparedFirmwareArtifactRuntime::with_scope(
+                    session_capabilities.clone(),
+                ),
+            prepared_dual_slot: commands::quick_flash::PreparedDualSlotRuntime::with_scope(
+                session_capabilities.clone(),
+            ),
+            partition_workspace: commands::partitions::PartitionWorkspaceRuntime::new(),
+            mirror_runtime: commands::mirror::MirrorRuntime::new(),
+            session_capabilities: session_capabilities.clone(),
+            protection,
+            root_image_runtime: commands::root::RootImageRuntime::with_scope(
+                session_capabilities.clone(),
+            ),
+            root_patched_artifacts: commands::root::RootPatchedArtifactRuntime::with_scope(
+                session_capabilities.clone(),
+            ),
+            root_ota_runtime: commands::root_ota::RootOtaRuntime::with_scope(
+                session_capabilities.clone(),
+            ),
+            safe_flash_runtime: commands::safe_flash::SafeFlashRuntime::with_scope(
+                session_capabilities,
+            ),
+            session_events_rx: Mutex::new(Some(session_events_rx)),
+            exit_supervisor_rx: Mutex::new(Some(exit_supervisor_rx)),
+            operation_log_store,
+            session_lifecycle: SessionLifecycle::new_with_terminal(
+                heartbeat_fn,
+                Some(on_terminal),
+                Some(on_force_exit),
+                Some(on_update_required),
+                Some(operation_coordinator_busy_check(operation_coordinator.clone())),
+            ),
+        })
+    }
+
+    pub fn bind_operation_events(&self, app_handle: AppHandle<Wry>) {
+        let coordinator = self.operation_coordinator.clone();
+        let device_runtime = self.device_runtime.clone();
+        let operation_log_store = self.operation_log_store.clone();
+        spawn(async move {
+            let mut receiver = coordinator.subscribe_state();
+            let mut was_device_busy = false;
+            // A slow consumer can fall behind the broadcast backlog; Lagged
+            // is recoverable (the receiver stays live) but treated as a
+            // snapshot loss, while only Closed terminates the loop.
+            loop {
+                let snapshot = match receiver.recv().await {
+                    Ok(snapshot) => snapshot,
+                    Err(broadcast::error::RecvError::Lagged(_missed)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let is_busy = matches!(
+                    snapshot.kind,
+                    OperationKind::Discovering
+                        | OperationKind::Rebooting
+                        | OperationKind::Installing
+                        | OperationKind::Transferring
+                        | OperationKind::Hashing
+                        | OperationKind::Flashing
+                        | OperationKind::Mirroring
+                );
+
+                let _ = app_handle.emit(
+                    "operation:snapshot",
+                    OperationSnapshotPayload {
+                        kind: snapshot.kind,
+                        operation_id: snapshot.operation_id,
+                        title: snapshot.title,
+                        stage: snapshot.stage,
+                        progress: snapshot.progress,
+                        started_at: snapshot.started_at,
+                        is_cancellable: snapshot.is_cancellable,
+                        partition_task: snapshot.partition_task,
+                        partition_tasks: snapshot.partition_tasks,
+                        is_busy,
+                    },
+                );
+
+                if should_compensate_device_refresh(was_device_busy, is_busy) {
+                    let app_handle = app_handle.clone();
+                    let device_runtime = device_runtime.clone();
+                    let coordinator_for_refresh = coordinator.clone();
+                    let operation_log_store = operation_log_store.clone();
+                    spawn(async move {
+                        // 补偿刷新强制广播（C# forceFire）：即使设备身份未变，
+                        // 也要让前端在刷写/操作结束后重读分区表等下游状态。
+                        let update =
+                            commands::device::compensating_device_refresh_guarded_with_log(
+                                &device_runtime,
+                                &coordinator_for_refresh,
+                                Some(&operation_log_store),
+                            )
+                            .await;
+                        if update.should_emit {
+                            let _ = app_handle
+                                .emit("device:snapshot", device_runtime.overview_payload());
+                        }
+                    });
+                }
+                was_device_busy = is_busy;
+            }
+        });
+    }
+
+    pub fn start_exit_supervisor(&self) {
+        let receiver = self
+            .exit_supervisor_rx
+            .lock()
+            .expect("exit supervisor receiver lock should not be poisoned")
+            .take();
+        if let Some(receiver) = receiver {
+            let worker = build_exit_supervisor_worker(
+                &self.exit_supervisor,
+                receiver,
+                Arc::new(self.session_lifecycle.clone()),
+                Arc::new(usage_reporter::UsageExitCloseout::new(
+                    self.usage_reporter.clone(),
+                )),
+                Arc::new(AppStateExitCleanup::from_state(self)),
+            );
+            spawn(worker.run());
+        }
+    }
+
+    /// 启动崩溃补传后台任务(一次即走):延迟读上次 crash.log → 脱敏 →
+    /// 上报 /api/diagnostics/crash → 成功后清空本地文件。所有失败路径
+    /// 静默保留 crash.log 供下次启动重试,绝不阻塞启动。
+    pub fn start_crash_upload(&self) {
+        // 启动时本次会话尚未建立;崩溃归属于上次进程,session_id 用
+        // process_nonce 派生的稳定标识即可(服务端仅要求字符集/长度合法)。
+        let session_id = format!("crash-{}", self.process_identity.process_nonce());
+        spawn(crash_uploader::run_pending_crash_upload(
+            self.client.clone(),
+            self.session_token.clone(),
+            self.client.app_version().to_string(),
+            self.process_identity.build_id().to_string(),
+            session_id,
+            None,
+        ));
+    }
+
+    pub fn bind_firmware_progress_events(&self, app_handle: AppHandle<Wry>) {
+        self.firmware_progress.bind_sink(move |progress| {
+            let _ = app_handle.emit(commands::firmware::FIRMWARE_PROGRESS_EVENT, progress);
+        });
+    }
+
+    pub fn bind_session_events(&self, app_handle: AppHandle<Wry>) {
+        let mut receiver = {
+            let mut guard = self
+                .session_events_rx
+                .lock()
+                .expect("session event receiver lock should not be poisoned");
+            guard.take()
+        };
+
+        if let Some(mut receiver) = receiver.take() {
+            spawn(async move {
+                while let Some(event) = receiver.recv().await {
+                    match event {
+                        SessionLifecycleEvent::ForceExit(generation, reason) => {
+                            let _ = app_handle.emit(
+                                SESSION_FORCE_EXIT_EVENT,
+                                SessionForceExitPayload { generation, reason },
+                            );
+                        }
+                        SessionLifecycleEvent::UpdateRequired(generation, update) => {
+                            let _ = app_handle.emit(
+                                SESSION_UPDATE_REQUIRED_EVENT,
+                                SessionUpdateRequiredPayload::from_generation(generation, update),
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    pub fn bind_device_monitor(&self, app_handle: AppHandle<Wry>) {
+        let coordinator = self.operation_coordinator.clone();
+        let runtime = self.device_runtime.clone();
+        let mirror_runtime = self.mirror_runtime.clone();
+        let operation_log_store = self.operation_log_store.clone();
+        spawn(async move {
+            loop {
+                sleep(Duration::from_secs(3)).await;
+                let update = commands::device::automatic_device_refresh_guarded_with_log(
+                    &runtime,
+                    &coordinator,
+                    Some(&operation_log_store),
+                )
+                .await;
+                // 镜像 reconcile 只在设备身份变化时触发（对应 C# 挂在
+                // DeviceRefreshed 事件上、心跳身份未变不触发）：避免 scrcpy
+                // 异常退出后每 3 秒重启一次并刷操作快照事件。广播条件更宽
+                // （跳过期间欠下的那一次要还掉），两者必须分开判断。
+                if update.identity_changed {
+                    let _ = commands::mirror::reconcile_after_device_update(
+                        &mirror_runtime,
+                        &runtime,
+                        &coordinator,
+                    )
+                    .await;
+                }
+                if update.should_emit {
+                    let _ = app_handle.emit("device:snapshot", runtime.overview_payload());
+                }
+            }
+        });
+    }
+
+    pub(crate) fn revoke_root_capabilities(&self, _idle_lease: &OperationIdleLease) {
+        AppStateExitCleanup::from_state(self).revoke_capabilities();
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn should_compensate_device_refresh(was_device_busy: bool, is_device_busy: bool) -> bool {
+    was_device_busy && !is_device_busy
+}
+
+#[derive(Serialize, Clone)]
+struct SessionForceExitPayload {
+    generation: String,
+    reason: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SessionUpdateRequiredPayload {
+    generation: String,
+    message: String,
+    latest: Option<String>,
+    min_version: Option<String>,
+    download_url: Option<String>,
+}
+
+impl SessionUpdateRequiredPayload {
+    fn from_generation(generation: String, value: UpdateRequiredInfo) -> Self {
+        Self {
+            generation,
+            message: value.message,
+            latest: value.latest,
+            min_version: value.min_version,
+            download_url: value.download_url,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct VersionCheckResponse {
+    pub latest: Option<String>,
+    pub min_version: Option<String>,
+    pub download_url: Option<String>,
+    pub update_required: bool,
+    pub force_update: bool,
+}
+
+impl From<VersionCheckResult> for VersionCheckResponse {
+    fn from(value: VersionCheckResult) -> Self {
+        Self {
+            latest: value.latest,
+            min_version: value.min_version,
+            download_url: value.download_url,
+            update_required: value.update_required,
+            force_update: value.force_update,
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OperationSnapshotPayload {
+    kind: OperationKind,
+    operation_id: Option<String>,
+    title: String,
+    stage: String,
+    progress: Option<f64>,
+    started_at: Option<i64>,
+    is_cancellable: bool,
+    partition_task: Option<nwflash_domain::PartitionTaskSnapshot>,
+    partition_tasks: Vec<nwflash_domain::PartitionTaskSnapshot>,
+    is_busy: bool,
+}
+
+#[derive(Debug)]
+struct OperationLogBuffer {
+    entries: Arc<OperationLogStore>,
+}
+
+fn normalize_operation_log_message(
+    _level: nwflash_domain::OperationLogLevel,
+    message: String,
+) -> Option<String> {
+    let message = message.trim().to_string();
+    if message.is_empty() || message.starts_with("准备 VIVO 线刷") {
+        return None;
+    }
+
+    // 兜底:源头文案已全部去 OTA 字样,此处仅防御新代码漏网(残留 OTA 统一显示为固件)。
+    Some(message.replace("OTA", "固件"))
+}
+
+impl OperationLogger for OperationLogBuffer {
+    fn write(
+        &self,
+        level: nwflash_domain::OperationLogLevel,
+        message: String,
+        operation_id: Option<String>,
+    ) {
+        if let Some(message) = normalize_operation_log_message(level, message) {
+            self.entries.write(level, message, operation_id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod protection_context_tests {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use futures::{future::BoxFuture, FutureExt as _};
+    use nwflash_application::{
+        OperationAdmissionState, OperationAuthorization, OperationCoordinator,
+        OperationPermissionGate,
+    };
+    use nwflash_domain::{DomainError, OperationKind};
+    use nwflash_infrastructure::{CloudflareClient, ProcessIdentity};
+    use nwflash_protection::{
+        accept_signed_login_lease, IntegrityProbe, IntegritySignals, LeaseBinding, LeaseClaims,
+        LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
+    };
+    use rand_core::OsRng;
+
+    use super::{
+        exit_supervisor, session_capabilities::SessionCapabilityScope,
+        CompositeOperationPermissionGate, EpochClock, LocalProtectionGate, ProtectionContext,
+        ProtectionTerminalSink, RuntimeProtectionDependencies,
+    };
+
+    const NOW: i64 = 1_800_000_001;
+
+    #[derive(Clone)]
+    struct CountingProbe {
+        calls: Arc<AtomicUsize>,
+        signals: Arc<Mutex<IntegritySignals>>,
+    }
+
+    impl CountingProbe {
+        fn valid() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                signals: Arc::new(Mutex::new(IntegritySignals::available(
+                    true, true, false, false,
+                ))),
+            }
+        }
+
+        fn set(&self, signals: IntegritySignals) {
+            *self.signals.lock().unwrap() = signals;
+        }
+
+        fn count(&self) -> usize {
+            self.calls.load(Ordering::Acquire)
+        }
+    }
+
+    impl IntegrityProbe for CountingProbe {
+        fn signals(&self) -> IntegritySignals {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            *self.signals.lock().unwrap()
+        }
+    }
+
+    struct FixedClock(i64);
+
+    impl EpochClock for FixedClock {
+        fn unix_seconds(&self) -> i64 {
+            self.0
+        }
+    }
+
+    /// 可变墙钟：模拟系统时间被拨回（时钟回拨绕过测试）。
+    struct MutableClock(Arc<Mutex<i64>>);
+
+    impl MutableClock {
+        fn new(now: i64) -> Self {
+            Self(Arc::new(Mutex::new(now)))
+        }
+
+        fn set(&self, now: i64) {
+            *self.0.lock().unwrap() = now;
+        }
+    }
+
+    impl EpochClock for MutableClock {
+        fn unix_seconds(&self) -> i64 {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingTerminalSink {
+        requests: Mutex<Vec<exit_supervisor::ExitRequest>>,
+    }
+
+    impl ProtectionTerminalSink for RecordingTerminalSink {
+        fn request(&self, request: exit_supervisor::ExitRequest) {
+            self.requests.lock().unwrap().push(request);
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRemoteGate {
+        calls: AtomicUsize,
+    }
+
+    impl OperationPermissionGate for RecordingRemoteGate {
+        fn authorize(
+            &self,
+            _operation: OperationKind,
+            _title: String,
+            _cancellation: tokio_util::sync::CancellationToken,
+        ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            futures::future::ready(Ok(OperationAuthorization::allow())).boxed()
+        }
+    }
+
+    fn verified_lease(expires_at: i64) -> SessionLease {
+        verified_lease_bound("debug-build", "process-nonce", expires_at)
+    }
+
+    fn verified_lease_bound(build_id: &str, process_nonce: &str, expires_at: i64) -> SessionLease {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let claims = LeaseClaims {
+            version: 1,
+            kind: LeaseKind::Login,
+            username: "user".to_string(),
+            token_sha256: TokenDigest::sha256(b"token"),
+            client_version: "1.0.1".to_string(),
+            build_id: build_id.to_string(),
+            process_nonce: process_nonce.to_string(),
+            session_id: "signed-session".to_string(),
+            sequence: 1,
+            issued_at: NOW - 1,
+            expires_at,
+        };
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        let signature = URL_SAFE_NO_PAD.encode(signing_key.sign(payload.as_bytes()).to_bytes());
+        let envelope = SignedEnvelope {
+            lease_payload: payload,
+            lease_signature: signature,
+        };
+        accept_signed_login_lease(
+            &envelope,
+            &signing_key.verifying_key(),
+            &LeaseBinding::new(
+                "user",
+                TokenDigest::sha256(b"token"),
+                "1.0.1",
+                build_id,
+                process_nonce,
+                "signed-session",
+            ),
+            NOW,
+        )
+        .unwrap()
+    }
+
+    fn context(
+        scope: Arc<SessionCapabilityScope>,
+        probe: Arc<CountingProbe>,
+        sink: Arc<RecordingTerminalSink>,
+        now: i64,
+    ) -> Arc<ProtectionContext> {
+        Arc::new(ProtectionContext::new(
+            ProcessIdentity::new_injected("debug-build", "process-nonce").unwrap(),
+            scope,
+            probe,
+            Arc::new(FixedClock(now)),
+            sink,
+            false,
+        ))
+    }
+
+    #[test]
+    fn startup_construction_and_each_explicit_session_safe_point_probe_exactly_once() {
+        let probe = Arc::new(CountingProbe::valid());
+        let sink = Arc::new(RecordingTerminalSink::default());
+        let dependencies = RuntimeProtectionDependencies::injected(
+            probe.clone(),
+            Arc::new(FixedClock(NOW)),
+            sink.clone(),
+        );
+        let state = super::AppState::try_with_client_and_runtime_protection(
+            CloudflareClient::new_injected("https://unit.test", "1.0.1"),
+            Arc::new(super::AppStateTestTerminator::default()),
+            dependencies,
+        )
+        .unwrap();
+
+        assert_eq!(probe.count(), 1, "construction is the startup safe point");
+        state
+            .protection
+            .verify_safe_point(exit_supervisor::ExitPhase::Login)
+            .unwrap();
+        state
+            .protection
+            .verify_safe_point(exit_supervisor::ExitPhase::SessionRestore)
+            .unwrap();
+        assert_eq!(probe.count(), 3);
+        assert!(sink.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_crc_routes_the_exact_safe_point_through_the_terminal_sink() {
+        let probe = Arc::new(CountingProbe::valid());
+        probe.set(IntegritySignals::available(true, false, false, false));
+        let sink = Arc::new(RecordingTerminalSink::default());
+        let context = context(
+            Arc::new(SessionCapabilityScope::new()),
+            probe.clone(),
+            sink.clone(),
+            NOW,
+        );
+
+        assert!(context
+            .verify_safe_point(exit_supervisor::ExitPhase::SessionRestore)
+            .is_err());
+
+        assert_eq!(probe.count(), 1);
+        let requests = sink.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].phase(),
+            exit_supervisor::ExitPhase::SessionRestore
+        );
+        assert_eq!(
+            requests[0].mode(),
+            exit_supervisor::ExitMode::ImmediateTamper
+        );
+        assert_eq!(
+            requests[0].reason(),
+            exit_supervisor::ExitReason::Integrity(
+                exit_supervisor::IntegrityReason::ImageCrcInvalid
+            )
+        );
+    }
+
+    #[test]
+    fn invalid_startup_crc_closes_real_supervisor_admission_before_state_is_returned() {
+        let probe = Arc::new(CountingProbe::valid());
+        probe.set(IntegritySignals::available(true, false, false, false));
+        let state = super::AppState::try_with_client_and_runtime_protection(
+            CloudflareClient::new_injected("https://unit.test", "1.0.1"),
+            Arc::new(super::AppStateTestTerminator::default()),
+            RuntimeProtectionDependencies {
+                probe,
+                clock: Arc::new(FixedClock(NOW)),
+                terminal_sink: None,
+                allow_unavailable_probe: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.operation_coordinator.admission_state(),
+            OperationAdmissionState::ExitPending
+        );
+        assert!(state.operation_coordinator.try_acquire_idle().is_err());
+    }
+
+    #[tokio::test]
+    async fn high_risk_admission_probes_once_before_progress_loops_and_non_high_risk_skips_probe() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        scope.activate_verified(
+            "generation-one".to_string(),
+            "user".to_string(),
+            verified_lease(NOW + 300),
+        );
+        let probe = Arc::new(CountingProbe::valid());
+        let sink = Arc::new(RecordingTerminalSink::default());
+        let local = Arc::new(LocalProtectionGate::new(context(
+            scope,
+            probe.clone(),
+            sink,
+            NOW,
+        )));
+        let remote = Arc::new(RecordingRemoteGate::default());
+        let gate = Arc::new(CompositeOperationPermissionGate::new(local, remote.clone()));
+        let coordinator = OperationCoordinator::new(None, Some(gate), None, None, None);
+
+        coordinator
+            .run_async(OperationKind::Flashing, "write-loop", |ctx, _| async move {
+                for index in 0..64 {
+                    ctx.report_stage(format!("write-{index}"));
+                    ctx.report_progress(index as f64 / 64.0);
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(probe.count(), 1);
+        assert_eq!(remote.calls.load(Ordering::Acquire), 1);
+
+        coordinator
+            .run_async(OperationKind::Hashing, "read-only", |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(probe.count(), 1);
+        assert_eq!(remote.calls.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn expired_local_admission_denies_before_remote_or_operation_closure() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        scope.activate_verified(
+            "generation-expired".to_string(),
+            "user".to_string(),
+            verified_lease(NOW + 1),
+        );
+        let probe = Arc::new(CountingProbe::valid());
+        let sink = Arc::new(RecordingTerminalSink::default());
+        let local = Arc::new(LocalProtectionGate::new(context(
+            scope,
+            probe.clone(),
+            sink.clone(),
+            NOW + 1,
+        )));
+        let remote = Arc::new(RecordingRemoteGate::default());
+        let gate = Arc::new(CompositeOperationPermissionGate::new(local, remote.clone()));
+        let coordinator = OperationCoordinator::new(None, Some(gate), None, None, None);
+        let closure_called = Arc::new(AtomicBool::new(false));
+        let closure_called_for_run = closure_called.clone();
+
+        let result = coordinator
+            .run_async(
+                OperationKind::Installing,
+                "expired",
+                move |_, _| async move {
+                    closure_called_for_run.store(true, Ordering::Release);
+                    Ok(())
+                },
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!closure_called.load(Ordering::Acquire));
+        assert_eq!(remote.calls.load(Ordering::Acquire), 0);
+        assert_eq!(probe.count(), 0, "lease denial precedes the CRC safe point");
+        let requests = sink.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].phase(),
+            exit_supervisor::ExitPhase::OperationAdmission
+        );
+        assert_eq!(
+            requests[0].reason(),
+            exit_supervisor::ExitReason::Integrity(exit_supervisor::IntegrityReason::LeaseExpired)
+        );
+        drop(requests);
+        assert!(coordinator.try_acquire_idle().is_ok());
+    }
+
+    #[test]
+    fn wall_clock_regression_beyond_tolerance_rejects_local_admission_as_integrity_failure() {
+        // 时钟回拨绕过审查发现:断网 + 把系统时间拨回可以无限推迟租约
+        // expires_at 判定。锚点观测到超过容忍幅度的回退时必须按完整性
+        // 失败处理(立即退出,不做租约判定),小幅 NTP 级回退则沿用历史
+        // 最大时间,租约判定只朝"更早过期"收敛。
+        let anchor = super::ClockRegressionAnchor::default();
+
+        // 首次观测建立锚点。
+        assert_eq!(anchor.observe(1_800_000_100), Ok(1_800_000_100));
+        // 小幅回退(NTP 校正量级):沿用锚点,不判失败。
+        assert_eq!(anchor.observe(1_800_000_030), Ok(1_800_000_100));
+        // 前进:锚点跟随。
+        assert_eq!(anchor.observe(1_800_000_200), Ok(1_800_000_200));
+        // 拨回 2 小时:超过容忍幅度,拒绝并给出历史最大时间。
+        assert_eq!(
+           anchor.observe(1_799_992_900),
+            Err(1_800_000_200)
+        );
+    }
+
+    #[tokio::test]
+    async fn clock_rollback_cannot_extend_a_signed_lease_through_the_local_gate() {
+        let scope = Arc::new(SessionCapabilityScope::new());
+        scope.activate_verified(
+            "generation-rollback".to_string(),
+            "user".to_string(),
+            verified_lease(NOW + 300),
+        );
+        let probe = Arc::new(CountingProbe::valid());
+        let sink = Arc::new(RecordingTerminalSink::default());
+        let clock = Arc::new(MutableClock::new(NOW));
+        let context = Arc::new(ProtectionContext::new(
+            ProcessIdentity::new_injected("debug-build", "process-nonce").unwrap(),
+            scope,
+            probe.clone(),
+            clock.clone(),
+            sink.clone(),
+            false,
+        ));
+        let local = Arc::new(LocalProtectionGate::new(context));
+        let remote = Arc::new(RecordingRemoteGate::default());
+        let gate = Arc::new(CompositeOperationPermissionGate::new(local, remote.clone()));
+        let coordinator = OperationCoordinator::new(None, Some(gate), None, None, None);
+
+        // 第一次高危操作在正常时钟下准入通过,并建立回退锚点。
+        coordinator
+            .run_async(OperationKind::Installing, "normal", |_, _| async { Ok(()) })
+            .await
+            .unwrap();
+
+        // 把墙钟拨回 2 小时后,同样的高危操作必须被拒绝且请求完整性退出。
+        clock.set(NOW - 7_200);
+        let closure_called = Arc::new(AtomicBool::new(false));
+        let closure_called_for_run = closure_called.clone();
+        let result = coordinator
+            .run_async(
+                OperationKind::Installing,
+                "rolled-back",
+                move |_, _| async move {
+                    closure_called_for_run.store(true, Ordering::Release);
+                    Ok(())
+                },
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!closure_called.load(Ordering::Acquire));
+        let requests = sink.requests.lock().unwrap();
+        assert!(!requests.is_empty());
+        assert_eq!(
+            requests[requests.len() - 1].reason(),
+            exit_supervisor::ExitReason::Integrity(exit_supervisor::IntegrityReason::LeaseExpired)
+        );
+    }
+
+    #[tokio::test]
+    async fn inactive_local_admission_uses_logged_out_denial_without_probe_or_terminal_exit() {
+        let probe = Arc::new(CountingProbe::valid());
+        let sink = Arc::new(RecordingTerminalSink::default());
+        let local = Arc::new(LocalProtectionGate::new(context(
+            Arc::new(SessionCapabilityScope::new()),
+            probe.clone(),
+            sink.clone(),
+            NOW,
+        )));
+        let remote = Arc::new(RecordingRemoteGate::default());
+        let authorization = CompositeOperationPermissionGate::new(local, remote.clone())
+            .authorize(
+                OperationKind::Flashing,
+                "logged-out".to_string(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!authorization.allowed);
+        assert!(authorization
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("未登录")));
+        assert_eq!(probe.count(), 0);
+        assert_eq!(remote.calls.load(Ordering::Acquire), 0);
+        assert!(sink.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_admission_routes_through_the_real_supervisor_and_closes_future_work() {
+        let probe = Arc::new(CountingProbe::valid());
+        let state = super::AppState::try_with_client_and_runtime_protection(
+            CloudflareClient::new_injected("https://unit.test", "1.0.1"),
+            Arc::new(super::AppStateTestTerminator::default()),
+            RuntimeProtectionDependencies {
+                probe: probe.clone(),
+                clock: Arc::new(FixedClock(NOW + 1)),
+                terminal_sink: None,
+                allow_unavailable_probe: false,
+            },
+        )
+        .unwrap();
+        let generation = "generation-expired".to_string();
+        state
+            .exit_supervisor
+            .install_generation(generation.clone())
+            .unwrap();
+        state.session_capabilities.activate_verified(
+            generation,
+            "user".to_string(),
+            verified_lease_bound(
+                state.process_identity.build_id(),
+                state.process_identity.process_nonce(),
+                NOW + 1,
+            ),
+        );
+        let closure_called = Arc::new(AtomicBool::new(false));
+        let closure_called_for_run = closure_called.clone();
+
+        let result = state
+            .operation_coordinator
+            .run_async(
+                OperationKind::Installing,
+                "expired",
+                move |_, _| async move {
+                    closure_called_for_run.store(true, Ordering::Release);
+                    Ok(())
+                },
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!closure_called.load(Ordering::Acquire));
+        assert_eq!(probe.count(), 1, "only startup CRC ran before lease denial");
+        assert_eq!(
+            state.operation_coordinator.admission_state(),
+            OperationAdmissionState::ExitPending
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod device_monitor_tests {
+    use std::{
+        fs,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        authorization_for_error, authorization_for_error_and_exit,
+        should_compensate_device_refresh, AppState, AppStateExitCleanup, OperationLogBuffer,
+        SessionForceExitPayload, SessionUpdateRequiredPayload,
+    };
+    use crate::exit_supervisor::{
+        ExitCleanup, ExitPhase, ExitRequest, ExitRequestDisposition, IntegrityReason,
+        ProcessTerminator,
+    };
+    use futures::future::BoxFuture;
+    use nwflash_application::{
+        OperationAuthorization, OperationCoordinator, OperationLogger, OperationPermissionGate,
+        SERVER_FORCE_EXIT_MESSAGE,
+    };
+    use nwflash_domain::{DomainError, OperationKind, OperationLogLevel};
+    use nwflash_infrastructure::{CloudflareError, IntegrityFailure};
+
+    struct DenyAllOperations;
+
+    #[derive(Default)]
+    struct RecordingTerminator {
+        calls: std::sync::atomic::AtomicUsize,
+        called: tokio::sync::Notify,
+    }
+
+    impl ProcessTerminator for RecordingTerminator {
+        fn terminate(&self, _exit_code: i32) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.called.notify_waiters();
+        }
+    }
+
+    impl OperationPermissionGate for DenyAllOperations {
+        fn authorize(
+            &self,
+            _operation: OperationKind,
+            _title: String,
+            _cancellation: tokio_util::sync::CancellationToken,
+        ) -> BoxFuture<'static, Result<OperationAuthorization, DomainError>> {
+            Box::pin(async { Ok(OperationAuthorization::deny("测试授权拒绝")) })
+        }
+    }
+
+    #[test]
+    fn operation_completion_requests_one_compensating_device_refresh() {
+        assert!(should_compensate_device_refresh(true, false));
+        assert!(!should_compensate_device_refresh(false, false));
+        assert!(!should_compensate_device_refresh(true, true));
+    }
+
+    #[test]
+    fn api_integrity_failure_never_falls_through_the_advisory_allow_path() {
+        let authorization =
+            authorization_for_error(&CloudflareError::Integrity(IntegrityFailure::SpkiMismatch));
+
+        assert!(!authorization.allowed);
+        assert!(authorization
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("完整性")));
+    }
+
+    #[test]
+    fn operation_permission_integrity_failure_closes_admission_before_returning_denial() {
+        let state = AppState::new();
+
+        let authorization = authorization_for_error_and_exit(
+            &CloudflareError::Integrity(IntegrityFailure::SpkiMismatch),
+            Some(&state.exit_supervisor),
+        );
+
+        assert!(!authorization.allowed);
+        assert_eq!(
+            state.operation_coordinator.admission_state(),
+            nwflash_application::OperationAdmissionState::ExitPending
+        );
+    }
+
+    #[test]
+    fn app_state_test_terminator_returns_and_channel_failure_coalesces() {
+        let state = AppState::new();
+        drop(
+            state
+                .exit_supervisor_rx
+                .lock()
+                .expect("receiver lock should not be poisoned")
+                .take(),
+        );
+
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::PinValidation,
+                IntegrityReason::PinMismatch,
+            )),
+            ExitRequestDisposition::ChannelFailed
+        );
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::PinValidation,
+                IntegrityReason::PinMismatch,
+            )),
+            ExitRequestDisposition::AlreadyTerminating
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_cleanup_invalidates_capability_before_waiting_to_zeroize_token() {
+        let state = AppState::new();
+        state.session_capabilities.activate();
+        *state.session_token.write().unwrap() = Some(nwflash_infrastructure::SecretToken::new(
+            "cleanup-token".to_string(),
+        ));
+        let idle = state
+            .operation_coordinator
+            .try_acquire_idle()
+            .expect("idle state should provide the cleanup lease");
+        let cleanup = AppStateExitCleanup::from_state(&state);
+        let token_read = state.session_token.read().unwrap();
+        let capabilities = state.session_capabilities.clone();
+        let (invalidated_tx, invalidated_rx) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || loop {
+            if capabilities.capture().is_err() {
+                invalidated_tx.send(()).unwrap();
+                break;
+            }
+            std::thread::yield_now();
+        });
+        let cleanup_thread = std::thread::spawn(move || cleanup.revoke_and_clear(&idle));
+
+        let invalidated = invalidated_rx.recv_timeout(std::time::Duration::from_secs(1));
+        if invalidated.is_err() {
+            drop(token_read);
+            cleanup_thread.join().unwrap();
+            observer.join().unwrap();
+            panic!("capability invalidation waited behind the token write lock");
+        }
+        assert!(token_read.is_some());
+        drop(token_read);
+        cleanup_thread.join().unwrap();
+        observer.join().unwrap();
+
+        assert!(state.session_capabilities.capture().is_err());
+        assert!(state.session_token.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn session_cleanup_invalidates_firmware_output_directory_capabilities() {
+        let state = AppState::new();
+        let selection = state
+            .firmware_output_directories
+            .replace(std::path::PathBuf::from(r"C:\private\firmware-output"));
+        assert!(state
+            .firmware_output_directories
+            .resolve(&selection.selection_id)
+            .is_ok());
+
+        AppStateExitCleanup::from_state(&state).revoke_capabilities();
+
+        assert!(state
+            .firmware_output_directories
+            .resolve(&selection.selection_id)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn setup_started_receiver_handles_terminal_request_without_react_authority() {
+        let terminator = Arc::new(RecordingTerminator::default());
+        let state = AppState::try_with_client_and_terminator(
+            nwflash_infrastructure::CloudflareClient::new_injected(
+                "http://127.0.0.1:1",
+                nwflash_infrastructure::DEFAULT_APP_VERSION,
+            ),
+            terminator.clone(),
+        )
+        .unwrap();
+        state.start_exit_supervisor();
+        let called = terminator.called.notified();
+
+        assert_eq!(
+            state.exit_supervisor.request(ExitRequest::immediate(
+                None,
+                ExitPhase::Startup,
+                IntegrityReason::ImageCrcInvalid,
+            )),
+            ExitRequestDisposition::Accepted
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), called)
+            .await
+            .expect("Rust-owned worker should call the injected terminator");
+
+        assert_eq!(terminator.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.operation_coordinator.admission_state(),
+            nwflash_application::OperationAdmissionState::Terminating
+        );
+    }
+
+    #[test]
+    fn terminal_event_payloads_expose_generation_without_session_secrets() {
+        let force = serde_json::to_value(SessionForceExitPayload {
+            generation: "generation-force".to_string(),
+            reason: SERVER_FORCE_EXIT_MESSAGE.to_string(),
+        })
+        .unwrap();
+        let update = serde_json::to_value(SessionUpdateRequiredPayload::from_generation(
+            "generation-update".to_string(),
+            nwflash_infrastructure::api_client::UpdateRequiredInfo {
+                message: "update".to_string(),
+                latest: Some("2.0.0".to_string()),
+                min_version: Some("2.0.0".to_string()),
+                download_url: None,
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(force["generation"], "generation-force");
+        assert_eq!(force["reason"], SERVER_FORCE_EXIT_MESSAGE);
+        assert_eq!(update["generation"], "generation-update");
+        for payload in [force, update] {
+            let text = payload.to_string();
+            assert!(!text.contains("session_id"));
+            assert!(!text.contains("token"));
+        }
+    }
+
+    #[test]
+    fn app_state_owns_the_firmware_artifact_runtime() {
+        let state = super::AppState::new();
+        assert!(state.firmware_artifacts.get("missing-artifact").is_err());
+        assert!(state
+            .payload_inspection
+            .resolve_selected(&["0".to_string()])
+            .is_err());
+    }
+
+    #[test]
+    fn app_state_revocation_revokes_firmware_artifacts_and_removes_only_owned_staging() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be available")
+            .as_nanos();
+        let external_root = std::env::temp_dir().join(format!("nwflash-external-artifact-{nonce}"));
+        let owned_root = std::env::temp_dir().join(format!("nwflash-owned-artifact-{nonce}"));
+        fs::create_dir_all(&external_root).expect("external fixture root should be created");
+        fs::create_dir_all(&owned_root).expect("owned staging root should be created");
+        fs::write(external_root.join("external.img"), [1, 2, 3])
+            .expect("external fixture image should be written");
+        fs::write(owned_root.join("boot.img"), [1, 2, 3])
+            .expect("owned staging image should be written");
+
+        let state = AppState::new();
+        state.session_capabilities.activate();
+        state.firmware_artifacts.replace(
+            nwflash_domain::QuickFlashPartition::Boot,
+            nwflash_domain::FlashImageInfo {
+                path: external_root
+                    .join("external.img")
+                    .to_string_lossy()
+                    .into_owned(),
+                size_bytes: 3,
+            },
+            external_root.clone(),
+        );
+        let artifact_id = crate::commands::firmware::register_owned_firmware_artifact_for_test(
+            &state.firmware_artifacts,
+            nwflash_domain::QuickFlashPartition::Boot,
+            nwflash_domain::FlashImageInfo {
+                path: owned_root.join("boot.img").to_string_lossy().into_owned(),
+                size_bytes: 3,
+            },
+            owned_root.clone(),
+        );
+        let idle_lease = state
+            .operation_coordinator
+            .try_acquire_idle()
+            .expect("idle state should permit session revocation");
+
+        state.revoke_root_capabilities(&idle_lease);
+
+        let artifact_revoked = state.firmware_artifacts.get(&artifact_id).is_err();
+        let owned_root_removed = !owned_root.exists();
+        let external_root_preserved = external_root.is_dir();
+        let _ = fs::remove_dir_all(&owned_root);
+        let _ = fs::remove_dir_all(&external_root);
+
+        assert!(artifact_revoked);
+        assert!(owned_root_removed);
+        assert!(external_root_preserved);
+    }
+
+    #[test]
+    fn app_state_revocation_revokes_a_current_external_firmware_artifact_without_deleting_it() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be available")
+            .as_nanos();
+        let external_root =
+            std::env::temp_dir().join(format!("nwflash-current-external-artifact-{nonce}"));
+        let image_path = external_root.join("boot.img");
+        fs::create_dir_all(&external_root).expect("external fixture root should be created");
+        fs::write(&image_path, [1, 2, 3]).expect("external fixture image should be written");
+
+        let state = AppState::new();
+        state.session_capabilities.activate();
+        let artifact_id = state.firmware_artifacts.replace(
+            nwflash_domain::QuickFlashPartition::Boot,
+            nwflash_domain::FlashImageInfo {
+                path: image_path.to_string_lossy().into_owned(),
+                size_bytes: 3,
+            },
+            external_root.clone(),
+        );
+        let idle_lease = state
+            .operation_coordinator
+            .try_acquire_idle()
+            .expect("idle state should permit session revocation");
+
+        state.revoke_root_capabilities(&idle_lease);
+
+        let artifact_revoked = state.firmware_artifacts.get(&artifact_id).is_err();
+        let external_root_preserved = external_root.is_dir();
+        let _ = fs::remove_dir_all(&external_root);
+
+        assert!(artifact_revoked);
+        assert!(external_root_preserved);
+    }
+
+    #[test]
+    fn operation_log_keeps_routine_server_probe_messages() {
+        let entries = Arc::new(nwflash_infrastructure::OperationLogStore::new(None, 10));
+        let buffer = OperationLogBuffer {
+            entries: entries.clone(),
+        };
+
+        for message in [
+            "连接服务器",
+            "正在连接服务器",
+            "请求服务",
+            "正在请求线刷系统",
+            "正在下载固件包",
+        ] {
+            buffer.write(OperationLogLevel::Info, message.to_string(), None);
+        }
+        // 兜底:任何漏网 OTA 字样统一显示为固件。
+        buffer.write(OperationLogLevel::Info, "遗留OTA字样".to_string(), None);
+
+        let messages = entries
+            .snapshot()
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [
+                "连接服务器",
+                "正在连接服务器",
+                "请求服务",
+                "正在请求线刷系统",
+                "正在下载固件包",
+                "遗留固件字样",
+            ]
+        );
+        assert!(messages.iter().all(|message| !message.contains("OTA")));
+    }
+
+    #[test]
+    fn operation_log_omits_empty_messages_and_vivo_flash_prepare_titles() {
+        let entries = Arc::new(nwflash_infrastructure::OperationLogStore::new(None, 10));
+        let buffer = OperationLogBuffer {
+            entries: entries.clone(),
+        };
+
+        for message in [
+            "",
+            "   ",
+            "准备 VIVO 线刷",
+            "准备 VIVO 线刷完成。",
+            "准备 VIVO 线刷已取消。",
+        ] {
+            buffer.write(OperationLogLevel::Info, message.to_string(), None);
+        }
+
+        assert!(entries.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn operation_coordinator_rejects_flashing_without_authorization() {
+        let operation_started = Arc::new(AtomicBool::new(false));
+        let operation_started_for_run = operation_started.clone();
+        let coordinator =
+            OperationCoordinator::new(None, Some(Arc::new(DenyAllOperations)), None, None, None);
+
+        let result = coordinator
+            .run_async(
+                OperationKind::Flashing,
+                "授权门禁测试",
+                move |_, _| async move {
+                    operation_started_for_run.store(true, Ordering::Release);
+                    Ok(())
+                },
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!operation_started.load(Ordering::Acquire));
+    }
+}
+
+pub fn run_app(context: tauri::Context<Wry>) -> tauri::Result<()> {
+    #[cfg(feature = "e2e")]
+    ensure_dedicated_e2e_binary()?;
+    let app_state = AppState::try_new().map_err(|error| {
+        tauri::Error::Setup((Box::new(error) as Box<dyn std::error::Error>).into())
+    })?;
+    let app_builder: tauri::Builder<Wry> =
+        tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    #[cfg(feature = "e2e")]
+    let app_builder = app_builder.plugin(tauri_plugin_wdio::init());
+    #[cfg(feature = "e2e")]
+    let app_builder = app_builder.plugin(tauri_plugin_wdio_webdriver::init());
+    // 点 X 一律直接退出（用户决策，2026-09-11）：不做忙时拦截、不等待在途
+    // 操作、也不发 window:close-blocked。空闲时前端 closeWindow 已先走
+    // session_stop 的 goodbye 收尾；忙时按下 X 即刻退出，服务器按租约超时
+    // 判定离线（session_lifecycle.rs 既有兜底语义）。
+    let app_builder = app_builder
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title("奶蛙Flash");
+            }
+            let state = app.state::<AppState>();
+            state.start_exit_supervisor();
+            state.start_crash_upload();
+            state.bind_operation_events(app.handle().clone());
+            state.bind_firmware_progress_events(app.handle().clone());
+            state.bind_session_events(app.handle().clone());
+            #[cfg(not(feature = "e2e"))]
+            state.bind_device_monitor(app.handle().clone());
+            Ok(())
+        })
+        .manage(app_state)
+        .invoke_handler(tauri::generate_handler![
+            commands::auth::auth_login,
+            commands::auth::auth_logout,
+            commands::auth::auth_validate_token,
+            commands::firmware::firmware_inspect_local,
+            commands::firmware::firmware_inspect_remote,
+            commands::firmware::firmware_select_output_directory,
+            commands::firmware::firmware_inspect_payload_local,
+            commands::firmware::firmware_extract_payload_local,
+            commands::firmware::firmware_inspect_line_flash_package,
+            commands::firmware::firmware_extract_vivo_local,
+            commands::firmware::firmware_extract_remote,
+            commands::firmware::firmware_prepare_line_flash_artifact,
+            commands::firmware::firmware_prepare_extracted_artifact,
+            commands::version::version_check,
+            commands::quick_flash::quick_flash_inspect_image,
+            commands::quick_flash::quick_flash_prepare_boot_image,
+            commands::quick_flash::quick_flash_prepare_preset_image,
+            commands::quick_flash::quick_flash_prepare_firmware_artifact,
+            commands::quick_flash::quick_flash_prepare_dual_slot_preset_image,
+            commands::quick_flash::quick_flash_execute_boot_image,
+            commands::quick_flash::quick_flash_execute_preset_image,
+            commands::quick_flash::quick_flash_execute_preset_images,
+            commands::quick_flash::quick_flash_execute_firmware_artifact,
+            commands::quick_flash::quick_flash_execute_prepared_dual_slot_preset,
+            commands::root::root_preflight,
+            commands::root::root_select_image,
+            commands::root::root_install_manager,
+            commands::root::root_patch_vivo_ksu,
+            commands::root::root_patch_official_vendor_boot,
+            commands::root::root_prepare_patched_artifact_flash,
+            commands::root::root_execute_patched_artifact_flash,
+            commands::root::root_export_patched_artifact,
+            commands::root::root_run_automatic,
+            commands::root_ota::root_ota_check,
+            commands::root_ota::root_ota_extract_images,
+            commands::files::files_list,
+            commands::files::files_delete,
+            commands::files::files_download,
+            commands::files::files_upload,
+            commands::files::files_install_apk,
+            #[cfg(feature = "e2e")]
+            commands::files::e2e::file_e2e_configure,
+            #[cfg(feature = "e2e")]
+            commands::files::e2e::file_e2e_snapshot,
+            #[cfg(feature = "e2e")]
+            commands::files::e2e::file_e2e_reset,
+            commands::mirror::mirror_status,
+            commands::mirror::mirror_start,
+            commands::mirror::mirror_stop,
+            commands::mirror::mirror_set_auto,
+            commands::safe_flash::safe_flash_prepare_online,
+            commands::safe_flash::safe_flash_prepare_local_source,
+            commands::safe_flash::safe_flash_prepare_local_directory,
+            commands::safe_flash::safe_flash_execute_prepared,
+            commands::safe_flash::safe_flash_cancel_prepared,
+            commands::safe_flash::safe_flash_resolve_partition_failure,
+            commands::session::session_start,
+            commands::session::session_stop,
+            commands::session::session_state,
+            commands::operation_log::operation_logs_snapshot,
+            commands::operation_log::operation_logs_clear,
+            commands::operation::operation_cancel,
+            commands::partitions::partitions_cached_snapshot,
+            commands::partitions::partitions_refresh,
+            commands::partitions::partitions_prepare_erase,
+            commands::partitions::partitions_execute_erase,
+            commands::partitions::partitions_map_images,
+            commands::partitions::partitions_prepare_write,
+            commands::partitions::partitions_execute_write,
+            commands::partitions::partitions_prepare_backup,
+            commands::partitions::partitions_execute_backup,
+            commands::online::online_sessions,
+            commands::software::software_status,
+            commands::drivers::driver_reinstall,
+            commands::resources::resource_inventory,
+            commands::resources::resource_install,
+            commands::device::device_refresh,
+            commands::device::device_reboot_system,
+            commands::device::device_reboot_bootloader,
+            commands::device::device_reboot_fastboot,
+        ]);
+
+    app_builder.run(context)
+}
+
+#[cfg(feature = "e2e")]
+fn ensure_dedicated_e2e_binary() -> tauri::Result<()> {
+    let executable = std::env::current_exe()?;
+    let dedicated = executable
+        .components()
+        .any(|component| component.as_os_str() == "e2e-native");
+    if dedicated {
+        Ok(())
+    } else {
+        Err(tauri::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the e2e feature may run only from the dedicated e2e-native target",
+        )))
+    }
+}

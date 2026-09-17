@@ -1,0 +1,571 @@
+mod common;
+
+use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use nwflash_infrastructure::remote_firmware::{
+    extract_zip_members, list_zip_members, probe_remote_kind, validate_http_url, RangeHttpReader,
+    RemoteFirmwareError, RemoteFirmwareKind,
+};
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipWriter};
+
+static DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn http_url_validation_accepts_http_and_https_and_rejects_other_inputs_without_echoing_url() {
+    let signed = "https://firmware.example.test/ota.zip?token=secret#fragment";
+    assert!(validate_http_url(signed).is_ok());
+    assert!(validate_http_url("http://firmware.example.test/ota.zip").is_ok());
+
+    for invalid in [
+        "",
+        "   ",
+        "not a URL",
+        "https://",
+        "ftp://firmware.example.test/ota.zip",
+    ] {
+        let error = validate_http_url(invalid).expect_err("invalid URL should be rejected");
+        assert!(matches!(error, RemoteFirmwareError::InvalidUrl(_)));
+        if !invalid.trim().is_empty() {
+            assert!(
+                !error.to_string().contains(invalid.trim()),
+                "validation error must not echo the complete URL"
+            );
+        }
+    }
+}
+
+fn scratch_dir(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "nwflash-remote-fw-{label}-{}-{nonce}",
+        DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).expect("scratch dir should be created");
+    root
+}
+
+fn build_zip_bytes(entries: &[(&str, &[u8])], force_zip64: bool, deflate: bool) -> Vec<u8> {
+    let mut writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, data) in entries {
+        let options = SimpleFileOptions::default()
+            .compression_method(if deflate {
+                CompressionMethod::Deflated
+            } else {
+                CompressionMethod::Stored
+            })
+            .large_file(force_zip64);
+        writer.start_file(*name, options).expect("start file");
+        std::io::Write::write_all(&mut writer, data).expect("write entry");
+    }
+    writer.finish().expect("finish zip").into_inner()
+}
+
+#[test]
+fn range_reader_reports_length_and_reads_multi_chunk_spans() {
+    let data: Vec<u8> = (0..(5 * 1024 * 1024)).map(|i| (i % 251) as u8).collect();
+    let url = common::spawn_range_server(data.clone());
+    let canceled = false;
+    let mut is_canceled = || canceled;
+
+    let mut reader = RangeHttpReader::new(&url, None, &mut is_canceled)
+        .expect("range reader should open on a 206 server");
+    assert_eq!(reader.total_len(), data.len() as u64);
+
+    // 读出开头一批（跨块 CHUNK=1MB）。
+    let mut head = [0u8; 8];
+    std::io::Read::read_exact(&mut reader, &mut head).expect("read head");
+    assert_eq!(&head[..], &data[..8]);
+
+    // seek 到文件尾附近读取 EOCD 区域。
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::End(-64)).expect("seek end");
+    let mut tail = [0u8; 64];
+    std::io::Read::read_exact(&mut reader, &mut tail).expect("read tail");
+    assert_eq!(&tail[..], &data[data.len() - 64..]);
+
+    // 任意偏移读 2MB（跨块）。
+    let offset = 2 * 1024 * 1024 - 100;
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(offset as u64)).expect("seek start");
+    let mut block = vec![0u8; 2 * 1024 * 1024];
+    std::io::Read::read_exact(&mut reader, &mut block).expect("read block");
+    assert_eq!(&block[..], &data[offset..offset + 2 * 1024 * 1024]);
+}
+
+#[test]
+fn range_reader_rejects_a_server_that_ignores_range() {
+    // 用一个总是返回 200 全量的服务器：这里用 Range server 但以 URL 传不带范围……
+    // 便捷起见，直接指向一个返回 200 的 wiremock。为不引额外依赖，用本地非 Range server：
+    // 复用 spawn_range_server 但请求不带 Range 也会 206（探测用）。因此单独造一个 200 server。
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = b"not-a-range-server-full-body-anyway";
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body);
+            });
+        }
+    });
+    let url = format!("http://{addr}/");
+    let canceled = false;
+    let mut is_canceled = || canceled;
+    match RangeHttpReader::new(&url, None, &mut is_canceled) {
+        Ok(_) => panic!("non-range server must be rejected"),
+        Err(err) => assert!(matches!(err, RemoteFirmwareError::RangeUnsupported)),
+    }
+}
+
+#[test]
+fn probe_rejects_an_oversized_partial_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("malformed range server should bind");
+    let address = listener
+        .local_addr()
+        .expect("malformed range server address should be available");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let body = b"CrAU-this-body-is-not-the-requested-four-byte-range";
+                let header = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/4096\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body);
+            });
+        }
+    });
+
+    let error = probe_remote_kind(&format!("http://{address}/"), None, &mut || false)
+        .expect_err("a Range response larger than the requested interval must be rejected");
+
+    assert!(matches!(error, RemoteFirmwareError::RangeUnsupported));
+}
+
+#[test]
+fn range_reader_rejects_an_oversized_partial_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("malformed range server should bind");
+    let address = listener
+        .local_addr()
+        .expect("malformed range server address should be available");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]);
+                if request.to_ascii_lowercase().contains("range: bytes=0-0") {
+                    let header = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-0/4096\r\nContent-Length: 1\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(b"P");
+                } else {
+                    let body = vec![b'Z'; 4097];
+                    let header = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4095/4096\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{address}/");
+    let mut is_canceled = || false;
+    let mut reader = RangeHttpReader::new(&url, None, &mut is_canceled)
+        .expect("initial one-byte Range response should open the reader");
+    let mut byte = [0u8; 1];
+    let error = reader
+        .read(&mut byte)
+        .expect_err("a Range reader must reject a body larger than the requested interval");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+}
+
+#[test]
+fn probe_kind_recognizes_each_magic() {
+    let canceled = false;
+
+    let crau = common::spawn_range_server(b"CrAU\x01\x00payload".to_vec());
+    assert_eq!(
+        probe_remote_kind(&crau, None, &mut || canceled).expect("crAU detect"),
+        RemoteFirmwareKind::PayloadRaw
+    );
+
+    let gzip = common::spawn_range_server(b"\x1f\x8b\x08\x00gzip-data".to_vec());
+    assert_eq!(
+        probe_remote_kind(&gzip, None, &mut || canceled).expect("gzip detect"),
+        RemoteFirmwareKind::Unsupported
+    );
+
+    let random = common::spawn_range_server(b"\x99\x88\x77\x66xyz".to_vec());
+    assert_eq!(
+        probe_remote_kind(&random, None, &mut || canceled).expect("unknown detect"),
+        RemoteFirmwareKind::Unsupported
+    );
+}
+
+#[test]
+fn probe_kind_survives_a_truncated_range_response() {
+    // 复现 Vivo 固件 CDN 行为：206 声明 4 字节却只发 2 字节就断开
+    // （reqwest 报 `error decoding response body`）。续传必须补齐剩下 2 字节，
+    // 否则 4 字节魔数探测会直接判失败。
+    let url = common::spawn_unreliable_range_server(b"CrAU\x01\x00payload".to_vec(), Some(2), 0);
+    let canceled = false;
+    assert_eq!(
+        probe_remote_kind(&url, None, &mut || canceled)
+            .expect("a truncated Range response must be resumed instead of failing the probe"),
+        RemoteFirmwareKind::PayloadRaw
+    );
+}
+
+#[test]
+fn truncated_range_responses_are_resumed_while_extracting_zip_members() {
+    // 每次 Range 响应都被截断到 8 KiB：中央目录与成员字节都必须靠续传补齐，
+    // 且 zip crate 的 CRC 校验要能通过（证明补齐的字节完全正确）。
+    let boot = vec![42u8; 300 * 1024];
+    let vb = vec![7u8; 200 * 1024];
+    let zip = build_zip_bytes(
+        &[("boot.img", &boot), ("vendor_boot.img", &vb)],
+        false,
+        true,
+    );
+    let url = common::spawn_unreliable_range_server(zip, Some(8 * 1024), 0);
+
+    let canceled = false;
+    let members = list_zip_members(&url, None, &mut || canceled)
+        .expect("the central directory must be readable across truncated responses");
+    assert_eq!(members.len(), 2);
+
+    let out = scratch_dir("truncated-extract");
+    let extracted = extract_zip_members(
+        &url,
+        None,
+        &["boot"],
+        &out,
+        &mut || canceled,
+        &mut |_, _| {},
+    )
+    .expect("truncated member bytes must be resumed and CRC-verified");
+
+    assert_eq!(extracted.len(), 1);
+    assert_eq!(
+        fs::read(&extracted[0].output_path).expect("extracted image"),
+        boot,
+        "resumed extraction must reproduce the archived member byte for byte"
+    );
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn probe_distinguishes_payload_zip_from_direct_image_zip() {
+    let payload_zip = build_zip_bytes(
+        &[("payload.bin", b"CrAU"), ("care_map.pb", b"map")],
+        false,
+        false,
+    );
+    let url = common::spawn_range_server(payload_zip);
+    let canceled = false;
+    assert_eq!(
+        probe_remote_kind(&url, None, &mut || canceled).expect("payload zip"),
+        RemoteFirmwareKind::PayloadZip
+    );
+
+    let direct = build_zip_bytes(
+        &[("boot.img", b"boot"), ("vendor_boot.img", b"vb")],
+        false,
+        false,
+    );
+    let url2 = common::spawn_range_server(direct);
+    assert_eq!(
+        probe_remote_kind(&url2, None, &mut || canceled).expect("direct zip"),
+        RemoteFirmwareKind::DirectImageZip
+    );
+}
+
+#[test]
+fn list_zip_members_reports_entries_without_directories() {
+    let zip = build_zip_bytes(
+        &[
+            ("boot.img", b"boot"),
+            ("dir/vendor_boot.img", b"vb"),
+            ("payload.bin", b"CrAU"),
+        ],
+        false,
+        false,
+    );
+    let url = common::spawn_range_server(zip);
+    let canceled = false;
+    let members = list_zip_members(&url, None, &mut || canceled).expect("list");
+    let names: Vec<_> = members.iter().map(|m| m.name.as_str()).collect();
+    assert!(names.contains(&"boot"));
+    assert!(names.contains(&"vendor_boot"));
+    assert!(names.contains(&"payload"));
+    assert_eq!(members.len(), 3);
+}
+
+#[test]
+fn extract_direct_zip_fetches_only_wanted_members() {
+    let boot = vec![42u8; 300 * 1024];
+    let vb = vec![7u8; 200 * 1024];
+    let system_wide = vec![9u8; 1024 * 1024];
+    let zip = build_zip_bytes(
+        &[
+            ("boot.img", &boot),
+            ("vendor_boot.img", &vb),
+            ("system.new.dat.0", &system_wide),
+        ],
+        false,
+        true,
+    );
+    let url = common::spawn_range_server(zip);
+    let out = scratch_dir("extract");
+    let canceled = false;
+    let extracted = extract_zip_members(
+        &url,
+        None,
+        &["init_boot", "boot", "vendor_boot"],
+        &out,
+        &mut || canceled,
+        &mut |_, _| {},
+    )
+    .expect("extract");
+
+    assert_eq!(extracted.len(), 2);
+    for image in extracted {
+        let bytes = fs::read(&image.output_path).expect("image file");
+        match image.partition_name.as_str() {
+            "boot" => assert_eq!(&bytes[..], &boot[..]),
+            "vendor_boot" => assert_eq!(&bytes[..], &vb[..]),
+            other => panic!("unexpected {other}"),
+        }
+    }
+    // 绝不应提取 system.new.dat.0。
+    assert!(!out.join("system.new.dat.0.img").exists());
+    assert!(!out.join("system.new.dat.0").exists());
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn no_wanted_partition_returns_empty_result_and_app_layer_decides() {
+    let zip = build_zip_bytes(&[("system.img", b"sys")], false, false);
+    let url = common::spawn_range_server(zip);
+    let out = scratch_dir("missing");
+    let canceled = false;
+    let extracted = extract_zip_members(
+        &url,
+        None,
+        &["boot", "vendor_boot"],
+        &out,
+        &mut || canceled,
+        &mut |_, _| {},
+    )
+    .expect("no wanted members is not an extract error");
+    // 无任何命中：返回空结果，由上层（root_ota）判定无 boot 分区并给出引导。
+    assert!(extracted.is_empty());
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn extract_reports_progress_monotonically() {
+    let boot = vec![3u8; 400 * 1024];
+    let zip = build_zip_bytes(&[("boot.img", &boot)], false, true);
+    let url = common::spawn_range_server(zip);
+    let out = scratch_dir("progress");
+    let canceled = false;
+    let progress: Arc<std::sync::Mutex<Vec<(String, u64)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = progress.clone();
+    extract_zip_members(
+        &url,
+        None,
+        &["boot"],
+        &out,
+        &mut || canceled,
+        &mut move |name, bytes| sink.lock().unwrap().push((name.to_string(), bytes)),
+    )
+    .expect("extract");
+
+    let events = progress.lock().unwrap();
+    assert!(!events.is_empty());
+    let last = events.last().unwrap().1;
+    assert_eq!(last, boot.len() as u64);
+    // 单调不减。
+    let mut running = 0;
+    for (_, bytes) in events.iter() {
+        assert!(*bytes >= running);
+        running = *bytes;
+    }
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn cancellation_aborts_extraction_with_interrupted_read() {
+    let boot = vec![5u8; 300 * 1024];
+    let zip = build_zip_bytes(&[("boot.img", &boot)], false, false);
+    let url = common::spawn_range_server(zip);
+    let out = scratch_dir("cancel");
+    let canceled = true;
+    let result = extract_zip_members(
+        &url,
+        None,
+        &["boot"],
+        &out,
+        &mut || canceled,
+        &mut |_, _| {},
+    );
+    // 前置取消在 reader 初始化时即返回 Cancelled。
+    assert!(matches!(result, Err(RemoteFirmwareError::Cancelled)));
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn mid_extraction_cancellation_reports_cancelled_not_archive_error() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let boot = vec![9u8; 2 * 1024 * 1024];
+    let zip = build_zip_bytes(&[("boot.img", &boot)], false, false);
+    let url = common::spawn_range_server(zip);
+    let out = scratch_dir("midcancel");
+    let canceled = Arc::new(AtomicBool::new(false));
+    let canceled_for_progress = canceled.clone();
+    let result = extract_zip_members(
+        &url,
+        None,
+        &["boot"],
+        &out,
+        &mut move || canceled.load(Ordering::Acquire),
+        &mut move |_name, _bytes| {
+            // 首次进度回调后触发取消，模拟提取中途用户停止。
+            canceled_for_progress.store(true, Ordering::Release);
+        },
+    );
+    // 中途取消必须被识别为 Cancelled，而非 Archive/InvalidFormat。
+    assert!(matches!(result, Err(RemoteFirmwareError::Cancelled)));
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn zip64_archive_is_supported() {
+    let boot = vec![11u8; 700 * 1024];
+    let vb = vec![12u8; 500 * 1024];
+    // large_file(true) 强制写出 ZIP64 局部头 + 中央目录（实测 zip 4.6.1 会写 ZIP64）。
+    let zip = build_zip_bytes(&[("boot.img", &boot), ("vendor_boot.img", &vb)], true, true);
+    let url = common::spawn_range_server(zip);
+    let out = scratch_dir("zip64");
+    let canceled = false;
+    let extracted = extract_zip_members(
+        &url,
+        None,
+        &["boot", "vendor_boot"],
+        &out,
+        &mut || canceled,
+        &mut |_, _| {},
+    )
+    .expect("zip64 extract should work");
+    assert_eq!(extracted.len(), 2);
+    let names: Vec<_> = extracted
+        .iter()
+        .map(|i| i.partition_name.as_str())
+        .collect();
+    assert!(names.contains(&"boot"));
+    assert!(names.contains(&"vendor_boot"));
+    for image in extracted {
+        match image.partition_name.as_str() {
+            "boot" => assert_eq!(image.size_bytes, boot.len() as i64),
+            "vendor_boot" => assert_eq!(image.size_bytes, vb.len() as i64),
+            other => panic!("unexpected {other}"),
+        }
+    }
+    fs::remove_dir_all(&out).ok();
+}
+
+#[test]
+fn integrity_verification_enforces_server_sha256_and_size_promises() {
+    use nwflash_infrastructure::remote_firmware::{
+        verify_remote_firmware_integrity, RemoteFirmwareIntegrity,
+    };
+    use sha2::{Digest as _, Sha256};
+
+    let data = b"firmware package bytes for integrity gate".to_vec();
+    let url = common::spawn_range_server(data.clone());
+    let canceled = || false;
+    let digest: [u8; 32] = Sha256::digest(&data).into();
+    let correct_hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+    // 无承诺：直接放行（上游常为空，可用性优先）。
+    assert!(verify_remote_firmware_integrity(
+        &url,
+        &RemoteFirmwareIntegrity::default(),
+        None,
+        &mut || false
+    )
+    .is_ok());
+
+    // 摘要正确：通过。
+    let promise = RemoteFirmwareIntegrity {
+        sha256_hex: Some(correct_hex.clone()),
+        size_bytes: Some(data.len() as u64),
+    };
+    let mut canceled = canceled;
+    assert!(verify_remote_firmware_integrity(&url, &promise, None, &mut canceled).is_ok());
+
+    // 大写十六进制同样接受（服务器字段大小写不定）。
+    let upper = RemoteFirmwareIntegrity {
+        sha256_hex: Some(correct_hex.to_uppercase()),
+        size_bytes: Some(data.len() as u64),
+    };
+    assert!(verify_remote_firmware_integrity(&url, &upper, None, &mut canceled).is_ok());
+
+    // 摘要不匹配：拒绝（MITM 换包场景）。
+    let mut tampered = digest;
+    tampered[0] ^= 0xff;
+    let wrong_hex: String = tampered.iter().map(|b| format!("{b:02x}")).collect();
+    let bad_digest = RemoteFirmwareIntegrity {
+        sha256_hex: Some(wrong_hex),
+        size_bytes: Some(data.len() as u64),
+    };
+    let error = verify_remote_firmware_integrity(&url, &bad_digest, None, &mut canceled)
+        .expect_err("mismatched digest must be rejected");
+    assert!(matches!(error, RemoteFirmwareError::Integrity(_)));
+
+    // 大小承诺不匹配：拒绝（不需要读全包，首请求即失败）。
+    let bad_size = RemoteFirmwareIntegrity {
+        sha256_hex: None,
+        size_bytes: Some(data.len() as u64 + 1),
+    };
+    let error = verify_remote_firmware_integrity(&url, &bad_size, None, &mut canceled)
+        .expect_err("mismatched size must be rejected");
+    assert!(matches!(error, RemoteFirmwareError::Integrity(_)));
+
+    // 服务器"给了但格式无效"的摘要：拒绝，不得静默降级为无承诺。
+    let malformed = RemoteFirmwareIntegrity {
+        sha256_hex: Some("not-hex".to_string()),
+        size_bytes: None,
+    };
+    let error = verify_remote_firmware_integrity(&url, &malformed, None, &mut canceled)
+        .expect_err("malformed digest must be rejected, not downgraded");
+    assert!(matches!(error, RemoteFirmwareError::Integrity(_)));
+
+    // 仅大小承诺（上游只给 sizeBytes）：大小一致即通过。
+    let size_only = RemoteFirmwareIntegrity {
+        sha256_hex: None,
+        size_bytes: Some(data.len() as u64),
+    };
+    assert!(verify_remote_firmware_integrity(&url, &size_only, None, &mut canceled).is_ok());
+}

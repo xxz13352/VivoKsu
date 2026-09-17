@@ -1,0 +1,25 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--nw-font-family);
+  color: var(--nw-text-primary);
+  background: var(--nw-bg-page);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}

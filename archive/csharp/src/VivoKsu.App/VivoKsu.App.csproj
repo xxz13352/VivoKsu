@@ -1,0 +1,70 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- 发布瘦身:只保留中英文 satellite 语言包(减少 ~11MB) -->
+    <SatelliteResourceLanguages>zh-Hans;zh-Hant;en</SatelliteResourceLanguages>
+    <!-- 客户端版本号:后台「版本号控制」据此做强制更新校验;发版前更新此值 -->
+    <!-- 1.1.0:对齐 2026-08-23 签名租约登录契约(client_version/build_id/process_nonce/session_id + 心跳序号) -->
+    <Version>1.1.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Downloader" Version="5.9.5" />
+    <PackageReference Include="HandyControl" Version="3.5.1" />
+    <PackageReference Include="SharpCompress" Version="0.50.4" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 应用品牌 logo(嵌入程序集,pack URI 引用) -->
+    <Resource Include="Assets\logo.jpg" />
+    <!-- wipe-data 镜像:数据清除用,嵌入程序集(标准 .NET 资源,非 WPF pack URI) -->
+    <EmbeddedResource Include="Assets\wipe-data.img" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="VivoKsu.App.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 投屏工具:随包开发/测试用,发布外置(运行时从 GitHub 按需下载) -->
+    <None Update="scrcpy\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+    <None Update="platform-tools\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <!-- OTA 解包工具:发布外置(固件提取/URL 刷写时按需下载) -->
+    <None Update="payload-tools\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+    <!-- ROOT 管理器 APK:发布外置(ROOT 时按需下载,SHA-256 校验) -->
+    <None Update="apk\KSU.APK">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+    <None Update="apk\KernelSU.apk">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+    <None Update="root-tools\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <!-- vivo USB 驱动安装包(未安装驱动时由启动提醒弹窗引导静默安装) -->
+    <None Update="drivers\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

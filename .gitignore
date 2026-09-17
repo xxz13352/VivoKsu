@@ -1,0 +1,48 @@
+# ---- .NET ----
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+
+# ---- Cloudflare Worker ----
+cloudflare/node_modules/
+cloudflare/.wrangler/
+**/.wrangler/
+cloudflare/.dev.vars
+
+# ---- Node / Tauri generated output ----
+**/node_modules/
+src/Nwflash.Desktop/dist/
+src/Nwflash.Desktop/src-tauri/gen/
+
+# ---- Rust (fastboot-rs) ----
+target/
+
+# ---- 应用运行时产物 ----
+临时/
+logs/
+*.log
+# 发布产物(截图/旧包/self-contained 目录),不入库
+artifacts/
+
+# ---- 其它 ----
+.DS_Store
+Thumbs.db
+
+# ---- 本地工具状态(Superpowers brainstorm 的 token/port 等) ----
+.superpowers/
+.workbuddy/
+# 本地 AI 会话记忆目录(与 .workbuddy/ 同类，随会话生成，不入库)
+.workbuddy-ai/
+
+# ---- 本地隔离工作树 ----
+.worktrees/
+cloudflare/backups/
+
+# ---- 脚本变量未展开产生的意外产物(如 %SystemDrive% 写字面量目录)与
+# Playwright/WDIO 测试产物目录 ----
+%SystemDrive%/
+**/%SystemDrive%/
+.artifacts/

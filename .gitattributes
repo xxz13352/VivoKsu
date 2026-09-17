@@ -1,0 +1,5 @@
+src/Nwflash.Desktop/src-tauri/resources/platform-tools/PLATFORM_TOOLS.SHA256 text eol=lf
+src/Nwflash.Desktop/src-tauri/resources/scrcpy/LICENSE text eol=lf
+src/Nwflash.Desktop/src-tauri/resources/scrcpy/open_a_terminal_here.bat text eol=lf
+src/Nwflash.Desktop/src-tauri/resources/scrcpy/runtime-manifest.json text eol=lf
+src/Nwflash.Desktop/src-tauri/resources/scrcpy/scrcpy-files.sha256 text eol=lf

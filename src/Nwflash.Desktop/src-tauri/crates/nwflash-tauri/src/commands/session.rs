@@ -1,0 +1,152 @@
+use serde::Serialize;
+use tauri::State;
+
+use crate::{commands::auth::clear_session_token, AppState};
+use nwflash_application::OPERATION_IN_PROGRESS_MESSAGE;
+
+#[derive(Debug, Serialize)]
+pub struct SessionState {
+    pub running: bool,
+    pub healthy: bool,
+    pub session_id: Option<String>,
+    pub generation: Option<String>,
+    pub has_token: bool,
+}
+
+#[tauri::command]
+pub async fn session_start(state: State<'_, AppState>) -> Result<SessionState, String> {
+    session_start_inner(&state).await
+}
+
+async fn session_start_inner(_state: &AppState) -> Result<SessionState, String> {
+    Err("会话只能由已验证的 Rust 登录流程启动。".to_string())
+}
+
+#[tauri::command]
+pub async fn session_stop(state: State<'_, AppState>) -> Result<SessionState, String> {
+    session_stop_inner(&state).await
+}
+
+pub(super) async fn session_stop_inner(state: &AppState) -> Result<SessionState, String> {
+    let (idle_lease, generation) = state
+        .acquire_session_closeout()
+        .await
+        .map_err(|_| OPERATION_IN_PROGRESS_MESSAGE.to_string())?;
+    state
+        .session_lifecycle
+        .stop()
+        .await
+        .map_err(|error| error.to_string())?;
+    state
+        .usage_reporter
+        .flush_and_close_session(generation.as_deref())
+        .await;
+    state.revoke_root_capabilities(&idle_lease);
+    {
+        let mut token = state
+            .session_token
+            .write()
+            .expect("session token lock should not be poisoned");
+        let _ = clear_session_token(&mut token);
+    }
+    if let Some(generation) = generation.as_deref() {
+        state.exit_supervisor.clear_generation(generation);
+    }
+    Ok(read_session_state(state).await)
+}
+
+#[tauri::command]
+pub async fn session_state(state: State<'_, AppState>) -> Result<SessionState, String> {
+    Ok(read_session_state(&state).await)
+}
+
+async fn read_session_state(state: &AppState) -> SessionState {
+    SessionState {
+        running: state.session_lifecycle.is_running().await,
+        healthy: state.session_lifecycle.is_healthy(),
+        session_id: state.session_lifecycle.session_id().await,
+        generation: state.session_lifecycle.generation().await,
+        has_token: state
+            .session_token
+            .read()
+            .expect("session token lock should not be poisoned")
+            .is_some(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use nwflash_infrastructure::CloudflareClient;
+    use nwflash_protection::{IntegrityProbe, IntegritySignals};
+
+    use super::{read_session_state, session_start_inner};
+    use crate::{
+        exit_supervisor::ExitRequest, AppState, AppStateTestTerminator, EpochClock,
+        ProtectionTerminalSink, RuntimeProtectionDependencies,
+    };
+
+    #[derive(Default)]
+    struct CountingProbe(AtomicUsize);
+
+    impl IntegrityProbe for CountingProbe {
+        fn signals(&self) -> IntegritySignals {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            IntegritySignals::available(true, true, false, false)
+        }
+    }
+
+    struct FixedClock;
+
+    impl EpochClock for FixedClock {
+        fn unix_seconds(&self) -> i64 {
+            1_800_000_001
+        }
+    }
+
+    struct NoopTerminalSink;
+
+    impl ProtectionTerminalSink for NoopTerminalSink {
+        fn request(&self, _request: ExitRequest) {}
+    }
+
+    #[tokio::test]
+    async fn retained_session_start_cannot_activate_without_a_signed_rust_login() {
+        let state = AppState::new();
+
+        let result = session_start_inner(&state).await;
+
+        assert_eq!(
+            result.expect_err("frontend session start must be rejected"),
+            "会话只能由已验证的 Rust 登录流程启动。"
+        );
+        assert!(state.session_capabilities.capture().is_err());
+        assert!(state.session_token.read().unwrap().is_none());
+        assert!(!state.session_lifecycle.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn rejected_compatibility_start_and_display_state_never_probe_integrity() {
+        let probe = Arc::new(CountingProbe::default());
+        let state = AppState::try_with_client_and_runtime_protection(
+            CloudflareClient::new_injected("https://unit.test", "1.0.1"),
+            Arc::new(AppStateTestTerminator::default()),
+            RuntimeProtectionDependencies::injected(
+                probe.clone(),
+                Arc::new(FixedClock),
+                Arc::new(NoopTerminalSink),
+            ),
+        )
+        .unwrap();
+        assert_eq!(probe.0.load(Ordering::Acquire), 1);
+
+        assert!(session_start_inner(&state).await.is_err());
+        let _ = read_session_state(&state).await;
+
+        assert_eq!(probe.0.load(Ordering::Acquire), 1);
+    }
+}
