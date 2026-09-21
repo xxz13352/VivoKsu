@@ -9,6 +9,7 @@
 | [项目进展](../PROJECT_PROGRESS.md) | 简洁的当前状态、已合入成果、未完成项和主要证据 |
 | [接力迭代总计划](2026-09-04-iteration-plan.md) | 当前执行顺序、进行中 owner、停止条件和发布前门禁 |
 | [发布门禁审计](2026-09-04-release-gate-audit.md) | 当前 release readiness、外部授权边界和最终 evidence chain |
+| [客户端纵深加固（P0–P3）](2026-09-21-client-defense-in-depth.md) | IPC 边界、两段式反调试、固件包验签、FFI lint 门禁的实施记录与取舍理由 |
 | [项目架构](project-architecture.md) | 当前客户端、Cloudflare 边界、资源、测试和发布规范 |
 | [Rust/Tauri 客户端架构](../src/Nwflash.Desktop/docs/rust-tauri-architecture.md) | workspace 分层、IPC 和资源运行时细节 |
 | [产品决策](product-decisions.md) | 当前产品约束与安全边界 |

@@ -63,6 +63,7 @@ ROOT 管理器 APK、payload_dumper、platform-tools、驱动、root-tools 和�
 
 ## 文档
 
+- [客户端纵深加固（P0–P3）](docs/2026-09-21-client-defense-in-depth.md)
 - [当前项目架构](docs/project-architecture.md)
 - [Rust/Tauri 客户端架构](src/Nwflash.Desktop/docs/rust-tauri-architecture.md)
 - [API 契约](cloudflare/API.md)
