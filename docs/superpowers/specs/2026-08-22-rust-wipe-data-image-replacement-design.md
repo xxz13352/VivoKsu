@@ -1,5 +1,11 @@
 # Rust 线刷清除数据镜像替换设计
 
+> ⚠️ **2026-09-21 起本设计已被取代**：清除数据不再往 `misc` 写 BCB 镜像
+> （内嵌 `wipe-data.img` / `write_wipe_data_image` / `embedded_assets` 已整体删除），
+> 改为队列末尾 `fastboot reboot recovery` + 让用户在 REC 里手动清除数据。
+> 现行为见 [清除数据流程审查](2026-09-21-safe-flash-wipe-data-flow-review.md)。
+> 本文保留为历史设计记录。
+
 ## 目标
 
 让 Rust/Tauri 版 VIVO 线刷的清除数据流程使用逆向得到的 `misc_bcb_native_wipe_data_all.img`，并保持现有代码通过内置资源写入 `misc` 分区的流程不变。

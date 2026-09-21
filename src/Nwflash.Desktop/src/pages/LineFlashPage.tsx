@@ -55,6 +55,7 @@ export const LineFlashPage: FC<{ operationSnapshot?: OperationSnapshotPayload | 
   const [statusText, setStatusText] = useState('等待读取分区表');
   const [errorText, setErrorText] = useState('');
   const [partitionTaskStates, setPartitionTaskStates] = useState<Record<string, string>>({});
+  const operationBusy = Boolean(operationSnapshot?.isBusy);
 
   useEffect(() => {
     const tasks = operationSnapshot?.partitionTasks;
@@ -234,6 +235,7 @@ export const LineFlashPage: FC<{ operationSnapshot?: OperationSnapshotPayload | 
                 className={`nw-test-line-transport-${value}`}
                 aria-pressed={requestedTransport === value}
                 onClick={() => {
+                  if (operationBusy) return;
                   requestedTransportRef.current = value;
                   setRequestedTransport(value);
                 }}
@@ -243,8 +245,8 @@ export const LineFlashPage: FC<{ operationSnapshot?: OperationSnapshotPayload | 
             ))}
           </div>
           <div>
-            <button type="button" className="nw-test-line-partitions-select-images" disabled={!snapshot} onClick={() => void mapImages()}>载入镜像</button>
-            <button type="button" className="nw-test-line-partitions-refresh" disabled={isRefreshing} onClick={() => void refreshPartitions()}>{isRefreshing ? '正在读取…' : '读取分区表'}</button>
+            <button type="button" className="nw-test-line-partitions-select-images" disabled={!snapshot || operationBusy} onClick={() => void mapImages()}>载入镜像</button>
+            <button type="button" className="nw-test-line-partitions-refresh" disabled={isRefreshing || operationBusy} onClick={() => void refreshPartitions()}>{isRefreshing ? '正在读取…' : '读取分区表'}</button>
           </div>
         </header>
         <div className="nw-line-flash-filter">
@@ -266,11 +268,11 @@ export const LineFlashPage: FC<{ operationSnapshot?: OperationSnapshotPayload | 
                 key={entry.name}
                 className={selectedNames.includes(entry.name) ? 'selected' : ''}
                 tabIndex={0}
-                onDoubleClick={() => togglePartition(entry.name)}
+                onDoubleClick={() => { if (!operationBusy) togglePartition(entry.name); }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
-                    togglePartition(entry.name);
+                    if (!operationBusy) togglePartition(entry.name);
                   }
                 }}
               >
@@ -286,9 +288,9 @@ export const LineFlashPage: FC<{ operationSnapshot?: OperationSnapshotPayload | 
       <footer className="nw-line-flash-taskbar">
         <div><strong>{statusText}</strong><span>{operationSnapshot?.progress !== null && operationSnapshot?.progress !== undefined ? `进度 ${Math.round(operationSnapshot.progress * 100)}%` : '速度 --  耗时 00:00'}</span></div>
         <div>
-          <button type="button" className="nw-test-line-partitions-backup" disabled={selectedNames.length === 0} onClick={() => void prepareOperation('backup')}>备份所选</button>
-          <button type="button" className="nw-test-line-partitions-prepare-write" disabled={selectedNames.length === 0} onClick={() => void prepareOperation('write')}>写入所选</button>
-          <button type="button" className="nw-test-line-partitions-prepare-erase" disabled={selectedNames.length === 0} onClick={() => void prepareOperation('erase')}>擦除所选</button>
+          <button type="button" className="nw-test-line-partitions-backup" disabled={selectedNames.length === 0 || operationBusy} onClick={() => void prepareOperation('backup')}>备份所选</button>
+          <button type="button" className="nw-test-line-partitions-prepare-write" disabled={selectedNames.length === 0 || operationBusy} onClick={() => void prepareOperation('write')}>写入所选</button>
+          <button type="button" className="nw-test-line-partitions-prepare-erase" disabled={selectedNames.length === 0 || operationBusy} onClick={() => void prepareOperation('erase')}>擦除所选</button>
           <button type="button" className="nw-test-line-partitions-cancel" onClick={() => void cancelOperation()}>停止</button>
         </div>
       </footer>

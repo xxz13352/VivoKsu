@@ -357,7 +357,7 @@
 - **B19** ROOT/safe_flash 前置失败全部不落操作日志（root.rs:1773-2028 多处、safe_flash 预检失败），且 safe_flash prepare 存在「run_async 已记 Success、发布失败页面报错」的日志-用户所见矛盾——按 partitions.rs 模式接 report_preflight_failure。
 - **B20** 官方 KSU 手动流程无法修补 init_boot（RootPage 绑死 vendorBoot；后端 manager 字段前端从不传）——补 UI 入口或明确砍掉。
 - **B21** 全自动失败后前端镜像选择未重置而后端已消费（RootPage.tsx:369 只清成功分支）——catch 分支同样清空。
-- **B22** "已刷入分区数"把清除数据 misc 计入（application/safe_flash.rs:344-356 元组 is_flash=true）——C# 只数 images；wipe 改 is_flash=false 或 DTO 单列。
+- **B22** "已刷入分区数"把清除数据 misc 计入（application/safe_flash.rs:344-356 元组 is_flash=true）——C# 只数 images；wipe 改 is_flash=false 或 DTO 单列。**→ 已修（2026-09-21）：清除数据不再写 misc（改为队列末尾 `fastboot reboot recovery` + 手动清除指引），该计数只数固件分区刷写，见 [清除数据流程](2026-09-21-safe-flash-wipe-data-flow-review.md)。**
 - **B23** ROOT 手动修补刷写 prepare 只要求 FastbootConnected、execute 才要求 fastbootd，错误文案不指路（"请 adb reboot fastboot"）。
 - **B24** has-slot 瞬态读取失败时 OtherSlot 静默降级为原槽刷写，且丢失 C# 的 1.5s USB 稳定延迟（application/safe_flash.rs:265-275）——用户以为对槽已换新实际刷了当前槽；找回延迟+降级时告警可见。
 - **B25** SafeFlashPage/RootPage 占位与死按钮：「未连接 ADB 设备」硬编码未订阅快照、"当前分区: --"不展示 report_stage、回锁 BL 永久 disabled 死按钮（后端无命令两侧都没有）、RootPage 官方 KSU 固定文案"Vivo KSU APK 已校验"与实际状态无关。

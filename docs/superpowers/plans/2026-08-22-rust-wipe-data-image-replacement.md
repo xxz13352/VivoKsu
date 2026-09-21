@@ -1,5 +1,11 @@
 # Rust Wipe Data Image Replacement Implementation Plan
 
+> ⚠️ **SUPERSEDED 2026-09-21**: the wipe-data image path no longer exists. Wiping now queues a
+> trailing `fastboot reboot recovery` and asks the user to clear data manually in REC; the embedded
+> `wipe-data.img`, `write_wipe_data_image` and the whole `embedded_assets` module were deleted.
+> Current behaviour: [wipe-data flow review](../../2026-09-21-safe-flash-wipe-data-flow-review.md).
+> Kept as a historical record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace only the Rust/Tauri VIVO line-flash embedded wipe-data image with the verified reverse-engineered `misc` image.

@@ -31,7 +31,7 @@ export const PageFactory: FC<{
     case 'QuickFlash':
       return <QuickFlashPage operationSnapshot={operationSnapshot} />;
     case 'Mirror':
-      return <MirrorPage />;
+      return <MirrorPage deviceSnapshot={deviceSnapshot} />;
     case 'FileManager':
       return <FileManagerPage deviceSnapshot={deviceSnapshot} />;
     case 'LineFlash':
@@ -39,7 +39,7 @@ export const PageFactory: FC<{
     case 'FirmwareExtract':
       return <FirmwareExtractPage />;
     case 'SafeFlash':
-      return <SafeFlashPage />;
+      return <SafeFlashPage deviceSnapshot={deviceSnapshot} operationSnapshot={operationSnapshot} />;
     case 'Root':
       return <RootPage />;
     case 'Online':

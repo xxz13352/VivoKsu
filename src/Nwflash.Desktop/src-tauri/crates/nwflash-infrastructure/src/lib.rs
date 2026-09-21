@@ -2,7 +2,6 @@
 
 pub mod api_client;
 pub mod auth;
-pub mod embedded_assets;
 pub mod firmware_extract;
 pub mod firmware_package;
 pub mod operation_log;
@@ -35,7 +34,6 @@ pub use api_client::{
     UsageLogUploadResponse, DEFAULT_APP_VERSION, DEFAULT_BASE_URL,
 };
 pub use auth::{AuthService, AuthSession, HeartbeatAdmission};
-pub use embedded_assets::{wipe_data_size_bytes, write_wipe_data_image, EmbeddedAssetError};
 pub use firmware_extract::{
     FirmwareExtractionError, FirmwareFormat, FirmwareFormatDetector,
     FirmwarePackageExtractionResult, FirmwarePackageExtractionService,
