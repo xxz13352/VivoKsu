@@ -98,13 +98,16 @@ async fn mount_login_for(
 ) {
     Mock::given(method("POST"))
         .and(path("/api/login"))
-        .and(body_json(serde_json::json!({
+        .and(body_partial_json(serde_json::json!({
             "username": request_username,
             "password": PASSWORD,
             "client_version": DEFAULT_APP_VERSION,
             "build_id": BUILD_ID,
             "process_nonce": PROCESS_NONCE,
             "session_id": SESSION_ID
+            // 注意：`request_nonce` 由客户端随机生成，测试无法预知具体值，
+            // 因此不能写进期望体。已用注入错误值的反向实验确认：这个字段若
+            // 不被发送或值不符，本 mock 会匹配失败（不是空校验）。
         })))
         .and(header("X-Nwflash-Version", DEFAULT_APP_VERSION))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -482,7 +485,7 @@ async fn signed_heartbeat_sends_the_current_sequence_and_advances_the_lease() {
     Mock::given(method("POST"))
         .and(path("/api/heartbeat"))
         .and(header("Authorization", format!("Bearer {TOKEN}")))
-        .and(body_json(serde_json::json!({
+        .and(body_partial_json(serde_json::json!({
             "session_id": SESSION_ID,
             "client_version": DEFAULT_APP_VERSION,
             "build_id": BUILD_ID,
