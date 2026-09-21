@@ -1237,6 +1237,8 @@ pub async fn quick_flash_execute_boot_image(
     state: State<'_, AppState>,
     image_path: String,
 ) -> Result<CommandExecutionResultDto, String> {
+    // 刷写会写入设备分区：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     quick_flash_execute_preset_images(
         state,
         vec![QuickFlashPresetImageRequestDto {
@@ -1259,6 +1261,8 @@ pub async fn quick_flash_execute_preset_image(
     auto_reboot: Option<bool>,
     wait_for_device: Option<bool>,
 ) -> Result<CommandExecutionResultDto, String> {
+    // 刷写会写入设备分区：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     quick_flash_execute_preset_images(
         state,
         vec![QuickFlashPresetImageRequestDto {
@@ -1282,6 +1286,8 @@ pub async fn quick_flash_execute_preset_images(
     flash_both_slots: bool,
     switch_slot_after_flash: bool,
 ) -> Result<CommandExecutionResultDto, String> {
+    // 刷写会写入设备分区：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     let requests = match inspect_batch_preset_requests(requests) {
         Ok(requests) => requests,
         Err(message) => {
@@ -1349,6 +1355,8 @@ pub async fn quick_flash_execute_firmware_artifact(
     state: State<'_, AppState>,
     artifact_id: String,
 ) -> Result<CommandExecutionResultDto, String> {
+    // 刷写会写入设备分区：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     quick_flash_execute_firmware_artifact_inner(&state, artifact_id).await
 }
 
@@ -1375,6 +1383,8 @@ async fn quick_flash_execute_firmware_artifact_inner(
 pub async fn quick_flash_execute_prepared_dual_slot_preset(
     state: State<'_, AppState>,
 ) -> Result<CommandExecutionResultDto, String> {
+    // 刷写会写入设备分区：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     quick_flash_execute_prepared_dual_slot_preset_inner(&state).await
 }
 

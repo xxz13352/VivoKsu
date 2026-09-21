@@ -20,7 +20,8 @@
         "center": true,
         "resizable": false,
         "fullscreen": false,
-        "decorations": false
+        "decorations": false,
+        "devtools": false
       }
     ],
     "security": {

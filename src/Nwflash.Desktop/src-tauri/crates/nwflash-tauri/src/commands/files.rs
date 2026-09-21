@@ -718,6 +718,8 @@ pub async fn files_list(
 
 #[tauri::command]
 pub async fn files_delete(state: State<'_, AppState>, remote_path: String) -> Result<(), String> {
+    // 设备文件写入/安装：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     let command = build_delete_plan(&state.device_runtime, &remote_path)?;
 
     execute_file_command(&state, command, OperationKind::Transferring, "删除设备文件").await
@@ -762,6 +764,8 @@ pub async fn files_upload(
     source_path: String,
     remote_directory: String,
 ) -> Result<(), String> {
+    // 设备文件写入/安装：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     let serial = state.device_runtime.active_adb_serial()?;
     let service = FileManagerService::bundled();
     let source = PathBuf::from(&source_path);
@@ -785,6 +789,8 @@ pub async fn files_upload(
 
 #[tauri::command]
 pub async fn files_install_apk(state: State<'_, AppState>, apk_path: String) -> Result<(), String> {
+    // 设备文件写入/安装：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     let command = build_install_apk_plan(&state.device_runtime, Path::new(&apk_path))?;
     execute_file_transaction(
         &state,

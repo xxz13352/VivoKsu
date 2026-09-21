@@ -4,6 +4,7 @@ pub mod device_identity;
 pub mod drivers;
 pub mod files;
 pub mod firmware;
+pub mod guard;
 pub mod mirror;
 pub mod online;
 pub mod operation;

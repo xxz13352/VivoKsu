@@ -689,6 +689,8 @@ pub async fn partitions_execute_erase(
     state: State<'_, AppState>,
     selected_names: Vec<String>,
 ) -> Result<crate::commands::quick_flash::CommandExecutionResultDto, String> {
+    // 擦除分区会直接破坏设备数据：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     let plan = state
         .partition_workspace
         .build_erase_plan(&selected_names)?;
@@ -700,6 +702,8 @@ pub async fn partitions_execute_write(
     state: State<'_, AppState>,
     selected_names: Vec<String>,
 ) -> Result<crate::commands::quick_flash::CommandExecutionResultDto, String> {
+    // 写分区是不可逆操作：入口第一行强制本地能力校验，未通过即拒绝。
+    crate::commands::guard::guard_write_command(&state)?;
     let plan = state
         .partition_workspace
         .build_write_plan(&selected_names)?;
@@ -712,6 +716,8 @@ pub async fn partitions_execute_backup(
     selected_names: Vec<String>,
     output_directory: String,
 ) -> Result<crate::commands::quick_flash::CommandExecutionResultDto, String> {
+    // 备份会读取设备分区到本机：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     let plan = state
         .partition_workspace
         .build_backup_plan(&selected_names, &output_directory)?;

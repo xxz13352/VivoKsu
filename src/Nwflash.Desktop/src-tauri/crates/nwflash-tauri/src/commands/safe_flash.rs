@@ -1054,6 +1054,8 @@ async fn execute_prepared_safe_flash(
                         context,
                         cancellation,
                         None,
+                        // 测试路径:`VmpIntegrityProbe` 未链接 SDK 时恒返回不可用,自然不挂起。
+                        Arc::new(nwflash_protection::VmpIntegrityProbe),
                     )
                     .await?;
                     *execution_result_for_run
@@ -1091,6 +1093,8 @@ async fn execute_session_bound_safe_flash(
 ) -> Result<SafeFlashCommandExecutionResultDto, String> {
     let device_runtime = state.device_runtime.clone();
     let safe_flash_runtime = state.safe_flash_runtime.clone();
+    // 写入中途的反调试探针，与命令入口使用同一个实例。
+    let probe = state.protection.integrity_probe_handle();
     let execution_result = Arc::new(Mutex::new(None));
     let execution_result_for_run = execution_result.clone();
     // 「清除数据」只有拿到会话才知道（选项随预检会话一起被封存），
@@ -1140,6 +1144,7 @@ async fn execute_session_bound_safe_flash(
                         context,
                         cancellation,
                         partition_failure_hook,
+                        probe,
                     )
                     .await
                     {
@@ -1192,6 +1197,9 @@ async fn execute_safe_flash_request(
     context: nwflash_application::OperationContext,
     cancellation: tokio_util::sync::CancellationToken,
     partition_failure_hook: Option<SafeFlashPartitionFailureHook>,
+    // 写入中途反调试所需的探针。传引用而非全局单例,保证与命令入口
+    // 用的**同一个** probe 实例,"镜像完整性"与"调试器遥测"结论同源。
+    probe: Arc<dyn nwflash_protection::IntegrityProbe>,
 ) -> Result<nwflash_application::SafeFlashExecutionResult, DomainError> {
     let (serial, transition_to_fastbootd) = match device_runtime.active_adb_serial() {
         Ok(serial) => (serial, true),
@@ -1215,10 +1223,24 @@ async fn execute_safe_flash_request(
     } else {
         execution_service
     };
+    let probe = probe.clone();
     task::spawn_blocking(move || {
+        let probe = probe.clone();
         let on_partition_failure =
             partition_failure_hook.map(|hook| move |failure| hook.resolve(failure));
-        execution_service.execute_with_partition_failure_hook(
+        // 写入中途的反调试挂起查询。注意这里**不是取消**:命中时返回挂起错误,
+        // 让上层挂起任务并提示用户,设备会话保持原样(设备可能正处在写了一半
+        // 的分区上,中断才是变砖风险)。
+        let mut is_suspended = || {
+            matches!(
+                nwflash_windows::anti_debug::decide(
+                    nwflash_windows::anti_debug::is_debugger_attached(probe.as_ref()),
+                    nwflash_windows::anti_debug::OperationPhase::DuringWrite,
+                ),
+                nwflash_windows::anti_debug::AntiDebugDecision::SuspendAndWarn
+            )
+        };
+        execution_service.execute_with_suspend_gate(
             SafeFlashExecutionRequest {
                 source: &prepared.source,
                 options: &prepared.options,
@@ -1229,6 +1251,7 @@ async fn execute_safe_flash_request(
             |stage| stage_context.report_stage(stage),
             |progress| progress_context.report_progress_monotonic(progress),
             on_partition_failure,
+            &mut is_suspended,
         )
     })
     .await

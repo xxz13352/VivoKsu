@@ -275,7 +275,7 @@ impl RuntimeProtectionDependencies {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalProtectionFailure {
+pub(crate) enum LocalProtectionFailure {
     NotAuthenticated,
     StaleCapability,
     SequenceMismatch,
@@ -352,6 +352,30 @@ impl ProtectionContext {
                 Err(LocalProtectionFailure::ImageIntegrity)
             }
         }
+    }
+
+    /// 命令入口层的显式本地准入。与 `LocalProtectionGate` 共用同一套
+    /// `ProtectionContext`（时钟回退锚点 + 会话纪元 + 租约序列），因此
+    /// 命令第一行校验与 `run_async` 内的间接校验结论必然一致。
+    ///
+    /// 之所以要在命令入口再校验一次：`run_async` 的保护是**间接**的——
+    /// 只要有写类命令不经过 `operation_coordinator`（例如未来的新命令、
+    /// 或内部直接调用的执行路径），就完全没有防护。入口校验让"忘记校验"
+    /// 变成显式可见的缺口，而不是静默失效。
+    /// 暴露完整性探针给反调试模块。与 `verify_image_integrity` 用的是
+    /// **同一个** probe 实例，保证"镜像完整性"与"调试器遥测"结论同源。
+    pub(crate) fn integrity_probe(&self) -> &dyn nwflash_protection::IntegrityProbe {
+        self.probe.as_ref()
+    }
+
+    /// 与 [`Self::integrity_probe`] 同源,但交出 `Arc` 供需要跨线程移动的
+    /// 调用点使用(写执行跑在 `spawn_blocking` 里)。
+    pub(crate) fn integrity_probe_handle(&self) -> Arc<dyn nwflash_protection::IntegrityProbe> {
+        self.probe.clone()
+    }
+
+    pub(crate) fn admit_write_command(&self) -> Result<(), LocalProtectionFailure> {
+        self.admit_operation()
     }
 
     fn admit_operation(&self) -> Result<(), LocalProtectionFailure> {

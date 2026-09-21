@@ -1066,16 +1066,22 @@ pub async fn device_refresh(
 
 #[tauri::command]
 pub async fn device_reboot_system(state: State<'_, AppState>) -> Result<(), String> {
+    // 重启会打断刷机流程：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     device_reboot(&state, DeviceRebootTarget::System).await
 }
 
 #[tauri::command]
 pub async fn device_reboot_bootloader(state: State<'_, AppState>) -> Result<(), String> {
+    // 重启会打断刷机流程：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     device_reboot(&state, DeviceRebootTarget::Bootloader).await
 }
 
 #[tauri::command]
 pub async fn device_reboot_fastboot(state: State<'_, AppState>) -> Result<(), String> {
+    // 重启会打断刷机流程：入口第一行强制本地能力校验。
+    crate::commands::guard::guard_write_command(&state)?;
     device_reboot(&state, DeviceRebootTarget::Fastboot).await
 }
 
