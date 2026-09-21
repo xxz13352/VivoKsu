@@ -123,3 +123,29 @@ fn relative_scrcpy_path_is_rejected() {
 
     let _ = std::fs::remove_dir_all(&settings_dir);
 }
+
+
+/// 一致性：`create_default()` 生成的路径必须能通过 `load` 的目录约束。
+///
+/// 这两个函数分别用 `env::var`（String）与 `env::var_os`（OsString）读同一批
+/// 环境变量，回退分支的写法也不同。若两者分叉，用户在自己机器上正常保存的
+/// 配置会在重启后被静默丢弃——这条测试把该风险钉死。
+#[test]
+fn default_settings_path_passes_the_directory_constraint() {
+    let prefs = ToolPathPreferences::create_default();
+    // 通过公开 API 保存一次，再用同一路径重新加载；能读回即证明目录约束
+    // 与 create_default 的路径规则一致。
+    let mut writable = prefs;
+    writable.save_scrcpy_path(r"C:\nwflash-tests\scrcpy-probe.exe");
+
+    let reloaded = ToolPathPreferences::create_default();
+    assert_eq!(
+        reloaded.scrcpy_path(),
+        Some(r"C:\nwflash-tests\scrcpy-probe.exe"),
+        "create_default 的路径必须能通过目录约束，否则用户配置会被静默丢弃"
+    );
+
+    // 清理：恢复为空配置，避免污染后续运行。
+    let mut cleanup = ToolPathPreferences::create_default();
+    cleanup.clear_scrcpy_path();
+}

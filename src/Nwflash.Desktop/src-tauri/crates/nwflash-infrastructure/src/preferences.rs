@@ -29,10 +29,12 @@ impl ToolPathPreferences {
     }
 
     pub fn create_default() -> Self {
-        let root = std::env::var("LOCALAPPDATA")
-            .or_else(|_| std::env::var("APPDATA"))
-            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-        Self::with_path(Path::new(&root).join("VivoKsu").join(SETTINGS_FILE))
+        // 与 `expected_config_directory` 共用同一处规则：两者分别用 var / var_os
+        // 读环境变量，若各写一份回退逻辑就会分叉，导致工具自己写出的配置
+        // 被目录约束拒绝。统一走这里以保证只有一份真源。
+        let root = expected_config_directory()
+            .unwrap_or_else(|| std::env::temp_dir().join("VivoKsu"));
+        Self::with_path(root.join(SETTINGS_FILE))
     }
 
     pub fn scrcpy_path(&self) -> Option<&str> {
