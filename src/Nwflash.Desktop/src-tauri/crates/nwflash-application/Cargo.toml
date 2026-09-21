@@ -40,3 +40,6 @@ wiremock = "0.6.5"
 name = "safe_flash"
 path = "tests/safe_flash.rs"
 required-features = ["test-firmware-key-injection"]
+
+[lints]
+workspace = true

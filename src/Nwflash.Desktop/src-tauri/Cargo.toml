@@ -15,6 +15,23 @@ members = [
 ]
 resolver = "2"
 
+# P3：FFI / unsafe 边界的 lint 门禁。
+#
+# 本项目**没有 cdylib、也没有任何 extern "C" 导出**（见 P3 调研结论），
+# 因此任务书要求的 catch_unwind 包裹与 #[repr(C)] 传输没有可实施对象。
+# 能真正落地的是"防止未来引入不安全的 FFI 边界"——用 lint 把它变成
+# 编译期错误，而不是靠人审查。
+[workspace.lints.rust]
+# 在 unsafe fn 里做危险操作必须显式写 unsafe 块：防止"整个函数是 unsafe
+# 所以随便调"这种把安全边界糊掉的做法。
+unsafe_op_in_unsafe_fn = "deny"
+# 未使用的 unsafe 块是危险信号：说明作者以为某处需要 unsafe 但其实不需要，
+# 通常意味着对安全边界的理解有偏差。
+unused_unsafe = "deny"
+
+[workspace.lints.clippy]
+# 把裸指针解引用、跨 FFI 传裸指针这类操作单独拎出来审查。
+undocumented_unsafe_blocks = "warn"
 [workspace.package]
 version = "1.0.2"
 edition = "2021"
@@ -63,3 +80,6 @@ incremental = false
 debug = "full"
 split-debuginfo = "packed"
 strip = "none"
+
+[lints]
+workspace = true
