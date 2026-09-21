@@ -4,11 +4,18 @@ version = "1.0.2"
 edition = "2021"
 description = "NWflash application orchestration and use cases"
 
+[features]
+# 仅测试构建启用：允许集成测试注入固件包验签公钥。
+# 发布构建**不含**该 feature，因此注入路径不存在于发布二进制中。
+test-firmware-key-injection = []
+
 [dependencies]
 nwflash-domain = { path = "../nwflash-domain" }
 nwflash-infrastructure = { path = "../nwflash-infrastructure" }
 nwflash-protection = { path = "../nwflash-protection" }
 nwflash-windows = { path = "../nwflash-windows" }
+base64 = "0.22.1"
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 futures = "0.3.31"
 thiserror = "2.0.12"
 tokio = { version = "1.40.0", features = ["rt-multi-thread", "macros", "time"] }
@@ -20,8 +27,16 @@ serde = { version = "1.0.210", features = ["derive"] }
 base64 = "0.22.1"
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 flate2 = "1.1.9"
+sha2 = "0.10.9"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 serde_json = "1.0.128"
 tokio = { version = "1.40.0", features = ["test-util"] }
 zip4 = { package = "zip", version = "4.2.0" }
 wiremock = "0.6.5"
+
+# safe_flash 集成测试需要注入固件包验签公钥；
+# 该 feature 只在测试构建里启用，不进入发布产物。
+[[test]]
+name = "safe_flash"
+path = "tests/safe_flash.rs"
+required-features = ["test-firmware-key-injection"]

@@ -767,6 +767,17 @@ fn decode_pinset<'a>(
     Ok(pins)
 }
 
+/// 编译期嵌入的会话验证公钥,供本地工件验签复用。
+///
+/// 与租约、pinset 共用**同一把** Ed25519 公钥:不引入第二个信任根,
+/// 也就不会出现"两套信任锚点结论不一致"的破绽。缺少编译期密钥时
+/// 返回 `Err`,调用方必须按 fail-closed 处理。
+pub fn compiled_session_verifying_key() -> Result<VerifyingKey, IntegrityFailure> {
+    let encoded = option_env!("NWFLASH_SESSION_VERIFY_KEY_B64")
+        .ok_or(IntegrityFailure::MissingVerificationKey)?;
+    decode_verifying_key(encoded)
+}
+
 fn decode_verifying_key(encoded: &str) -> Result<VerifyingKey, IntegrityFailure> {
     let bytes = STANDARD
         .decode(encoded.trim())

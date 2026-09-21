@@ -2714,6 +2714,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -2748,6 +2749,7 @@ name = "nwflash-domain"
 version = "1.0.2"
 dependencies = [
  "getrandom 0.4.3",
+ "obfstr",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2795,6 +2797,7 @@ dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
  "nwflash-domain",
+ "obfstr",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -2838,10 +2841,17 @@ name = "nwflash-windows"
 version = "1.0.2"
 dependencies = [
  "nwflash-domain",
+ "nwflash-protection",
  "sevenz-rust",
  "sha2 0.10.9",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "obfstr"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cf5f1acbf6ef57cef9d127e72c4afd01d6b08692616fd09afad7f7807d6eb78"
 
 [[package]]
 name = "objc2"

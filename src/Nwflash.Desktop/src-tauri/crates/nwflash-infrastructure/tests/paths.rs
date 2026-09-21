@@ -13,6 +13,17 @@ fn unique_temp_path(name: &str) -> PathBuf {
         .join(format!("{name}-{millis}"))
 }
 
+/// 工具私有配置目录下的独立子目录，符合 P2 的目录约束。
+fn private_settings_directory(name: &str) -> PathBuf {
+    let root = env::var_os("LOCALAPPDATA")
+        .or_else(|| env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .unwrap_or_else(env::temp_dir);
+    // 私有目录下的独立子目录：每个测试用自己的 settings.json，互不干扰。
+    // `is_within` 按路径分量判定，子目录同样被认可。
+    root.join("VivoKsu").join(name)
+}
+
 #[test]
 fn resource_root_falls_back_when_preferred_root_not_writable() {
     let root = resource_root();
@@ -44,7 +55,9 @@ fn write_probe_detects_invalid_directory() {
 
 #[test]
 fn toolpath_preference_roundtrip() {
-    let settings_dir = unique_temp_path("preferences");
+    // 配置必须落在工具私有目录内（目录约束是 P2 的一条真实检查），
+    // 因此这里按 create_default 的规则构造路径，而不是随便用临时目录。
+    let settings_dir = private_settings_directory("preferences");
     let settings_path = settings_dir.join("settings.json");
 
     let mut prefs = ToolPathPreferences::with_path(settings_path.clone());
@@ -60,13 +73,53 @@ fn toolpath_preference_roundtrip() {
 
 #[test]
 fn toolpath_handles_invalid_json() {
-    let settings_dir = unique_temp_path("invalid-json");
+    let settings_dir = private_settings_directory("invalid-json");
     let settings_path = settings_dir.join("settings.json");
     std::fs::create_dir_all(&settings_dir).expect("create dir for invalid json");
     std::fs::write(&settings_path, "not json").expect("write invalid json");
 
     let prefs = ToolPathPreferences::with_path(settings_path.clone());
     assert!(prefs.scrcpy_path().is_none());
+
+    let _ = std::fs::remove_dir_all(&settings_dir);
+}
+
+/// 目录约束是 P2 的一条真实检查：配置**不得**从私有目录之外加载。
+///
+/// 这条测试证明约束不是摆设——放在临时目录里的配置会被拒绝并回退到默认值。
+#[test]
+fn config_outside_the_private_directory_is_rejected() {
+    let outside_dir = unique_temp_path("outside-private-dir");
+    std::fs::create_dir_all(&outside_dir).expect("create outside dir");
+    let settings_path = outside_dir.join("settings.json");
+    std::fs::write(&settings_path, r#"{"ScrcpyPath":"D:\\tools\\scrcpy.exe"}"#)
+        .expect("write settings");
+
+    let prefs = ToolPathPreferences::with_path(settings_path);
+
+    assert!(
+        prefs.scrcpy_path().is_none(),
+        "私有目录之外的配置必须被拒绝"
+    );
+
+    let _ = std::fs::remove_dir_all(&outside_dir);
+}
+
+/// 相对路径的 scrcpy 会被当前工作目录影响，属于劫持面，必须拒绝。
+#[test]
+fn relative_scrcpy_path_is_rejected() {
+    let settings_dir = private_settings_directory("relative-scrcpy");
+    std::fs::create_dir_all(&settings_dir).expect("create private dir");
+    let settings_path = settings_dir.join("settings.json");
+    std::fs::write(&settings_path, r#"{"ScrcpyPath":"tools\\scrcpy.exe"}"#)
+        .expect("write settings");
+
+    let prefs = ToolPathPreferences::with_path(settings_path);
+
+    assert!(
+        prefs.scrcpy_path().is_none(),
+        "相对路径的 scrcpy 必须被拒绝"
+    );
 
     let _ = std::fs::remove_dir_all(&settings_dir);
 }

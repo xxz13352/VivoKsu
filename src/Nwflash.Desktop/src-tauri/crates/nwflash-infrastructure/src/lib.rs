@@ -59,7 +59,7 @@ pub use pinned_tls::{
     ApiTlsPolicy, PinnedApiClient, SignedPinsetEnvelope, API_HOST, BUILTIN_LEAF_SPKI_PIN,
     BUILTIN_WE1_SPKI_PIN, EMBEDDED_PINSET_VERSION_FLOOR,
 };
-pub use pinned_tls::{IntegrityFailure, PinsetClaims};
+pub use pinned_tls::{compiled_session_verifying_key, IntegrityFailure, PinsetClaims};
 pub use preferences::{ToolPathPreferences, ToolPathSettings};
 pub use remote_assets::{
     github_download_url, is_known_manager_key, manager_apk_filename, manager_apk_sha256,
