@@ -25,8 +25,10 @@ use nwflash_windows::process::{ProcessCommandRecord, ProcessCommandRecorder, Pro
 
 use crate::{sanitize_operation_detail, OperationContext};
 
-/// 单条命令留痕里 stdout / stderr 各自的字符上限。命令输出可以是上百 MiB 的
-/// 刷写日志，留痕只保留开头一段用于判定协议错误。
+/// 成功命令的 stdout / stderr 各自的字符上限。
+///
+/// 失败命令不使用这个上限：失败命令必须把完整的命令级输出交给服务器，
+/// 否则 fastboot 的真正错误通常会落在进度输出之后而无法排障。
 pub const DEFAULT_OUTPUT_CHARS: usize = 300;
 
 /// 连续重复计数的上限（纯防御：计数只用于文案，不需要精确到无穷）。
@@ -58,6 +60,7 @@ pub struct OperationCommandRecorder<S: UsageDetailSink = OperationContext> {
 struct RecorderState {
     last_command: Option<String>,
     repeat_count: usize,
+    last_was_failure: bool,
 }
 
 impl OperationCommandRecorder<OperationContext> {
@@ -84,11 +87,17 @@ impl<S: UsageDetailSink> OperationCommandRecorder<S> {
 impl<S: UsageDetailSink> ProcessCommandRecorder for OperationCommandRecorder<S> {
     fn record(&self, record: ProcessCommandRecord<'_>) {
         let command = render_command(record.program, record.args);
+        let failed = command_failed(&record);
         let outcome = render_outcome(record.exit_code, record.termination, record.duration);
         let mut lines: Vec<String> = Vec::new();
         {
             let mut state = self.state.lock().unwrap_or_else(|value| value.into_inner());
-            if state.last_command.as_deref() == Some(command.as_str()) {
+            // 只有成功的轮询命令可以折叠。失败命令即使 argv 相同，也必须逐条
+            // 保留完整输出，避免第二次失败的真实原因被折叠计数吞掉。
+            if !failed
+                && !state.last_was_failure
+                && state.last_command.as_deref() == Some(command.as_str())
+            {
                 state.repeat_count = (state.repeat_count + 1).min(MAX_REPEAT_COUNT);
                 return;
             }
@@ -102,13 +111,48 @@ impl<S: UsageDetailSink> ProcessCommandRecorder for OperationCommandRecorder<S> 
             }
             state.last_command = Some(command.clone());
             state.repeat_count = 1;
-            lines.push(render_entry(&command, &outcome, &record, self.output_chars));
+            state.last_was_failure = failed;
+            lines.push(render_entry(
+                &command,
+                &outcome,
+                &record,
+                if failed {
+                    usize::MAX
+                } else {
+                    self.output_chars
+                },
+            ));
         }
         // 在锁外上报：`report` 会去抢明细分桶的锁，不能与自身状态锁嵌套。
         for line in lines {
             self.sink.report(line);
         }
     }
+}
+
+fn command_failed(record: &ProcessCommandRecord<'_>) -> bool {
+    !matches!(record.termination, ProcessTermination::Completed)
+        || record.exit_code != Some(0)
+        || output_reports_failure(record.stdout)
+        || output_reports_failure(record.stderr)
+}
+
+/// fastboot 有些协议失败会以退出码 0 返回，失败只出现在 stdout/stderr 的
+/// `FAILED (...)`、`ERROR ...`、`error:` 或 `remote error` 行里。命中后也必须走完整日志路径。
+fn output_reports_failure(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).lines().any(|line| {
+        let line = line
+            .trim()
+            .strip_prefix("(bootloader)")
+            .unwrap_or(line)
+            .trim();
+        let upper = line.to_ascii_uppercase();
+        !line.is_empty()
+            && (upper.starts_with("FAILED")
+                || upper.starts_with("ERROR")
+                || upper.contains("REMOTE ERROR")
+                || upper.contains("ERROR:"))
+    })
 }
 
 fn render_entry(
@@ -365,6 +409,53 @@ mod tests {
 
         let lines = sink.lines();
         assert!(lines[0].contains(&format!("out: {}…", "x".repeat(32))));
+    }
+
+    #[test]
+    fn failed_command_keeps_the_complete_output() {
+        let sink = Arc::new(RecordingSink::default());
+        let command = args(&["flash", "system", "system.img"]);
+        let mut output = vec![b'x'; 2_000];
+        output.extend_from_slice(b"\nFAILED (remote: 'no link')");
+        recorder(sink.clone()).record(record("fastboot", &command, Some(1), &output, b""));
+
+        let line = sink.lines().remove(0);
+        let expected = sanitize_operation_detail(&String::from_utf8_lossy(&output));
+        assert!(line.contains(&expected));
+        assert!(!line.contains('…'));
+    }
+
+    #[test]
+    fn failed_commands_with_the_same_argv_are_not_collapsed() {
+        let sink = Arc::new(RecordingSink::default());
+        let command = args(&["flash", "system", "system.img"]);
+        let recorder = recorder(sink.clone());
+        recorder.record(record("fastboot", &command, Some(1), b"first failure", b""));
+        recorder.record(record(
+            "fastboot",
+            &command,
+            Some(1),
+            b"second failure",
+            b"",
+        ));
+
+        let lines = sink.lines();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("first failure"));
+        assert!(lines[1].contains("second failure"));
+    }
+
+    #[test]
+    fn protocol_failure_output_uses_the_complete_path_even_with_zero_exit() {
+        let sink = Arc::new(RecordingSink::default());
+        let command = args(&["flash", "system", "system.img"]);
+        let mut output = vec![b'x'; 2_000];
+        output.extend_from_slice(b"\nFAILED (remote: 'no link')");
+        recorder(sink.clone()).record(record("fastboot", &command, Some(0), &output, b""));
+
+        let line = sink.lines().remove(0);
+        assert!(!line.contains('…'));
+        assert!(line.contains("FAILED (remote: 'no link')"));
     }
 
     #[test]
