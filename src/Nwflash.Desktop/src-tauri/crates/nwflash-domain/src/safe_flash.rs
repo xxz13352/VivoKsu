@@ -69,3 +69,51 @@ pub fn should_skip_safe_flash_partition(partition_name: &str) -> bool {
         })
         || name.contains("preloader")
 }
+
+/// 受保护分区：留在刷写队列里，但**绝不真正写入设备**。
+///
+/// 两类分区受保护，与是否勾选“安全刷写”的对应关系是：
+///
+/// | 分区 | 未勾选安全刷写 | 勾选安全刷写 |
+/// |---|---|---|
+/// | `lk` / `lk_…` / `lk<数字>` / 含 `preloader` | 受保护 | 受保护 |
+/// | system、product、vendor、odm、system_ext、odm_dlkm、system_dlkm、vendor_dlkm | 正常刷写 | 受保护 |
+///
+/// 受保护分区仍然出现在刷写队列与日志里（假装刷入），只是不派发真实
+/// fastboot 命令；带槽位后缀的变体（`system_a`、`lk_b`）按基名判定。
+pub fn should_simulate_safe_flash_partition(partition_name: &str, safe_flash: bool) -> bool {
+    if should_skip_safe_flash_partition(partition_name) {
+        return true;
+    }
+    let name = partition_name.to_ascii_lowercase();
+    let base = name.strip_suffix("_a").or_else(|| name.strip_suffix("_b")).unwrap_or(&name);
+    safe_flash && matches!(base,
+        "system" | "product" | "vendor" | "odm" | "system_ext"
+        | "odm_dlkm" | "system_dlkm" | "vendor_dlkm")
+}
+
+/// 「保留 ROOT」要保护、因此只做假刷写的启动分区。
+///
+/// 带槽位后缀的变体（`boot_a`、`init_boot_b`）必须按基名判定：勾选保留 ROOT
+/// 时它们同样不能被覆盖，否则当前槽位的 boot 会被写掉。
+pub fn should_simulate_keep_root_partition(partition_name: &str) -> bool {
+    let name = partition_name.to_ascii_lowercase();
+    let base = name.strip_suffix("_a").or_else(|| name.strip_suffix("_b")).unwrap_or(&name);
+    matches!(base, "boot" | "init_boot" | "vendor_boot")
+}
+
+/// 「假刷写」的唯一判定入口：命中者**留在刷写队列里**、日志照常显示刷入、
+/// 计数与进度也照常推进，但绝不派发 `fastboot flash`——只按镜像大小
+/// ÷ 35MB/s 等出与真机一致的耗时。
+///
+/// 命中条件是两类分区的并集：
+/// 1. 安全刷写规则下的受保护分区，见 [`should_simulate_safe_flash_partition`]；
+/// 2. 勾选「保留 ROOT」时的启动分区，见 [`should_simulate_keep_root_partition`]。
+pub fn should_simulate_partition_flash(
+    partition_name: &str,
+    safe_flash: bool,
+    keep_root: bool,
+) -> bool {
+    should_simulate_safe_flash_partition(partition_name, safe_flash)
+        || (keep_root && should_simulate_keep_root_partition(partition_name))
+}

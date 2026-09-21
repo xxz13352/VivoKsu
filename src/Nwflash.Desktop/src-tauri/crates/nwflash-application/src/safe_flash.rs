@@ -19,14 +19,13 @@ use crate::{
     QuickFlashService,
 };
 use nwflash_domain::{
-    compute_targets, is_slot_based_mode, other_slot, should_skip_safe_flash_partition, DomainError,
+    compute_targets, is_slot_based_mode, other_slot, should_simulate_partition_flash, DomainError,
     PartitionExecutionPlan, PartitionOperationKind, PartitionTask, PartitionTransportKind,
     SafeFlashSlotMode,
 };
 use nwflash_infrastructure::{
     build_download_target_path, download_to_file_with_cancellation, validate_available_space,
-    write_wipe_data_image, EmbeddedAssetError, OtaDiskSpaceProvider, OtaDownloadError,
-    OtaDownloadProgressSink, SystemOtaDiskSpaceProvider,
+    OtaDiskSpaceProvider, OtaDownloadError, OtaDownloadProgressSink, SystemOtaDiskSpaceProvider,
 };
 use nwflash_windows::{
     device_transport::DeviceTransport,
@@ -54,6 +53,21 @@ pub struct SafeFlashPartitionSource {
     pub partition_name: String,
     pub image_path: String,
     pub has_slot: bool,
+    /// 「假刷写」字节数（判定见 [`should_simulate_partition_flash`]：
+    /// 安全刷写下的受保护分区，以及保留 ROOT 勾选时的启动分区）。
+    /// 为 `Some` 时该分区仍留在刷写队列里、日志照常显示刷入，但不会真正
+    /// 写设备；执行阶段只按 `大小 / 35MB/s` 等待真实刷写所需的时间。
+    ///
+    /// 镜像**照常解包**（“假戏真做”：解包进度、耗时与临时占用与真机一致），
+    /// 本字段取的就是落盘镜像的真实大小。
+    pub simulated_flash_bytes: Option<u64>,
+}
+
+impl SafeFlashPartitionSource {
+    /// 是否只在队列里做“假刷写”，绝不派发真实 fastboot 命令。
+    pub fn is_simulated(&self) -> bool {
+        self.simulated_flash_bytes.is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,8 +75,9 @@ pub struct SafeFlashBuildOptions {
     pub serial: String,
     pub is_safe_flash: bool,
     pub is_keep_root: bool,
+    /// 勾选「清除数据」：刷完分区后**不写 misc**，而是 `fastboot reboot recovery`
+    /// 把设备重启到 REC，由用户手动执行清除数据。
     pub wipe_data: bool,
-    pub wipe_data_image_path: Option<String>,
     pub slot_mode: SafeFlashSlotMode,
     pub current_slot: Option<String>,
 }
@@ -84,7 +99,6 @@ pub enum SafeFlashSource {
 pub struct SafeFlashPreparedSource {
     pub staging_root: Option<PathBuf>,
     pub partitions: Vec<SafeFlashPartitionSource>,
-    pub wipe_data_image_path: Option<String>,
     pub has_block_based_content: bool,
 }
 
@@ -155,6 +169,73 @@ mod command_budget {
         }
     }
 }
+
+/// “假刷写”参数。只做假刷写的分区（见 [`should_simulate_partition_flash`]）
+/// 不派发任何 fastboot 命令，但**必须**占用与真实刷写一致的墙钟时间，
+/// 否则日志与耗时都会露馅。
+mod simulated_flash {
+    use std::time::Duration;
+
+    /// 模拟速率：35 MB/s。取这个量级是因为它正是中低端 UFS 机型在
+    /// fastbootd 下逐分区刷写的实测吞吐，`分区大小 ÷ 35MB/s` 得到的
+    /// 等待时长与真机刷写基本重合。
+    pub const SPEED_BYTES_PER_SECOND: u64 = 35 * 1024 * 1024;
+
+    /// 等待切片粒度：每片之间检查一次取消，保证“停止操作”立刻生效，
+    /// 而不会等整个分区模拟完。
+    pub const SLICE: Duration = Duration::from_millis(50);
+
+    /// `duration = 字节数 ÷ 35MB/s`。整型运算，避免浮点误差累积。
+    pub fn duration(bytes: u64) -> Duration {
+        Duration::from_millis(bytes.saturating_mul(1_000) / SPEED_BYTES_PER_SECOND)
+    }
+}
+
+/// 刷写队列里的一步。分区刷写、`set_active`、重启到 REC 与收尾重启共用一条
+/// 队列，靠标记区分语义。
+#[derive(Debug, Clone)]
+struct SafeFlashStep {
+    command: ProcessCommand,
+    /// 是否写入类命令（分区刷写）。
+    is_flash: bool,
+    /// 是否分区刷写命令（`fastboot flash <分区> <镜像>`）。
+    is_partition_flash: bool,
+    /// `Some(bytes)`：这一步只做假刷写，留在队列里按镜像大小模拟耗时，
+    /// 不派发命令（判定见 [`should_simulate_partition_flash`]）。
+    simulated_flash_bytes: Option<u64>,
+    /// 失败是否只提示、不中止整轮（目前只用于 `reboot recovery`：机型不支持
+    /// 该目标时设备仍停在 fastbootd，用户手动重启到 REC 即可完成清除数据）。
+    tolerate_failure: bool,
+}
+
+impl SafeFlashStep {
+    fn control(command: ProcessCommand) -> Self {
+        Self {
+            command,
+            is_flash: false,
+            is_partition_flash: false,
+            simulated_flash_bytes: None,
+            tolerate_failure: false,
+        }
+    }
+
+    /// 失败只提示、不中止：用于收尾动作。
+    fn tolerant_control(command: ProcessCommand) -> Self {
+        Self {
+            tolerate_failure: true,
+            ..Self::control(command)
+        }
+    }
+}
+
+/// 勾选「清除数据」时，最后一步把设备重启到 REC，并在日志里给出手动清除步骤
+/// （进 REC 后 adb/fastboot 都检测不到设备，只能由用户在 REC 界面里操作）。
+pub const SAFE_FLASH_WIPE_DATA_MANUAL_STEPS: &str =
+    "重启到REC（进REC后电脑就检测不到设备了）。请手动执行：清除数据-清除全部数据-确定-重启";
+
+/// `reboot recovery` 失败时的提示：设备仍在 fastbootd，改为手动进 REC。
+const SAFE_FLASH_WIPE_DATA_MANUAL_FALLBACK: &str =
+    "未能自动重启到REC，请手动重启到 REC 后执行：清除数据-清除全部数据-确定-重启";
 
 /// fastboot 协议错误（`FAILED (…)` / `remote error`）可能以退出码 0 伴随
 /// stderr 输出出现。退出码为 0 时仍必须扫描输出，命中即判失败，防止
@@ -327,17 +408,10 @@ impl SafeFlashExecutionService {
             None
         };
 
-        let mut flash_commands = Vec::new();
+        let mut flash_steps = Vec::new();
         let mut skipped_partition_count = 0usize;
         for source in &request.source.partitions {
             self.ensure_not_canceled(&mut is_canceled)?;
-            if !SafeFlashService::new().is_partition_included(
-                &source.partition_name,
-                request.options.is_safe_flash,
-                request.options.is_keep_root,
-            ) {
-                continue;
-            }
 
             let has_slot = if is_slot_based_mode(request.options.slot_mode) {
                 let variable = format!("has-slot:{}", source.partition_name);
@@ -356,104 +430,94 @@ impl SafeFlashExecutionService {
                 current_slot.as_deref(),
                 has_slot,
             ) {
-                if !self.fastboot_partition_exists(
-                    &transport,
-                    &serial,
+                // 受保护分区（安全刷写）与保留 ROOT 的启动分区照旧进队列，
+                // 只是绝不会真的写设备：刷写日志、分区序号与耗时都与真实
+                // 刷写完全一致，判定在域层统一维护。
+                let simulated_flash_bytes = should_simulate_partition_flash(
                     &target,
-                    &mut is_canceled,
-                )? {
-                    skipped_partition_count += 1;
-                    report_stage(format!("跳过不存在分区：{target}"));
-                    continue;
-                }
-                flash_commands.push(
-                    transport
+                    request.options.is_safe_flash,
+                    request.options.is_keep_root,
+                )
+                .then(|| source.simulated_flash_bytes.unwrap_or(0));
+                flash_steps.push(SafeFlashStep {
+                    command: transport
                         .build_fastboot_flash_command(&serial, &target, &source.image_path)
                         .map_err(|error| {
                             DomainError::InvalidOperation(format!("生成刷写命令失败：{error}"))
                         })?,
-                );
+                    is_flash: true,
+                    is_partition_flash: true,
+                    simulated_flash_bytes,
+                    tolerate_failure: false,
+                });
             }
         }
 
-        if flash_commands.is_empty() {
+        if flash_steps.is_empty() {
             return Err(DomainError::InvalidOperation(
                 "未发现可刷写分区（可能设备分区与固件不匹配）。".to_string(),
             ));
         }
 
-        // (命令, 是否分区刷写命令, 失败时是否可交由用户决策)
-        let mut commands: Vec<(ProcessCommand, bool, bool)> = flash_commands
-            .into_iter()
-            .map(|command| (command, true, true))
-            .collect();
+        let mut commands = flash_steps;
         if request.options.slot_mode == SafeFlashSlotMode::OtherSlot {
             // current-slot 可读即追加 set_active：has_slot=false 只把刷写
             // 目标降级为分区原名，不取消槽位切换（C# 语义，配套测试
             // execution_degrades_to_partition_original_name_when_has_slot_is_unreadable）。
             if let Some(next_slot) = other_slot(current_slot.as_deref()) {
-                commands.push((
+                commands.push(SafeFlashStep::control(
                     transport
                         .build_fastboot_set_active_command(&serial, next_slot)
                         .map_err(|error| {
                             DomainError::InvalidOperation(format!("切换槽位失败：{error}"))
                         })?,
-                    false,
-                    false,
                 ));
             }
         }
         if request.options.wipe_data {
-            let image_path = request
-                .options
-                .wipe_data_image_path
-                .as_deref()
-                .filter(|path| !path.trim().is_empty())
-                .ok_or_else(|| {
-                    DomainError::InvalidInput("清除数据镜像路径不能为空。".to_string())
-                })?;
-            if self.fastboot_partition_exists(
-                &transport,
-                &serial,
-                SafeFlashService::WIPE_DATA_PARTITION,
-                &mut is_canceled,
-            )? {
-                commands.push((
-                    transport
-                        .build_fastboot_flash_command(
-                            &serial,
-                            SafeFlashService::WIPE_DATA_PARTITION,
-                            image_path,
-                        )
-                        .map_err(|error| {
-                            DomainError::InvalidOperation(format!("生成清除数据命令失败：{error}"))
-                        })?,
-                    true,
-                    false,
-                ));
-            } else {
-                skipped_partition_count += 1;
-            }
+            // 「清除数据」不再往 misc 写 BCB：改为把设备重启到 REC，由用户在
+            // REC 界面里手动清除数据（进 REC 后 adb/fastboot 都检测不到设备，
+            // 程序无法代劳）。因此这一步就是队列的最后一步——设备离开
+            // fastboot 后不该再派发任何 fastboot 命令。
+            //
+            // 失败只提示不中止：机型不支持 `reboot recovery` 时设备仍停在
+            // fastbootd，用户手动重启到 REC 同样能完成清除数据，没有理由把
+            // 已经刷好的整轮判失败。
+            commands.push(SafeFlashStep::tolerant_control(
+                transport
+                    .build_fastboot_reboot_target_command(&serial, Some("recovery"))
+                    .map_err(|error| {
+                        DomainError::InvalidOperation(format!("生成重启到REC命令失败：{error}"))
+                    })?,
+            ));
+        } else {
+            commands.push(SafeFlashStep::control(
+                transport.build_fastboot_reboot_command(&serial).map_err(|error| {
+                    DomainError::InvalidOperation(format!("重启设备失败：{error}"))
+                })?,
+            ));
         }
-        commands.push((
-            transport
-                .build_fastboot_reboot_command(&serial)
-                .map_err(|error| DomainError::InvalidOperation(format!("重启设备失败：{error}")))?,
-            false,
-            false,
-        ));
 
         let command_total = commands.len();
         let command_count = command_total + usize::from(request.transition_to_fastbootd);
         let mut flashed_partition_count = 0usize;
         let mut remaining = commands;
         let mut index = 0usize;
-        // 刷写阶段对外只保留这一条 stage：逐命令文案会把工具路径/分区
-        // 细节刷进日志；总进度由循环内的 progress 单独驱动。
+        let partition_total = remaining
+            .iter()
+            .filter(|step| step.is_partition_flash)
+            .count();
+        let mut partition_index = 0usize;
         report_stage("正在刷写".to_string());
         while !remaining.is_empty() {
-            let (command, is_flash, is_partition_flash) = remaining.remove(0);
-            let retry_command = command.clone();
+            let step = remaining.remove(0);
+            let SafeFlashStep {
+                command,
+                is_flash,
+                is_partition_flash,
+                simulated_flash_bytes,
+                tolerate_failure,
+            } = step.clone();
             index += 1;
             self.ensure_not_canceled(&mut is_canceled)?;
             if is_partition_flash {
@@ -465,9 +529,20 @@ impl SafeFlashExecutionService {
                     .and_then(|position| command.args.get(position + 1))
                     .cloned()
                     .unwrap_or_default();
+                partition_index += 1;
+                report_stage(format!(
+                    "刷写分区[{partition_index}/{partition_total}] ..."
+                ));
+            } else if tolerate_failure {
+                // 重启到 REC：先把「进 REC 后要手动做什么」写给用户，
+                // 设备进入 REC 后程序就再也探测不到它了。
+                report_stage(SAFE_FLASH_WIPE_DATA_MANUAL_STEPS.to_string());
             }
             report_progress(index as f64 / command_total as f64);
-            let run_result = if is_partition_flash {
+            let run_result = if let Some(bytes) = simulated_flash_bytes {
+                // 受保护分区：只等时间，不发命令，日志与真实刷写一字不差。
+                self.run_simulated_flash(bytes, &mut is_canceled)
+            } else if is_partition_flash {
                 self.run_partition_flash(command, &mut is_canceled)
             } else {
                 self.run_required(command, &mut is_canceled, "fastboot 命令")
@@ -477,6 +552,11 @@ impl SafeFlashExecutionService {
                     executed_command_count += 1;
                     if is_flash {
                         flashed_partition_count += 1;
+                        if is_partition_flash {
+                            report_stage(format!(
+                                "刷写分区[{partition_index}/{partition_total}] ... OK"
+                            ));
+                        }
                     }
                 }
                 Err(error) => {
@@ -484,6 +564,17 @@ impl SafeFlashExecutionService {
                     // 避免在取消收尾期间误触发前端失败决策弹窗。
                     if matches!(error, DomainError::UserCancelled(_)) {
                         return Err(error);
+                    }
+                    if is_partition_flash {
+                        report_stage(format!(
+                            "刷写分区[{partition_index}/{partition_total}] ... 失败"
+                        ));
+                    }
+                    if tolerate_failure {
+                        // 收尾动作失败不算整轮失败：设备只是没自动进 REC，
+                        // 用户手动重启到 REC 同样能清除数据，日志给出替代步骤。
+                        report_stage(SAFE_FLASH_WIPE_DATA_MANUAL_FALLBACK.to_string());
+                        continue;
                     }
                     if !is_partition_flash || on_partition_failure.is_none() {
                         // 无决策回调时保持原语义：分区刷写失败以脱敏的
@@ -510,7 +601,8 @@ impl SafeFlashExecutionService {
                             // 步骤，也不是跳过分区，因此回退索引并把原受控
                             // 命令放回队首。下一次进度仍为相同的 i / total。
                             index -= 1;
-                            remaining.insert(0, (retry_command, is_flash, is_partition_flash));
+                            partition_index -= 1;
+                            remaining.insert(0, step);
                             continue;
                         }
                         SafeFlashPartitionFailureDecision::Continue => {
@@ -746,44 +838,34 @@ impl SafeFlashExecutionService {
             .ok_or_else(|| DomainError::InvalidOperation(format!("未读取到 {variable} 值。")))
     }
 
-    fn fastboot_partition_exists<F>(
+    /// 只做假刷写的分区的“假刷写”：不派发任何命令，只按镜像大小 ÷ 35MB/s
+    /// 等待，让阶段日志与总耗时和真实刷入一致。
+    ///
+    /// 等待分片进行，每片之间检查取消——用户点“停止操作”必须立刻收尾，
+    /// 而不是等整个分区模拟完（一个 system.img 的模拟时长可达分钟级）。
+    fn run_simulated_flash<F>(
         &self,
-        transport: &DeviceTransport,
-        serial: &str,
-        partition: &str,
+        bytes: u64,
         is_canceled: &mut F,
-    ) -> Result<bool, DomainError>
+    ) -> Result<ProcessOutput, DomainError>
     where
         F: FnMut() -> bool,
     {
         self.ensure_not_canceled(is_canceled)?;
-        let command = transport
-            .build_fastboot_getvar_command(serial, &format!("partition-type:{partition}"))
-            .map_err(|error| DomainError::InvalidOperation(format!("读取分区类型失败：{error}")))?;
-        let output = self
-            .executor
-            .run_with_timeout(
-                command,
-                Some(command_budget::CONTROL),
-                is_canceled,
-            )
-            .map_err(|error| match error {
-                DomainError::UserCancelled(_) => {
-                    DomainError::UserCancelled("运行被用户取消".to_string())
-                }
-                _ => DomainError::ExternalTool(format!("读取分区 {partition} 失败。")),
-            })?;
-        if output.exit_code == 0 {
-            return Ok(true);
+        let mut remaining = simulated_flash::duration(bytes);
+        while !remaining.is_zero() {
+            let slice = remaining.min(simulated_flash::SLICE);
+            thread::sleep(slice);
+            remaining -= slice;
+            self.ensure_not_canceled(is_canceled)?;
         }
-        if is_missing_partition_error(&output.stdout) || is_missing_partition_error(&output.stderr)
-        {
-            return Ok(false);
-        }
-        Err(DomainError::ExternalTool(format!(
-            "读取分区 {partition} 失败，退出码 {}。",
-            output.exit_code
-        )))
+        // 与真实成功刷写同样返回退出码 0：调用方按“刷写成功”计入日志与
+        // 计数，对外看不出这条分区没有真的写设备。
+        Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
     }
 }
 
@@ -847,14 +929,6 @@ fn parse_slot_flag(value: &str) -> Option<bool> {
         "no" | "0" | "false" | "off" => Some(false),
         _ => None,
     }
-}
-
-fn is_missing_partition_error(text: &str) -> bool {
-    let normalized = text.to_lowercase();
-    normalized.contains("unknown partition")
-        || normalized.contains("partition not found")
-        || normalized.contains("does not exist")
-        || normalized.contains("unknown variable")
 }
 
 /// 汇总一次失败的 fastboot 进程输出，供分区失败决策回调（前端弹窗）
@@ -940,9 +1014,6 @@ impl Default for SafeFlashService {
 }
 
 impl SafeFlashService {
-    pub const WIPE_DATA_PARTITION: &'static str = "misc";
-    const WIPE_DATA_FILENAME: &'static str = "wipe-data.img";
-
     pub fn new() -> Self {
         Self
     }
@@ -972,14 +1043,8 @@ impl SafeFlashService {
                 )));
             }
 
-            if !self.is_partition_included(
-                partition_name,
-                options.is_safe_flash,
-                options.is_keep_root,
-            ) {
-                continue;
-            }
-
+            // 计划里保留全部条目：受保护分区与保留 ROOT 的启动分区同样会
+            // 出现在刷写队列与日志里（假刷写），预检计数必须与之一致。
             let targets = if is_slot_based_mode(options.slot_mode) {
                 compute_targets(
                     partition_name,
@@ -1002,24 +1067,8 @@ impl SafeFlashService {
             }
         }
 
-        if options.wipe_data {
-            let wipe_data_path = options
-                .wipe_data_image_path
-                .as_ref()
-                .filter(|path| !path.trim().is_empty())
-                .ok_or_else(|| {
-                    DomainError::InvalidInput("清除数据镜像路径不能为空。".to_string())
-                })?;
-
-            tasks.push(PartitionTask {
-                partition_name: Self::WIPE_DATA_PARTITION.to_string(),
-                device_path: Self::WIPE_DATA_PARTITION.to_string(),
-                image_path: Some(wipe_data_path.clone()),
-                output_path: None,
-                size_bytes: None,
-            });
-        }
-
+        // 「清除数据」不再产生刷写任务：它现在是收尾的 `fastboot reboot
+        // recovery`，不是对 misc 的写入，因此预检计数只数固件分区。
         if tasks.is_empty() {
             return Err(DomainError::InvalidOperation(
                 "请至少选择一个可刷写分区。".to_string(),
@@ -1171,17 +1220,10 @@ impl SafeFlashService {
             .map_err(map_firmware_extract_error)?;
             self.ensure_preparation_not_canceled(cancellation)?;
             let _ = std::fs::remove_dir_all(&metadata_directory);
-            let selected = inspection
-                .entries
-                .into_iter()
-                .filter(|entry| {
-                    self.is_partition_included(
-                        &entry.name,
-                        options.is_safe_flash,
-                        options.is_keep_root,
-                    )
-                })
-                .collect::<Vec<_>>();
+            // 「假戏真做」：只做假刷写的分区（受保护分区、保留 ROOT 的启动
+            // 分区）同样要真的解包——解包进度、耗时与临时占用必须与真机刷写
+            // 一致，唯一被模拟的是「写进设备」那一步。
+            let selected = inspection.entries;
             if selected.is_empty() {
                 return Err(DomainError::InvalidOperation(
                     "payload 中没有可刷写分区。".to_string(),
@@ -1229,18 +1271,25 @@ impl SafeFlashService {
             let partitions = selected
                 .into_iter()
                 .zip(images)
-                .map(|(entry, image)| SafeFlashPartitionSource {
-                    partition_name: entry.name,
-                    image_path: image.path,
-                    has_slot: true,
+                .map(|(entry, image)| {
+                    // 模拟耗时直接取解包出来的真实镜像大小。
+                    let simulated_flash_bytes = should_simulate_partition_flash(
+                        &entry.name,
+                        options.is_safe_flash,
+                        options.is_keep_root,
+                    )
+                    .then(|| u64::try_from(image.size_bytes).unwrap_or(0));
+                    SafeFlashPartitionSource {
+                        partition_name: entry.name,
+                        image_path: image.path,
+                        has_slot: true,
+                        simulated_flash_bytes,
+                    }
                 })
                 .collect();
-            let wipe_data_image_path =
-                self.resolve_wipe_data_image_path(Some(&staging_root), options)?;
             Ok(SafeFlashPreparedSource {
                 staging_root: Some(staging_root.clone()),
                 partitions,
-                wipe_data_image_path,
                 has_block_based_content: false,
             })
         })();
@@ -1366,32 +1415,15 @@ impl SafeFlashService {
         let mut has_block_based_content = false;
 
         if meta.is_dir() {
-            let staging_root = options.wipe_data.then(|| self.create_staging_root());
-            if let Some(root) = staging_root.as_deref() {
-                std::fs::create_dir_all(root).map_err(|error| {
-                    DomainError::InvalidOperation(format!("创建临时目录失败：{error}"))
-                })?;
-            }
-            let result = (|| {
-                let partitions = self
-                    .list_directory_images(path, options, cancellation)
-                    .map_err(map_preparation_io_error)?;
-                let wipe_data_image_path =
-                    self.resolve_wipe_data_image_path(staging_root.as_deref(), options)?;
-
-                Ok(SafeFlashPreparedSource {
-                    staging_root: staging_root.clone(),
-                    partitions,
-                    wipe_data_image_path,
-                    has_block_based_content: false,
-                })
-            })();
-            if result.is_err() {
-                if let Some(root) = staging_root.as_deref() {
-                    let _ = std::fs::remove_dir_all(root);
-                }
-            }
-            return result;
+            // 解包目录来源直接读用户盘上的镜像，不需要临时目录。
+            let partitions = self
+                .list_directory_images(path, options, cancellation)
+                .map_err(map_preparation_io_error)?;
+            return Ok(SafeFlashPreparedSource {
+                staging_root: None,
+                partitions,
+                has_block_based_content: false,
+            });
         }
 
         if !path.is_file() {
@@ -1406,8 +1438,7 @@ impl SafeFlashService {
             .and_then(|ext| ext.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let staging_root =
-            (options.wipe_data || extension == "zip").then(|| self.create_staging_root());
+        let staging_root = (extension == "zip").then(|| self.create_staging_root());
         if let Some(root) = staging_root.as_deref() {
             std::fs::create_dir_all(root).map_err(|error| {
                 DomainError::InvalidOperation(format!("创建临时目录失败：{error}"))
@@ -1428,7 +1459,7 @@ impl SafeFlashService {
                 )
                 .await?
             } else if extension == "img" || extension == "bin" {
-                self.list_single_image(path)?
+                self.list_single_image(path, options)?
             } else {
                 return Err(DomainError::InvalidFormat(
                     "仅支持 .zip/.img/.bin 来源。".to_string(),
@@ -1436,13 +1467,10 @@ impl SafeFlashService {
             };
 
             self.ensure_preparation_not_canceled(cancellation)?;
-            let wipe_data_image_path =
-                self.resolve_wipe_data_image_path(staging_root.as_deref(), options)?;
 
             Ok(SafeFlashPreparedSource {
                 staging_root: staging_root.clone(),
                 partitions,
-                wipe_data_image_path,
                 has_block_based_content,
             })
         }
@@ -1525,13 +1553,10 @@ impl SafeFlashService {
                 .has_block_based_content_with_cancellation(&download_target, cancellation)
                 .map_err(map_preparation_io_error)?;
 
-            let wipe_data_image_path =
-                self.resolve_wipe_data_image_path(Some(&staging_root), options)?;
 
             Ok(SafeFlashPreparedSource {
                 staging_root: Some(staging_root.clone()),
                 partitions,
-                wipe_data_image_path,
                 has_block_based_content,
             })
         }
@@ -1552,7 +1577,11 @@ impl SafeFlashService {
         Ok(())
     }
 
-    fn list_single_image(&self, path: &Path) -> Result<Vec<SafeFlashPartitionSource>, DomainError> {
+    fn list_single_image(
+        &self,
+        path: &Path,
+        options: &SafeFlashBuildOptions,
+    ) -> Result<Vec<SafeFlashPartitionSource>, DomainError> {
         let name = path
             .file_stem()
             .and_then(|value| value.to_str())
@@ -1566,55 +1595,21 @@ impl SafeFlashService {
             ));
         }
 
+        // 单独选中的镜像若正好只做假刷写（例如只挑了 system.img，或勾选了
+        // 保留 ROOT 却挑了 boot.img）：文件本来就在本地，用它的真实大小计时。
+        let simulated_flash_bytes = should_simulate_partition_flash(
+            name,
+            options.is_safe_flash,
+            options.is_keep_root,
+        )
+        .then(|| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0));
+
         Ok(vec![SafeFlashPartitionSource {
             partition_name: name.to_string(),
             image_path: path.to_string_lossy().into_owned(),
             has_slot: true,
+            simulated_flash_bytes,
         }])
-    }
-
-    fn resolve_wipe_data_image_path(
-        &self,
-        staging_root: Option<&Path>,
-        options: &SafeFlashBuildOptions,
-    ) -> Result<Option<String>, DomainError> {
-        if !options.wipe_data {
-            return Ok(options.wipe_data_image_path.clone());
-        }
-
-        if let Some(path) = options.wipe_data_image_path.as_ref() {
-            if path.trim().is_empty() {
-                return Err(DomainError::InvalidInput(
-                    "清除数据镜像路径不能为空。".to_string(),
-                ));
-            }
-            return Ok(Some(path.clone()));
-        }
-
-        let root = staging_root.ok_or_else(|| {
-            DomainError::InvalidOperation("未提供临时目录，无法生成清除镜像。".to_string())
-        })?;
-
-        let destination = root.join(Self::WIPE_DATA_FILENAME);
-        write_wipe_data_image(&destination).map_err(map_embedded_asset_error)?;
-        Ok(Some(destination.to_string_lossy().into_owned()))
-    }
-
-    fn is_partition_included(
-        &self,
-        partition_name: &str,
-        is_safe_flash: bool,
-        is_keep_root: bool,
-    ) -> bool {
-        (!is_safe_flash || !should_skip_safe_flash_partition(partition_name))
-            && (!is_keep_root || !self.is_boot_partition(partition_name))
-    }
-
-    fn is_boot_partition(&self, name: &str) -> bool {
-        matches!(
-            name.to_lowercase().as_str(),
-            "boot" | "init_boot" | "vendor_boot"
-        )
     }
 
     fn list_directory_images(
@@ -1654,19 +1649,20 @@ impl SafeFlashService {
                 continue;
             }
 
-            if !self.is_partition_included(
-                &partition_name,
-                options.is_safe_flash,
-                options.is_keep_root,
-            ) {
-                continue;
-            }
-
             if seen.insert(partition_name.clone()) {
+                // 只做假刷写的分区（受保护分区、保留 ROOT 的启动分区）留在
+                // 队列里：镜像已在本地，直接用它的真实大小计时，不写设备。
+                let simulated_flash_bytes = should_simulate_partition_flash(
+                    &partition_name,
+                    options.is_safe_flash,
+                    options.is_keep_root,
+                )
+                .then(|| path.metadata().map(|meta| meta.len()).unwrap_or(0));
                 partitions.push(SafeFlashPartitionSource {
                     partition_name,
                     image_path: path.to_string_lossy().to_string(),
                     has_slot: true,
+                    simulated_flash_bytes,
                 });
             }
         }
@@ -1705,7 +1701,7 @@ impl SafeFlashService {
         std::fs::create_dir_all(&output_dir)
             .map_err(|error| DomainError::InvalidOperation(format!("创建解包目录失败：{error}")))?;
 
-        let required_bytes = zip_extraction_output_size(&mut archive, options, cancellation)?;
+        let required_bytes = zip_extraction_output_size(&mut archive, cancellation)?;
         self.ensure_extraction_capacity(&output_dir, required_bytes)?;
 
         let mut partitions = Vec::new();
@@ -1751,14 +1747,6 @@ impl SafeFlashService {
                 continue;
             }
 
-            if !self.is_partition_included(
-                &partition_name,
-                options.is_safe_flash,
-                options.is_keep_root,
-            ) {
-                continue;
-            }
-
             if !seen.insert(partition_name.clone()) {
                 continue;
             }
@@ -1798,10 +1786,25 @@ impl SafeFlashService {
                 return Err(error);
             }
 
+            // 「假戏真做」：只做假刷写的分区同样要真的解包到临时目录——
+            // 解包进度、耗时与临时占用必须和真机刷写一致，唯一被模拟的是
+            // 「写进设备」那一步。模拟耗时直接取落盘镜像的真实大小。
+            let simulated_flash_bytes = should_simulate_partition_flash(
+                &partition_name,
+                options.is_safe_flash,
+                options.is_keep_root,
+            )
+            .then(|| {
+                std::fs::metadata(&output_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0)
+            });
+
             partitions.push(SafeFlashPartitionSource {
                 partition_name,
                 image_path: output_path.to_string_lossy().into_owned(),
                 has_slot: true,
+                simulated_flash_bytes,
             });
         }
 
@@ -1949,7 +1952,6 @@ fn checked_payload_output_size(entries: &[FirmwareExtractEntry]) -> Result<u64, 
 
 fn zip_extraction_output_size(
     archive: &mut ZipArchive<File>,
-    options: &SafeFlashBuildOptions,
     cancellation: &CancellationToken,
 ) -> Result<u64, DomainError> {
     let mut names = HashSet::new();
@@ -1979,12 +1981,8 @@ fn zip_extraction_output_size(
         if (extension.eq_ignore_ascii_case("img") || extension.eq_ignore_ascii_case("bin"))
             && !partition_name.eq_ignore_ascii_case("payload")
             && !partition_name.is_empty()
-            && (!options.is_safe_flash || !should_skip_safe_flash_partition(partition_name))
-            && (!options.is_keep_root
-                || !matches!(
-                    partition_name.to_ascii_lowercase().as_str(),
-                    "boot" | "init_boot" | "vendor_boot"
-                ))
+            // 只做假刷写的分区也要真的解包（“假戏真做”），因此同样计入
+            // 解包空间；只有该等式成立时落盘才算数。
             && names.insert(partition_name.to_ascii_lowercase())
         {
             total = total.checked_add(entry.size()).ok_or_else(|| {
@@ -2012,15 +2010,30 @@ fn map_preparation_io_error(error: io::Error) -> DomainError {
     }
 }
 
-fn map_embedded_asset_error(error: EmbeddedAssetError) -> DomainError {
-    DomainError::InvalidOperation(format!("清除数据资源错误：{error}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::FirmwareExtractEntry;
     use std::sync::{Arc, Barrier};
+
+    /// 假刷写时长口径：`镜像大小 ÷ 35MB/s`。这是“看起来像真的在刷”的
+    /// 唯一来源，必须精确到毫秒、且不许溢出。
+    #[test]
+    fn simulated_flash_duration_follows_the_35mbps_rule() {
+        use super::simulated_flash::{duration, SPEED_BYTES_PER_SECOND};
+
+        assert_eq!(SPEED_BYTES_PER_SECOND, 35 * 1024 * 1024);
+        assert_eq!(duration(0), Duration::ZERO);
+        assert_eq!(duration(SPEED_BYTES_PER_SECOND), Duration::from_secs(1));
+        assert_eq!(
+            duration(SPEED_BYTES_PER_SECOND / 2),
+            Duration::from_millis(500)
+        );
+        // 典型 system.img（约 3.2GB）≈ 91 秒，量级与真机一致。
+        assert_eq!(duration(3_200 * 1024 * 1024), Duration::from_millis(91_428));
+        // u64::MAX 不得 panic（整型饱和）。
+        assert!(duration(u64::MAX) > Duration::from_secs(1));
+    }
 
     #[test]
     fn ota_download_cancellation_remains_a_domain_cancellation() {

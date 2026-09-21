@@ -2,13 +2,18 @@ import { errorMessage } from '../app/error';
 import { FC, FormEvent, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ModalLayer } from '../components/ModalLayer';
+import type { DeviceSnapshotPayload, OperationSnapshotPayload } from '../app/ipc-events';
+import { isConnectedDeviceSnapshot } from '../app/ipc-events';
 
 type SafeFlashSlotMode = 'CurrentSlot' | 'OtherSlot' | 'BothSlots';
 type SafeFlashSourceMode = 'Online' | 'Local';
 type SafeFlashPreflight = { session_id: string; source_label: string; partition_count: number; safe_partition_count: number; has_block_based_content?: boolean; requires_confirmation: boolean };
 type SafeFlashCompletion = { flashed_partition_count: number; skipped_partition_count: number; status: string };
 
-export const SafeFlashPage: FC = () => {
+export const SafeFlashPage: FC<{
+  deviceSnapshot?: DeviceSnapshotPayload | null;
+  operationSnapshot?: OperationSnapshotPayload | null;
+}> = ({ deviceSnapshot, operationSnapshot }) => {
   const [sourceMode, setSourceMode] = useState<SafeFlashSourceMode>('Online');
   const [isSafeFlash, setIsSafeFlash] = useState(true);
   const [isKeepRoot, setIsKeepRoot] = useState(false);
@@ -25,21 +30,30 @@ export const SafeFlashPage: FC = () => {
   const prepareOnline = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(''); setStatus(''); setPreflight(null); setIsPreparing(true);
-    try { setPreflight(await invoke<SafeFlashPreflight>('safe_flash_prepare_online', { options: options() })); }
+    try {
+      setPreflight(await invoke<SafeFlashPreflight>('safe_flash_prepare_online', { options: options() }));
+      setStatus('线刷预检完成，等待确认');
+    }
     catch (reason) { setError(errorMessage(reason, '安全刷写预检失败')); }
     finally { setIsPreparing(false); }
   };
   const prepareLocal = async () => {
     setError(''); setStatus(''); setPreflight(null);
     setIsPreparing(true);
-    try { setPreflight(await invoke<SafeFlashPreflight>('safe_flash_prepare_local_source', { options: options() })); }
+    try {
+      setPreflight(await invoke<SafeFlashPreflight>('safe_flash_prepare_local_source', { options: options() }));
+      setStatus('线刷预检完成，等待确认');
+    }
     catch (reason) { setError(errorMessage(reason, '本地固件预检失败')); }
     finally { setIsPreparing(false); }
   };
   const prepareLocalDirectory = async () => {
     setError(''); setStatus(''); setPreflight(null);
     setIsPreparing(true);
-    try { setPreflight(await invoke<SafeFlashPreflight>('safe_flash_prepare_local_directory', { options: options() })); }
+    try {
+      setPreflight(await invoke<SafeFlashPreflight>('safe_flash_prepare_local_directory', { options: options() }));
+      setStatus('线刷预检完成，等待确认');
+    }
     catch (reason) { setError(errorMessage(reason, '本地固件目录预检失败')); }
     finally { setIsPreparing(false); }
   };
@@ -83,6 +97,15 @@ export const SafeFlashPage: FC = () => {
     catch (reason) { setError(errorMessage(reason, '停止线刷预检失败')); }
   };
   const controlsLocked = Boolean(preflight) || isPreparing || isExecuting;
+  const deviceConnected = isConnectedDeviceSnapshot(deviceSnapshot);
+  const deviceKnownAndDisconnected = deviceSnapshot !== undefined && deviceSnapshot !== null && !deviceConnected;
+  const deviceLabel = deviceConnected
+    ? `${deviceSnapshot?.connection_label || '设备已连接'}${deviceSnapshot?.model ? ` · ${deviceSnapshot.model}` : ''}`
+    : '未连接 ADB/Fastboot 设备';
+  const operationStage = operationSnapshot?.isBusy ? operationSnapshot.stage : '';
+  const partitionMatch = operationStage.match(/刷写分区\[(\d+\/\d+)\]/);
+  const currentPartition = partitionMatch ? partitionMatch[1] : '--';
+  const visibleStatus = operationStage || status || '等待操作';
 
   return (
     <section className="nw-safe-flash-workspace" aria-label="VIVO 线刷">
@@ -100,11 +123,11 @@ export const SafeFlashPage: FC = () => {
           <option value="CurrentSlot">当前槽位</option><option value="OtherSlot">对侧槽位</option><option value="BothSlots">双槽位</option>
         </select>
         <section className="nw-safe-flash-device-summary">
-          <span>目标设备</span><strong>未连接 ADB 设备</strong>
+          <span>目标设备</span><strong>{deviceLabel}</strong>
           <div>
-            <button type="submit" disabled={controlsLocked}>下载+刷入</button>
-            <button type="button" onClick={() => void prepareLocal()} disabled={controlsLocked}>选择固件</button>
-            <button type="button" onClick={() => void prepareLocalDirectory()} disabled={controlsLocked} aria-label="选择解包文件夹">选择解包文件夹</button>
+            <button type="submit" disabled={controlsLocked || deviceKnownAndDisconnected}>下载+刷入</button>
+            <button type="button" onClick={() => void prepareLocal()} disabled={controlsLocked || deviceKnownAndDisconnected}>选择固件</button>
+            <button type="button" onClick={() => void prepareLocalDirectory()} disabled={controlsLocked || deviceKnownAndDisconnected} aria-label="选择解包文件夹">选择解包文件夹</button>
           </div>
         </section>
         <section className="nw-safe-flash-options" aria-label="刷写选项">
@@ -122,7 +145,7 @@ export const SafeFlashPage: FC = () => {
           ))}
           <button type="button" disabled>回锁BL</button>
         </section>
-        <section className="nw-safe-flash-current"><span>当前分区: <strong>--</strong></span><p>{status || '等待操作'}</p></section>
+        <section className="nw-safe-flash-current"><span>当前分区: <strong>{currentPartition}</strong></span><p>{visibleStatus}</p></section>
       </form>
       {error ? <p className="nw-error-text">{error}</p> : null}
       <ModalLayer isVisible={preflight !== null} title="确认刷写" onClose={isExecuting ? undefined : () => void cancelPreflight()}>
@@ -131,6 +154,7 @@ export const SafeFlashPage: FC = () => {
             <p>{preflight.source_label}</p>
             <p>可刷写分区：{preflight.safe_partition_count}/{preflight.partition_count}</p>
             {preflight.has_block_based_content ? <p>固件含暂不支持刷写的分区内容，这些分区将保持原样。</p> : null}
+            {wipeData ? <p>清除数据：刷写完成后会重启到 REC。进 REC 后电脑就检测不到设备了，请手动执行：清除数据-清除全部数据-确定-重启。</p> : null}
             <p>确认后请保持设备连接，中途请勿断开。</p>
             <div className="nw-driver-dialog-actions">
               <button type="button" onClick={() => void cancelPreflight()} disabled={isExecuting}>取消</button>

@@ -2,6 +2,13 @@
 
 > 基于对 `src/Nwflash.Desktop/`（前端）、`src-tauri/crates/`（Rust 全链路）、`cloudflare/`（Worker/管理端）的静态审查整理。所有 file:line 以当前工作区为准。
 > 核心结论先读：**线刷 = 两个独立操作（预检 + 执行），当前实际上报走 V1 usage（`/api/usage/logs`）；V2 结构化 trace 的基础设施存在，但生产接线仍按当前 [项目进展](../PROJECT_PROGRESS.md) 与 [发布门禁审计](2026-09-04-release-gate-audit.md) 视为未闭合**。本文件是 2026-09-03 流程基线；后续 `604ade3` 已增加分区失败暂停/继续/中止决策，细节以源码和当前迭代计划为准。
+>
+> ⚠️ **2026-09-21 起下列内容已被取代**（改造细节见 [安全刷写假刷写](2026-09-21-safe-flash-protected-partition-fake-write.md) 与 [清除数据流程](2026-09-21-safe-flash-wipe-data-flow-review.md)）：
+> - 「is_partition_included 过滤」「getvar partition-type 存在性探测」「跳过不存在分区」stage → **已删除**，
+>   受保护分区/保留 ROOT 的分区改为「留在队列 + 假刷写（按 35MB/s 计时、不派发命令）」。
+> - 「wipe_data 刷 misc」→ **已改为队列末尾的 `fastboot reboot recovery` + 手动清除数据指引**，
+>   wipe-data 镜像与相关字段/模块已删除。
+> - 「执行 {i}/{n}: {program}」的逐命令 stage → **已改为「刷写分区[i/n] ... / ... OK」**。
 
 ## 一、全流程总图（Mermaid）
 

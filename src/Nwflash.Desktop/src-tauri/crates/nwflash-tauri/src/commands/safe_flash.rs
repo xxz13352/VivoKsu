@@ -35,6 +35,9 @@ pub struct SafeFlashCommandExecutionResultDto {
     pub executed_count: usize,
     pub flashed_partition_count: usize,
     pub skipped_partition_count: usize,
+    /// 本次是否勾选了「清除数据」：完成文案要接上「进 REC 手动清除」的指引，
+    /// 否则操作面板在收尾后会把那条 stage 覆盖成普通完成文案。
+    pub wipe_data: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -45,9 +48,8 @@ struct SafeFlashPreparedRequest {
 
 fn prepared_safe_flash_request(
     source: SafeFlashPreparedSource,
-    mut options: SafeFlashBuildOptions,
+    options: SafeFlashBuildOptions,
 ) -> SafeFlashPreparedRequest {
-    options.wipe_data_image_path = source.wipe_data_image_path.clone();
     SafeFlashPreparedRequest { source, options }
 }
 
@@ -519,7 +521,6 @@ fn secure_options(serial: String, options: SafeFlashOptionsDto) -> SafeFlashBuil
         is_safe_flash: options.is_safe_flash,
         is_keep_root: options.is_keep_root,
         wipe_data: options.wipe_data,
-        wipe_data_image_path: None,
         slot_mode: options.slot_mode,
         current_slot: None,
     }
@@ -966,10 +967,22 @@ async fn safe_flash_execute_prepared_inner(
     Ok(SafeFlashCompletionDto {
         flashed_partition_count: result.flashed_partition_count,
         skipped_partition_count: result.skipped_partition_count,
-        status: format!(
-            "已刷入 {} 个分区（完成 {}/{} 个受控步骤）",
-            result.flashed_partition_count, result.executed_count, result.command_count
-        ),
+        status: if result.wipe_data {
+            // 收尾后操作面板只剩这条 status，手动清除指引必须挂在这里，
+            // 否则用户点完「确认刷写」后就再也看不到该做什么了。
+            format!(
+                "已刷入 {} 个分区（完成 {}/{} 个受控步骤）。{}",
+                result.flashed_partition_count,
+                result.executed_count,
+                result.command_count,
+                nwflash_application::SAFE_FLASH_WIPE_DATA_MANUAL_STEPS
+            )
+        } else {
+            format!(
+                "已刷入 {} 个分区（完成 {}/{} 个受控步骤）",
+                result.flashed_partition_count, result.executed_count, result.command_count
+            )
+        },
     })
 }
 
@@ -1020,6 +1033,7 @@ async fn execute_prepared_safe_flash(
 ) -> Result<SafeFlashCommandExecutionResultDto, String> {
     let device_runtime = state.device_runtime.clone();
     let staging_root = prepared.source.staging_root.clone();
+    let wipe_data = prepared.options.wipe_data;
     let execution_result = Arc::new(Mutex::new(None));
     let execution_result_for_run = execution_result.clone();
     let partition_count = prepared.source.partitions.len();
@@ -1065,6 +1079,7 @@ async fn execute_prepared_safe_flash(
         executed_count: result.executed_command_count,
         flashed_partition_count: result.flashed_partition_count,
         skipped_partition_count: result.skipped_partition_count,
+        wipe_data,
     })
 }
 
@@ -1078,6 +1093,10 @@ async fn execute_session_bound_safe_flash(
     let safe_flash_runtime = state.safe_flash_runtime.clone();
     let execution_result = Arc::new(Mutex::new(None));
     let execution_result_for_run = execution_result.clone();
+    // 「清除数据」只有拿到会话才知道（选项随预检会话一起被封存），
+    // 因此由闭包内回填、闭包外读取。
+    let wipe_data = Arc::new(Mutex::new(false));
+    let wipe_data_for_run = wipe_data.clone();
     let app_handle = app_handle;
 
     state
@@ -1097,6 +1116,10 @@ async fn execute_session_bound_safe_flash(
                         .begin_execution(&session_id)
                         .map_err(DomainError::InvalidOperation)?;
                     let staging_root = session.prepared.source.staging_root.clone();
+                    *wipe_data_for_run
+                        .lock()
+                        .expect("safe flash wipe flag lock should not be poisoned") =
+                        session.prepared.options.wipe_data;
                     // 只有拿到 AppHandle（真实命令路径）才挂分区失败弹窗；
                     // 测试路径传 None 保持旧的失败即中止语义。
                     let partition_failure_hook = app_handle.map(|app_handle| {
@@ -1150,11 +1173,15 @@ async fn execute_session_bound_safe_flash(
         .expect("safe flash execution result lock should not be poisoned")
         .take()
         .ok_or_else(|| "线刷执行未返回结果。".to_string())?;
+    let wipe_data = *wipe_data
+        .lock()
+        .expect("safe flash wipe flag lock should not be poisoned");
     Ok(SafeFlashCommandExecutionResultDto {
         command_count: result.command_count,
         executed_count: result.executed_command_count,
         flashed_partition_count: result.flashed_partition_count,
         skipped_partition_count: result.skipped_partition_count,
+        wipe_data,
     })
 }
 
@@ -1344,8 +1371,8 @@ mod tests {
                         partition_name: "boot".to_string(),
                         image_path: r"C:\test-only\boot.img".to_string(),
                         has_slot: false,
+                        simulated_flash_bytes: None,
                     }],
-                    wipe_data_image_path: None,
                     has_block_based_content: false,
                 },
                 options: SafeFlashBuildOptions {
@@ -1353,7 +1380,6 @@ mod tests {
                     is_safe_flash: false,
                     is_keep_root: false,
                     wipe_data: false,
-                    wipe_data_image_path: None,
                     slot_mode: SafeFlashSlotMode::CurrentSlot,
                     current_slot: None,
                 },
@@ -1420,7 +1446,6 @@ mod tests {
                     source: SafeFlashPreparedSource {
                         staging_root: None,
                         partitions: Vec::new(),
-                        wipe_data_image_path: None,
                         has_block_based_content: false,
                     },
                     options: SafeFlashBuildOptions {
@@ -1428,7 +1453,6 @@ mod tests {
                         is_safe_flash: false,
                         is_keep_root: false,
                         wipe_data: false,
-                        wipe_data_image_path: None,
                         slot_mode: SafeFlashSlotMode::CurrentSlot,
                         current_slot: None,
                     },
@@ -1632,7 +1656,6 @@ mod tests {
         let executor = RecordedSafeFlashExecutor::new([
             successful_process_output("CURRENT-DEVICE\tfastboot\n"),
             successful_process_output("(bootloader) is-userspace: yes\n"),
-            successful_process_output("(bootloader) partition-type:boot: raw\n"),
             successful_process_output(""),
             successful_process_output(""),
         ]);
@@ -1678,8 +1701,8 @@ mod tests {
                     partition_name: "boot".to_string(),
                     image_path: "C:\\staging\\boot.img".to_string(),
                     has_slot: false,
+                    simulated_flash_bytes: None,
                 }],
-                wipe_data_image_path: None,
                 has_block_based_content: false,
             },
             options: SafeFlashBuildOptions {
@@ -1687,7 +1710,6 @@ mod tests {
                 is_safe_flash: false,
                 is_keep_root: false,
                 wipe_data: false,
-                wipe_data_image_path: None,
                 slot_mode: SafeFlashSlotMode::CurrentSlot,
                 current_slot: None,
             },
@@ -1695,7 +1717,6 @@ mod tests {
         let executor = RecordedSafeFlashExecutor::new([
             successful_process_output("CURRENT-DEVICE-B\tfastboot\n"),
             successful_process_output("(bootloader) is-userspace: yes\n"),
-            successful_process_output("(bootloader) partition-type:boot: raw\n"),
             successful_process_output(""),
             successful_process_output(""),
         ]);
@@ -1749,8 +1770,8 @@ mod tests {
                     partition_name: "boot".to_string(),
                     image_path: "C:\\staging\\boot.img".to_string(),
                     has_slot: false,
+                    simulated_flash_bytes: None,
                 }],
-                wipe_data_image_path: None,
                 has_block_based_content: false,
             },
             options: SafeFlashBuildOptions {
@@ -1758,7 +1779,6 @@ mod tests {
                 is_safe_flash: false,
                 is_keep_root: false,
                 wipe_data: false,
-                wipe_data_image_path: None,
                 slot_mode: SafeFlashSlotMode::CurrentSlot,
                 current_slot: None,
             },
@@ -1767,7 +1787,6 @@ mod tests {
             successful_process_output(""),
             successful_process_output("DEVICE-B\tfastboot\n"),
             successful_process_output("(bootloader) is-userspace: yes\n"),
-            successful_process_output("(bootloader) partition-type:boot: raw\n"),
             successful_process_output(""),
             successful_process_output(""),
         ]);
@@ -1812,7 +1831,6 @@ mod tests {
                     source: SafeFlashPreparedSource {
                         staging_root: None,
                         partitions: Vec::new(),
-                        wipe_data_image_path: None,
                         has_block_based_content: false,
                     },
                     options: SafeFlashBuildOptions {
@@ -1820,7 +1838,6 @@ mod tests {
                         is_safe_flash: true,
                         is_keep_root: false,
                         wipe_data: false,
-                        wipe_data_image_path: None,
                         slot_mode: SafeFlashSlotMode::CurrentSlot,
                         current_slot: None,
                     },
@@ -1846,7 +1863,6 @@ mod tests {
                     source: SafeFlashPreparedSource {
                         staging_root: None,
                         partitions: Vec::new(),
-                        wipe_data_image_path: None,
                         has_block_based_content: false,
                     },
                     options: SafeFlashBuildOptions {
@@ -1854,7 +1870,6 @@ mod tests {
                         is_safe_flash: true,
                         is_keep_root: false,
                         wipe_data: false,
-                        wipe_data_image_path: None,
                         slot_mode: SafeFlashSlotMode::CurrentSlot,
                         current_slot: None,
                     },
@@ -1926,32 +1941,6 @@ mod tests {
     }
 
     #[test]
-    fn prepared_safe_flash_binds_only_its_generated_wipe_image() {
-        let source = SafeFlashPreparedSource {
-            staging_root: None,
-            partitions: Vec::new(),
-            wipe_data_image_path: Some("C:\\internal\\wipe-data.img".to_string()),
-            has_block_based_content: false,
-        };
-        let options = SafeFlashBuildOptions {
-            serial: "internal-device".to_string(),
-            is_safe_flash: false,
-            is_keep_root: false,
-            wipe_data: true,
-            wipe_data_image_path: None,
-            slot_mode: SafeFlashSlotMode::CurrentSlot,
-            current_slot: None,
-        };
-
-        let prepared = prepared_safe_flash_request(source, options);
-
-        assert_eq!(
-            prepared.options.wipe_data_image_path.as_deref(),
-            Some("C:\\internal\\wipe-data.img")
-        );
-    }
-
-    #[test]
     fn replacing_a_preflight_releases_the_superseded_safe_flash_staging() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1970,8 +1959,8 @@ mod tests {
                     partition_name: "userdata".to_string(),
                     image_path: "C:\\internal\\userdata.img".to_string(),
                     has_slot: false,
+                    simulated_flash_bytes: None,
                 }],
-                wipe_data_image_path: None,
                 has_block_based_content: false,
             },
             options: SafeFlashBuildOptions {
@@ -1979,7 +1968,6 @@ mod tests {
                 is_safe_flash: true,
                 is_keep_root: false,
                 wipe_data: false,
-                wipe_data_image_path: None,
                 slot_mode: SafeFlashSlotMode::CurrentSlot,
                 current_slot: None,
             },
@@ -2011,7 +1999,6 @@ mod tests {
             source: SafeFlashPreparedSource {
                 staging_root: Some(staging.clone()),
                 partitions: Vec::new(),
-                wipe_data_image_path: None,
                 has_block_based_content: false,
             },
             options: SafeFlashBuildOptions {
@@ -2019,7 +2006,6 @@ mod tests {
                 is_safe_flash: true,
                 is_keep_root: false,
                 wipe_data: false,
-                wipe_data_image_path: None,
                 slot_mode: SafeFlashSlotMode::CurrentSlot,
                 current_slot: None,
             },
@@ -2064,8 +2050,8 @@ mod tests {
                     partition_name: "boot".to_string(),
                     image_path: candidate.join("boot.img").to_string_lossy().into_owned(),
                     has_slot: false,
+                    simulated_flash_bytes: None,
                 }],
-                wipe_data_image_path: None,
                 has_block_based_content: false,
             },
             options: SafeFlashBuildOptions {
@@ -2073,7 +2059,6 @@ mod tests {
                 is_safe_flash: false,
                 is_keep_root: false,
                 wipe_data: false,
-                wipe_data_image_path: None,
                 slot_mode: SafeFlashSlotMode::CurrentSlot,
                 current_slot: None,
             },
@@ -2119,8 +2104,8 @@ mod tests {
                             partition_name: "boot".to_string(),
                             image_path: user_image.to_string_lossy().into_owned(),
                             has_slot: false,
+                            simulated_flash_bytes: None,
                         }],
-                        wipe_data_image_path: None,
                         has_block_based_content: false,
                     },
                     options: SafeFlashBuildOptions {
@@ -2128,7 +2113,6 @@ mod tests {
                         is_safe_flash: false,
                         is_keep_root: false,
                         wipe_data: false,
-                        wipe_data_image_path: None,
                         slot_mode: SafeFlashSlotMode::CurrentSlot,
                         current_slot: None,
                     },
