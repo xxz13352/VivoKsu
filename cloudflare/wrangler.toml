@@ -10,6 +10,7 @@ database_id = "a35d1ea1-620f-436c-9eb5-7f58312c1cf6"
 # 变量(非机密)。生产机密必须用 `wrangler secret put` 设置,不得写入本文件:
 # - VOTA_API_TOKEN
 # - SESSION_SIGNING_PRIVATE_KEY_PKCS8(无填充 base64url PKCS#8 Ed25519 private-key DER)
+# - RESOURCE_ASSET_KEY(两级登录的云端因子;/api/v2/login 下发,须跨会话稳定)
 # `npm run deploy` 会先读取远端 secret 清单;缺少签名 secret 时部署预检失败。
 [vars]
 VOTA_BASE_URL = "https://api.otau.cc.cd"
@@ -26,8 +27,20 @@ ONLINE_SESSION_CAP = "3"
 [triggers]
 crons = ["*/3 * * * *"]
 
-# 自定义域:api.nwflash.cc.cd(域名 nwflash.cc.cd 需已在 Cloudflare)。
-# 首次 deploy 前确保域名在账户里;wrangler 会自动创建 DNS 与证书。
+# 自定义域:同一批 Worker 绑多个域,客户端可在主域不通时回退。
+# 域名需已在 Cloudflare 账户里;wrangler 会自动创建 DNS 与证书。
+#
+# api.nwflash.cc.cd   —— 主域(桌面客户端与刷机工具在用,不要动)
+# api2.nwflash.cc.cd  —— 同 zone 备用:应对"只封了 api 这个子域"的情况
+# api-nw.otau.cc.cd   —— 跨 zone 备用:应对"整个 nwflash.cc.cd 被针对"(SNI 层阻断)
 [[routes]]
 pattern = "api.nwflash.cc.cd"
+custom_domain = true
+
+[[routes]]
+pattern = "api2.nwflash.cc.cd"
+custom_domain = true
+
+[[routes]]
+pattern = "api-nw.otau.cc.cd"
 custom_domain = true

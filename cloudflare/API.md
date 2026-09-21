@@ -393,7 +393,7 @@ goodbye 只需 `sessionId` 和 `active = false`;它删除当前用户的 `sessio
 | `event_id` | string | 幂等键:同一条记录重试复用同一 id,服务端按其去重(≤64) |
 | `started_at` / `ended_at` | number | epoch 秒 |
 | `duration_ms` | number \| null | 耗时 |
-| `details` | array | **步骤数据**:本次操作的过程日志(每条 `timestamp_utc` epoch 秒 + `level` PascalCase 级别 + `message` 正文)。缺省/非数组按空处理(旧客户端兼容);服务端只保留前 500 条、单条正文截断 16 KiB |
+| `details` | array | **步骤数据**:本次操作的过程日志(每条 `timestamp_utc` epoch 秒 + `level` PascalCase 级别 + `message` 正文)。缺省/非数组按空处理(旧客户端兼容);服务端只保留前 500 条。普通步骤正文截断 16 KiB，`[cmd]` 命令级明细保留客户端提交的完整正文 |
 
 **成功 200** `{ "ok": true, "received": 1 }`。单批最多 100 条。后台「使用日志」可查看/筛选;审计视图里 V1 记录的步骤数据来自此字段(`legacy_client_no_step_data` 仅指真正未上传 `details` 的历史客户端记录)。
 

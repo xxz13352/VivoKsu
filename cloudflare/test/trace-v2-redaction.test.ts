@@ -35,6 +35,23 @@ function replaceChunkText(payload: TraceUploadRequestV2, index: number, text: st
 }
 
 describe("trace v2 credential boundary", () => {
+  it("redacts JSON credentials including escaped keys and complete escaped values", () => {
+    const source = copyCanonical();
+    const diagnostic = '{"token":"json-secret-123","password":"prefix\\\"suffix-secret","api\\u005fkey":"escaped-key-secret","refresh_token":123456789,"status":"failed"}';
+    source.runs[0].error_message = diagnostic;
+    source.events[1].error_message = diagnostic;
+    source.events[1].verification = '{"Authorization":"Basic auth-json-secret","Cookie":"sid=cookie-json-secret"}';
+    setChunkText(source, diagnostic);
+    const result = redactTraceUploadV2(source, []);
+    const stored = JSON.stringify(result.payload);
+    for (const secret of ['json-secret-123', 'suffix-secret', 'escaped-key-secret', '123456789', 'auth-json-secret', 'cookie-json-secret']) {
+      expect(stored).not.toContain(secret);
+    }
+    expect(JSON.parse(result.payload.output_chunks[0].text).status).toBe('failed');
+    expect(validateTraceUploadV2(result.payload)).toBeDefined();
+    expect(redactTraceUploadV2(result.payload, []).payload).toEqual(result.payload);
+  });
+
   it("removes credentials but preserves operational fields", () => {
     const bearer = "bearer-sentinel-314159";
     const cookie = "cookie-sentinel-271828";

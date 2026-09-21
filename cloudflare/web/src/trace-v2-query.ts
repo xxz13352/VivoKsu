@@ -799,7 +799,7 @@ async function loadTraceDetail(env: Env, parsed: ParsedTraceRef): Promise<TraceR
   };
 }
 
-/** details_json 由写入端归一化(数组、字段齐全、500 条/16 KiB 截断),这里只做防御性解析。 */
+/** details_json 由写入端归一化(数组、字段齐全、最多 500 条；普通步骤 16 KiB，命令级明细保留完整正文)，这里只做防御性解析。 */
 function parseLegacyDetails(raw: string | null | undefined): LegacyTraceDetailLineV2[] {
   if (typeof raw !== "string" || raw.length === 0) return [];
   let parsed: unknown;

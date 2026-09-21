@@ -66,6 +66,13 @@ export interface Env {
   ONLINE_TIMEOUT_MS?: string;
   /** 每用户同时在线会话数上限(超出删最旧的)。默认 3。 */
   ONLINE_SESSION_CAP?: string;
+  /**
+   * 资源密钥载荷(worker secret,`wrangler secret put RESOURCE_ASSET_KEY`):
+   * 由 `/api/v2/login` 下发给 nwflash 客户端,作为「两级登录」的第二因子
+   * (第一因子是本地密码)。**必须跨会话稳定** —— 换了它,预加密的本地资源就解不开,
+   * 需要重新打包客户端。缺失时 v2 端点**失败关闭**(不签一个客户端解不开的租约)。
+   */
+  RESOURCE_ASSET_KEY?: string;
 }
 
 const CORS = {
@@ -82,6 +89,7 @@ const ROUTE_METHODS: ReadonlyMap<string, string> = new Map([
   ["/api/diagnostics/crash", "POST"],
   ["/api/app/version", "GET"],
   ["/api/login", "POST"],
+  ["/api/v2/login", "POST"],
   ["/api/me", "GET"],
   ["/api/heartbeat", "POST"],
   ["/api/online", "GET"],
@@ -133,6 +141,18 @@ export default {
         const gate = await checkAppVersion(env, request);
         if (gate) return gate;
         return login(env, request);
+      }
+
+      // nwflash 桌面端登录(v2):与 /api/login 同一套鉴权与租约,**额外**下发
+      // `asset_key`(两级登录的云端因子)。单独一个路径是为了不动老客户端的契约 ——
+      // /api/login 的响应字节完全不变。
+      if (url.pathname === "/api/v2/login" && request.method === "POST") {
+        const gate = await checkAppVersion(env, request);
+        if (gate) return gate;
+        if (!env.RESOURCE_ASSET_KEY) {
+          return json({ error: "服务端未配置资源密钥(asset_key),登录暂不可用。" }, 503);
+        }
+        return loginCore(env, request, env.RESOURCE_ASSET_KEY);
       }
 
       // 校验本地 token(记住登录):有效返回用户信息。
@@ -360,6 +380,11 @@ async function securityPins(env: Env): Promise<Response> {
     if (error instanceof SigningConfigurationError) return signingUnavailable();
     throw error;
   }
+}
+
+/** POST /api/login —— 密码验证成功后返回 token 与绑定当前进程/会话的短期签名租约。 */
+async function login(env: Env, request: Request): Promise<Response> {
+  return loginCore(env, request, null);
 }
 
 async function acceptIntegrityReport(env: Env, request: Request): Promise<Response> {
@@ -853,10 +878,16 @@ async function acceptUsageLogs(env: Env, request: Request): Promise<Response> {
     if (!Array.isArray(value)) return "[]";
     const details = value.slice(0, 500).map((detail) => {
       const item = detail && typeof detail === "object" ? detail as Record<string, unknown> : {};
+      const message = String(item.message || "");
+      // 命令级失败明细由客户端按完整输出生成。这里不能再套用普通步骤
+      // 明细的 16 KiB 截断，否则 fastboot 的尾部 FAILED 原因仍会丢失。
+      const normalizedMessage = message.startsWith("[cmd]")
+        ? message
+        : message.slice(0, 16_384);
       return {
         timestamp_utc: Number.isFinite(Number(item.timestamp_utc)) ? Number(item.timestamp_utc) : 0,
         level: String(item.level || "Info").slice(0, 16),
-        message: String(item.message || "").slice(0, 16_384),
+        message: normalizedMessage,
       };
     }).filter((detail) => detail.message.length > 0);
     return JSON.stringify(details);
@@ -979,8 +1010,14 @@ async function checkAppVersion(env: Env, request: Request): Promise<Response | n
 const PBKDF2_ITERATIONS = 100_000;
 const REVOKED_TOKEN_PREFIX = "revoked:";
 
-/** POST /api/login —— 密码验证成功后返回 token 与绑定当前进程/会话的短期签名租约。 */
-async function login(env: Env, request: Request): Promise<Response> {
+/**
+ * 登录核心:密码验证 → 并发线性化 → 签发绑定当前进程/会话的短期签名租约。
+ *
+ * 两个入口共用同一份实现:`/api/login`(老契约,响应不变)与 `/api/v2/login`
+ * (多带一个 `asset_key`)。抽核心而不是复制,是因为这段有 5 处 D1 CAS 并发谓词,
+ * 复制一份必然漂移;`assetKey` 为 `null` 时响应与老路径**逐字节一致**。
+ */
+async function loginCore(env: Env, request: Request, assetKey: string | null): Promise<Response> {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   const username = typeof body?.username === "string" ? body.username.trim() : "";
   const password = typeof body?.password === "string" ? body.password : "";
@@ -1102,7 +1139,18 @@ async function login(env: Env, request: Request): Promise<Response> {
       )
       .first<{ sequence: number }>();
     if (!claimed) return json({ error: "登录状态已变化或 session_id 已被占用。" }, 409);
-    return json({ ok: true, token: activeToken, username: user.username, name: user.name, ...envelope }, 200);
+    return json(
+      {
+        ok: true,
+        token: activeToken,
+        username: user.username,
+        name: user.name,
+        ...envelope,
+        // 老路径传 null → 这个字段根本不出现,契约不变。
+        ...(assetKey === null ? {} : { asset_key: assetKey }),
+      },
+      200,
+    );
   } catch (error) {
     if (error instanceof SigningConfigurationError) return signingUnavailable();
     throw error;

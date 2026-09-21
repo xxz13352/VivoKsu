@@ -134,6 +134,28 @@ function redactCliAssignments(text: string, counts: RedactionCounts): string {
 }
 
 function redactAssignments(text: string, counts: RedactionCounts): string {
+  // JSON diagnostics use quoted keys and may contain escaped quotes in values.
+  // Decode keys before classification so JSON unicode escapes cannot hide them.
+  text = text.replace(
+    /("(?:\\.|[^"\\])*"\s*:\s*)("(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/g,
+    (match, prefix: string, rawValue: string) => {
+      const rawKey = /^"(?:\\.|[^"\\])*"/.exec(prefix)?.[0];
+      if (!rawKey) return match;
+      let key: string;
+      let value: unknown;
+      try {
+        key = JSON.parse(rawKey) as string;
+        value = JSON.parse(rawValue);
+      } catch {
+        return match;
+      }
+      if (!new RegExp(`^(?:${CREDENTIAL_KEY}|authorization|proxy-authorization|cookie|set-cookie)$`, "i").test(key)) return match;
+      const credential = String(value);
+      if (isRedacted(credential)) return match;
+      addCount(counts, credentialKind(key));
+      return `${prefix}${JSON.stringify(safeCredentialMarker(credential))}`;
+    },
+  );
   const pattern = new RegExp(
     `\\b(${CREDENTIAL_KEY})(\\s*[:=]\\s*)(?:"([^"]*)"|'([^']*)'|([^\\s,;&]+))`,
     "gi",

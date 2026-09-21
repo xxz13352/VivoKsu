@@ -2733,6 +2733,7 @@ fn redact_line(
     summary: &mut RedactionSummary,
 ) -> Result<Zeroizing<String>, ()> {
     let mut output = Zeroizing::new(line.to_owned());
+    redact_json_string_credentials(&mut output, summary)?;
     redact_authorization(&mut output, summary);
     redact_cookies(&mut output, summary)?;
     redact_urls(&mut output, summary)?;
@@ -3048,6 +3049,33 @@ fn redact_cli_assignments(text: &mut String, summary: &mut RedactionSummary) -> 
             let replacement_len = replace_credential_value(text, value_start, value_end);
             summary.add(kind);
             cursor = value_start + replacement_len;
+        } else {
+            cursor = value_end;
+        }
+    }
+    Ok(())
+}
+
+fn redact_json_string_credentials(text: &mut String, summary: &mut RedactionSummary) -> Result<(), ()> {
+    let mut cursor = 0;
+    while let Some(offset) = text[cursor..].find('"') {
+        let start = cursor + offset;
+        let Some((end, _)) = credential_value_end(text, start)? else { break };
+        cursor = end;
+        let separator = skip_ascii_space(text.as_bytes(), end);
+        if text.as_bytes().get(separator) != Some(&b':') {
+            continue;
+        }
+        let Ok(key) = serde_json::from_str::<String>(&text[start..end]) else { continue };
+        let Some(kind) = credential_kind(&key) else { continue };
+        let value_start = skip_ascii_space(text.as_bytes(), separator + 1);
+        if text.as_bytes().get(value_start) != Some(&b'"') {
+            continue;
+        }
+        let Some((value_end, _)) = credential_value_end(text, value_start)? else { continue };
+        if !is_redacted(&text[value_start + 1..value_end - 1]) {
+            cursor = value_start + replace_credential_value(text, value_start, value_end);
+            summary.add(kind);
         } else {
             cursor = value_end;
         }
@@ -3750,6 +3778,18 @@ mod tests {
         }
         assert!(redacted.as_str().contains("[REDACTED]"));
         assert!(redacted.as_str().contains("\"message\":\"ok\""));
+    }
+
+    #[test]
+    fn redacts_escaped_json_keys_before_upload_across_input_splits() {
+        let redacted = scan_with_splits(
+            br#"{"api\u005fkey":"escaped-key-secret","password":"prefix\"suffix-secret","message":"ok"}"#,
+            &[8, 21, 60],
+        );
+        assert!(!redacted.as_str().contains("escaped-key-secret"));
+        assert!(!redacted.as_str().contains("suffix-secret"));
+        let parsed: serde_json::Value = serde_json::from_str(redacted.as_str()).unwrap();
+        assert_eq!(parsed["message"], "ok");
     }
 
     #[test]

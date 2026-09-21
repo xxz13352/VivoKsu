@@ -137,6 +137,25 @@ describe("POST /api/usage/logs details_json regression", () => {
     expect(capped[0].message).toBe("x".repeat(16_384));
   });
 
+  it("keeps command-level failure output unshortened", async () => {
+    const commandOutput = `${"progress ".repeat(3_000)}FAILED (remote: 'no link')`;
+    const response = await postUsageLogs([
+      {
+        operation: "Flashing",
+        title: "失败刷写",
+        status: "failed",
+        event_id: "usage-details-command-failure-1",
+        started_at: 1_000,
+        details: [{ timestamp_utc: 1_001, level: "Error", message: `[cmd] fastboot flash system → exit=1 · err: ${commandOutput}` }],
+      },
+    ]);
+
+    expect(response.status).toBe(200);
+    const stored = JSON.parse(await readStoredDetails("usage-details-command-failure-1")) as Array<{ message: string }>;
+    expect(stored[0].message).toContain(commandOutput);
+    expect(stored[0].message).toHaveLength(`[cmd] fastboot flash system → exit=1 · err: ${commandOutput}`.length);
+  });
+
   it("normalizes non-finite timestamps and blank levels while dropping empty messages", async () => {
     const response = await postUsageLogs([
       {
