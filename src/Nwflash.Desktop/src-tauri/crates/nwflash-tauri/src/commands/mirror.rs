@@ -220,20 +220,14 @@ pub fn build_start_plan(
 }
 
 async fn installed_paths(cancellation: &CancellationToken) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    // 内置目录优先；缺失/校验失败时经 failover 下载器按需补齐，
-    // 不再直接把“缺 scrcpy”抛给用户（C# 发布瘦身供给链语义）。
+    // scrcpy 必须来自安装包，运行中不联网下载或执行 PATH 中的版本。
     let provisioner = crate::commands::resources::scrcpy_provisioner_with_downloader(
         nwflash_windows::bundled_resource_root(),
     );
-    let scrcpy = match provisioner.installed_executable() {
-        Some(path) => path,
-        None => provisioner
-            // 下载传入操作体取消凭据（审计 A61）：无人持有的新 token
-            // 会让网络挂起时下载永不可取消，Mirroring 操作永久锁死。
-            .ensure_installed(cancellation, None)
-            .await
-            .map_err(|error| format!("scrcpy 组件不可用：{error}"))?,
-    };
+    let _ = cancellation;
+    let scrcpy = provisioner
+        .installed_executable()
+        .ok_or_else(|| "内置 scrcpy 缺失或校验失败，请重新安装应用。".to_string())?;
     Ok((
         scrcpy,
         std::path::PathBuf::from(nwflash_windows::bundled_platform_tool("adb.exe")),

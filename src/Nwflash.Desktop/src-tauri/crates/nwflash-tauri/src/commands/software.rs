@@ -113,6 +113,6 @@ mod tests {
 
     #[test]
     fn software_status_uses_the_current_wpf_release_version() {
-        assert_eq!(DEFAULT_APP_VERSION, "1.0.1");
+        assert_eq!(DEFAULT_APP_VERSION, "1.0.2");
     }
 }

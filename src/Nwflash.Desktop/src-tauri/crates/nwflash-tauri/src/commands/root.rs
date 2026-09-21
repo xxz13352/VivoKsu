@@ -862,6 +862,7 @@ fn automatic_root_flash_source_with_lease(
                 partition_name: artifact.partition.partition_name().to_string(),
                 image_path: artifact.image.path.clone(),
                 has_slot: false,
+                simulated_flash_bytes: None,
             });
         }
     }
@@ -883,7 +884,6 @@ fn automatic_root_flash_source_with_lease(
     Ok(SafeFlashPreparedSource {
         staging_root: None,
         partitions,
-        wipe_data_image_path: None,
         has_block_based_content: false,
     })
 }
@@ -1645,7 +1645,9 @@ async fn patch_official_vendor_boot_core(
         let tool = resources.resolve_magiskboot();
         resources
             .verify_root_tool(&tool)
-            .map_err(|_| DomainError::InvalidOperation("ROOT 修补工具不可用。".to_string()))?;
+            .map_err(|error| {
+                DomainError::InvalidOperation(format!("ROOT 修补工具不可用：{error}"))
+            })?;
         let setup = build_vendor_boot_setup_commands(
             &serial,
             Path::new(&tool.path),
@@ -2285,7 +2287,6 @@ pub async fn root_run_automatic(
                                 is_safe_flash: false,
                                 is_keep_root: false,
                                 wipe_data: false,
-                                wipe_data_image_path: None,
                                 slot_mode: SafeFlashSlotMode::CurrentSlot,
                                 current_slot: None,
                             };
@@ -2824,7 +2825,6 @@ mod tests {
         let source = SafeFlashPreparedSource {
             staging_root: None,
             partitions: Vec::new(),
-            wipe_data_image_path: None,
             has_block_based_content: false,
         };
         let options = SafeFlashBuildOptions {
@@ -2832,7 +2832,6 @@ mod tests {
             is_safe_flash: false,
             is_keep_root: false,
             wipe_data: false,
-            wipe_data_image_path: None,
             slot_mode: nwflash_domain::SafeFlashSlotMode::CurrentSlot,
             current_slot: None,
         };

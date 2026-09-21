@@ -16,6 +16,8 @@ const TOKEN: &str = "runtime-token";
 const BUILD_ID: &str = "build-runtime";
 const PROCESS_NONCE: &str = "nonce-runtime";
 const SESSION_ID: &str = "session-runtime";
+/// 登录请求的防重放随机数（生产侧由 `fresh_request_nonce` 生成）。
+const REQUEST_NONCE: &str = "nonce-request-runtime";
 
 fn now() -> i64 {
     SystemTime::now()
@@ -634,6 +636,7 @@ fn secret_debug_is_redacted_and_explicit_zeroization_clears_storage() {
         BUILD_ID,
         PROCESS_NONCE,
         SESSION_ID,
+        REQUEST_NONCE,
     );
     assert!(!format!("{request:?}").contains(PASSWORD));
 }

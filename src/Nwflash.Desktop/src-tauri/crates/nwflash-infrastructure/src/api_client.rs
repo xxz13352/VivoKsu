@@ -9,6 +9,7 @@ use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
     Client, Method, Response, StatusCode,
 };
+use rand_core::{OsRng, RngCore};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -24,7 +25,7 @@ use crate::trace_http::{
 use crate::{ProcessIdentity, SecretToken};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.nwflash.cc.cd";
-pub const DEFAULT_APP_VERSION: &str = "1.0.1";
+pub const DEFAULT_APP_VERSION: &str = "1.0.2";
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum CloudflareError {
@@ -310,6 +311,7 @@ pub struct LoginRequest {
     pub build_id: String,
     pub process_nonce: String,
     pub session_id: String,
+    pub request_nonce: String,
 }
 
 impl LoginRequest {
@@ -320,6 +322,7 @@ impl LoginRequest {
         build_id: impl Into<String>,
         process_nonce: impl Into<String>,
         session_id: impl Into<String>,
+        request_nonce: impl Into<String>,
     ) -> Self {
         Self {
             username: username.into(),
@@ -328,6 +331,7 @@ impl LoginRequest {
             build_id: build_id.into(),
             process_nonce: process_nonce.into(),
             session_id: session_id.into(),
+            request_nonce: request_nonce.into(),
         }
     }
 }
@@ -342,6 +346,7 @@ impl fmt::Debug for LoginRequest {
             .field("build_id", &self.build_id)
             .field("process_nonce", &self.process_nonce)
             .field("session_id", &self.session_id)
+            .field("request_nonce", &self.request_nonce)
             .finish()
     }
 }
@@ -415,6 +420,7 @@ pub struct HeartbeatRequest {
 #[derive(Debug, Serialize)]
 struct GoodbyeRequest {
     session_id: String,
+    sequence: u64,
     active: bool,
 }
 
@@ -491,6 +497,15 @@ pub struct UsageLogUploadResponse {
 pub struct OperationAuthorization {
     pub allowed: bool,
     pub reason: Option<String>,
+    pub request_nonce: String,
+}
+
+fn fresh_request_nonce() -> CloudflareResult<String> {
+    let mut bytes = [0_u8; 24];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|_| CloudflareError::Transport("无法生成请求随机数。".to_string()))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -659,6 +674,7 @@ impl CloudflareClient {
             identity.build_id(),
             identity.process_nonce(),
             session_id,
+            fresh_request_nonce()?,
         );
         let response = self
             .send_request(Method::POST, "/api/login", None, Some(&request))
@@ -764,6 +780,7 @@ impl CloudflareClient {
                 Some(token),
                 Some(&GoodbyeRequest {
                     session_id: session_id.to_string(),
+                    sequence,
                     active: false,
                 }),
             )

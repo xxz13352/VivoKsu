@@ -302,7 +302,7 @@ async fn heartbeat_parses_force_exit_reason() {
 }
 
 #[tokio::test]
-async fn goodbye_posts_only_the_authenticated_session_id_and_inactive_flag() {
+async fn goodbye_posts_the_authenticated_session_id_sequence_and_inactive_flag() {
     let server = MockServer::start().await;
     let api = create_client(&server.uri());
     Mock::given(method("POST"))
@@ -310,6 +310,7 @@ async fn goodbye_posts_only_the_authenticated_session_id_and_inactive_flag() {
         .and(header("Authorization", "Bearer tok"))
         .and(body_json(serde_json::json!({
             "session_id": "sess-abc",
+            "sequence": 9,
             "active": false
         })))
         .respond_with(
@@ -463,7 +464,8 @@ async fn authorize_operation_posts_operation_and_parses_allowed() {
             "title": "正在刷写 boot"
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "allowed": true
+            "allowed": true,
+            "request_nonce": "nonce-authorize-1"
         })))
         .mount(&mock_server)
         .await;
@@ -473,6 +475,7 @@ async fn authorize_operation_posts_operation_and_parses_allowed() {
         .await
         .expect("authorize should parse");
     assert!(result.allowed);
+    assert_eq!(result.request_nonce, "nonce-authorize-1");
 }
 
 #[tokio::test]

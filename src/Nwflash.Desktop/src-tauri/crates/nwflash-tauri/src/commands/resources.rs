@@ -1,40 +1,24 @@
 use nwflash_application::result_to_domain_error;
 use nwflash_domain::{DomainError, OperationKind};
-use nwflash_infrastructure::{
-    PayloadDumperProvisioner, RemoteAssetDownloader, ScrcpyProvisioner, VivoRootResourceService,
-};
+use nwflash_infrastructure::{PayloadDumperProvisioner, ScrcpyProvisioner, VivoRootResourceService};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::State;
 
-/// 按需供给的工具（scrcpy / payload_dumper / 管理器 APK）统一接多镜像
-/// failover 下载器：随包资源缺失或校验失败时自动从远端补齐，恢复 C#
-/// `AppComposition` 的发布瘦身供给链。所有构造点从这里取下载器，不再传
-/// `None` 切断应用内恢复路径。
-pub(crate) fn remote_asset_downloader() -> RemoteAssetDownloader {
-    RemoteAssetDownloader::default()
-}
-
-/// scrcpy 供给：内置目录优先，缺失/校验失败时回退远端下载。
+/// 所有运行时工具都必须来自安装包，避免运行中联网下载或执行 PATH 中的
+/// 未知版本。资源缺失时让调用方给出明确的“重新安装应用”错误。
 pub(crate) fn scrcpy_provisioner_with_downloader(app_root: PathBuf) -> ScrcpyProvisioner {
-    ScrcpyProvisioner::with_downloader_and_bundle(
-        remote_asset_downloader(),
-        app_root.join("scrcpy"),
-    )
+    ScrcpyProvisioner::bundled(app_root)
 }
 
-/// payload_dumper 供给：内置 payload-tools 优先，缺失/哈希不符时回退远端下载。
+/// payload_dumper 只使用安装包中的可执行文件。
 pub(crate) fn payload_provisioner_with_downloader(app_root: PathBuf) -> PayloadDumperProvisioner {
-    PayloadDumperProvisioner::new(
-        remote_asset_downloader(),
-        Some(app_root.join("payload-dumper-cache")),
-        Some(app_root.join("payload-tools").join("payload_dumper.exe")),
-    )
+    PayloadDumperProvisioner::bundled(app_root)
 }
 
-/// 管理器 APK 供给：随包/缓存优先，缺失时自动下载。
+/// 管理器 APK 只使用安装包中的文件。
 pub(crate) fn root_resource_service_with_downloader(app_root: PathBuf) -> VivoRootResourceService {
-    VivoRootResourceService::new(app_root, Some(remote_asset_downloader()))
+    VivoRootResourceService::new(app_root, None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

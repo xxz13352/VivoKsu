@@ -791,9 +791,10 @@ pub struct RecordingProcessExecutor {
 }
 
 impl RecordingProcessExecutor {
-    /// 单条命令留痕保留的输出上限（stdout + stderr 合计）。命令输出可以是
-    /// 上百 MiB 的刷写日志，留痕只保留开头一段用于判定协议错误。
-    pub const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 8 * 1024;
+    /// 单条命令留痕保留的输出上限（每个输出流）。成功命令由上层再做精简；
+    /// 失败命令必须把完整命令级输出交给上层，因此这里不能再使用 8 KiB
+    /// 的旧留痕上限。进程本身仍受 `PROCESS_OUTPUT_MAX_BYTES` 的安全上限保护。
+    pub const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
     pub fn new(recorder: Arc<dyn ProcessCommandRecorder>) -> Self {
         Self {

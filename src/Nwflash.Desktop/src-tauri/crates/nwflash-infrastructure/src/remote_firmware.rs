@@ -89,7 +89,8 @@ pub struct ExtractedZipImage {
 
 fn default_client() -> Client {
     Client::builder()
-        .user_agent("Nwflash/1.0.1")
+        // 直接取版本常量，避免这里的字面量随发版一起漂移。
+        .user_agent(format!("Nwflash/{}", crate::DEFAULT_APP_VERSION))
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(STALL_TIMEOUT)
         .build()
