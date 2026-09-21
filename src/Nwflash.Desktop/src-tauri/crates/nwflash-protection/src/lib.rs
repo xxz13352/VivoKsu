@@ -5,10 +5,14 @@
 
 mod decision;
 mod lease;
+mod local_artifact;
+mod suspend_gate;
 mod trace_redaction;
 mod vmp;
 
 pub use decision::*;
 pub use lease::*;
+pub use local_artifact::*;
+pub use suspend_gate::*;
 pub use trace_redaction::*;
 pub use vmp::*;

@@ -313,6 +313,9 @@ fn operation_failure_detail(error: &DomainError) -> Option<String> {
         | DomainError::InvalidFormat(detail)
         | DomainError::InvalidInput(detail)
         | DomainError::InvalidOperation(detail)
+        // 挂起必须留痕:用户需要知道"发生了什么、设备是否安全",这属于
+        // 排障信息,不能像取消那样静默。
+        | DomainError::WriteSuspended(detail)
         | DomainError::Internal(detail) => detail.trim(),
     };
     if detail.is_empty() {
@@ -380,6 +383,11 @@ fn hides_failure_token(token: &str) -> bool {
 fn public_operation_failure_message(error: &DomainError) -> &'static str {
     match error {
         DomainError::UserCancelled(_) => "操作已取消。",
+        // 挂起不是失败、也不是取消:文案必须让用户知道"设备没坏,处理完调试器
+        // 就能继续",而不是以为操作已经失败要重刷。
+        DomainError::WriteSuspended(_) => {
+            "检测到调试器，写入已暂停以确保设备安全。请关闭调试工具后重试，设备未受影响。"
+        }
         DomainError::DeviceUnavailable(_) => "设备不可用，请检查连接后重试。",
         DomainError::AuthorizationDenied(_) => "操作授权被拒绝，请重新登录或联系管理员。",
         DomainError::RemoteApi(_) => "服务器暂时不可用，请稍后重试。",

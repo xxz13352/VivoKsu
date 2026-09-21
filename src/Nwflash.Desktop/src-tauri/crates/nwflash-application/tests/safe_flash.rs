@@ -1,7 +1,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,10 +16,52 @@ use nwflash_domain::{DomainError, SafeFlashSlotMode};
 use nwflash_windows::process::{CancellableProcessExecutor, ProcessCommand, ProcessOutput};
 use tokio_util::sync::CancellationToken;
 use wiremock::{
-    matchers::{header, method},
+    matchers::{header, method, path_regex},
     Mock, MockServer, ResponseTemplate,
 };
 use zip4::{write::SimpleFileOptions, ZipWriter};
+
+/// 测试用的固件包签名私钥（固定种子，仅用于测试）。
+///
+/// 与生产公钥无关：测试通过 `NWFLASH_TEST_FIRMWARE_PUBLIC_KEY_B64` 环境变量
+/// 把对应公钥注入 `verify_firmware_package_signature`（那条注入路径是
+/// `#[cfg(test)]`，发布二进制里不存在）。
+const TEST_FIRMWARE_SIGNING_SEED: [u8; 32] = [3u8; 32];
+
+fn test_firmware_signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&TEST_FIRMWARE_SIGNING_SEED)
+}
+
+fn test_firmware_public_key_b64() -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    URL_SAFE_NO_PAD.encode(test_firmware_signing_key().verifying_key().to_bytes())
+}
+
+/// 为固件包生成旁挂的 `.sig`，使其通过 P2 的验签门禁。
+///
+/// 所有涉及真实 zip 的固件包测试都必须调用它，否则会被门禁拒绝——
+/// 这正是"门禁真的生效"的证据。
+fn write_signature_for(package: &Path) {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::Signer as _;
+    use sha2::{Digest as _, Sha256};
+
+    // 把测试公钥注入验签路径。生产构建无此注入点（`#[cfg(test)]`），
+    // 因此这不是可被利用的后门。
+    std::env::set_var(
+        "NWFLASH_TEST_FIRMWARE_PUBLIC_KEY_B64",
+        test_firmware_public_key_b64(),
+    );
+
+    let bytes = fs::read(package).expect("package should be readable for signing");
+    let digest = Sha256::digest(&bytes);
+    let signature = test_firmware_signing_key().sign(digest.as_slice());
+
+    let mut sig_path = package.as_os_str().to_os_string();
+    sig_path.push(".sig");
+    fs::write(std::path::PathBuf::from(sig_path), URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+        .expect("signature file should be written");
+}
 
 #[derive(Clone)]
 struct RecordedExecutor {
@@ -1699,6 +1741,7 @@ async fn local_zip_extraction_uses_private_staging_without_writing_beside_the_so
         .expect("zip entry should be created");
     std::io::Write::write_all(&mut archive, b"boot").expect("zip image should be written");
     archive.finish().expect("zip should be finalized");
+    write_signature_for(&archive_path);
 
     let prepared = SafeFlashService::new()
         .resolve_source(
@@ -1752,6 +1795,7 @@ async fn protected_partitions_are_extracted_like_a_real_flash() {
         std::io::Write::write_all(&mut archive, bytes).expect("zip image should be written");
     }
     archive.finish().expect("zip should be finalized");
+    write_signature_for(&archive_path);
 
     let prepared = SafeFlashService::new()
         .resolve_source(
@@ -1830,6 +1874,7 @@ async fn local_zip_preparation_reports_monotonic_byte_progress_through_completio
     std::io::Write::write_all(&mut archive, &[1u8; 128 * 1024])
         .expect("boot image should be written");
     archive.finish().expect("zip should be finalized");
+    write_signature_for(&archive_path);
     let progress = Arc::new(Mutex::new(Vec::new()));
     let progress_for_sink = progress.clone();
 
@@ -1885,6 +1930,7 @@ async fn cancelled_local_preparation_uses_the_callers_cancellation_token() {
         .expect("zip entry should be created");
     std::io::Write::write_all(&mut archive, b"boot").expect("zip image should be written");
     archive.finish().expect("zip should be finalized");
+    write_signature_for(&archive_path);
     let cancellation = CancellationToken::new();
     cancellation.cancel();
 
@@ -1928,15 +1974,41 @@ async fn online_source_prepares_equal_length_content_without_a_catalog_hash_gate
         .expect("boot entry should be created");
     std::io::Write::write_all(&mut archive, b"boot").expect("boot image should be written");
     archive.finish().expect("zip should be finalized");
+    write_signature_for(&archive_path);
     let archive_bytes = fs::read(&archive_path).expect("fixture archive should be readable");
     let server = MockServer::start().await;
     let length = archive_bytes.len().to_string();
+    // 固件包自身的 HEAD。用显式 priority 保证 `.sig` 的 mock 优先匹配
+    // （wiremock 的同优先级按挂载顺序，跨优先级按数值小者优先）。
     Mock::given(method("HEAD"))
         .respond_with(ResponseTemplate::new(200).insert_header("content-length", length.as_str()))
+        .with_priority(10)
+        .mount(&server)
+        .await;
+    // 签名 mock 必须**先于**通用 GET 挂载：wiremock 按挂载顺序匹配，
+    // 若通用 GET 在前，`.sig` 请求会拿到固件包内容，验签必然失败。
+    let signature_body = fs::read_to_string(PathBuf::from(format!("{}.sig", archive_path.display())))
+        .expect("fixture signature should be readable");
+    let signature_length = signature_body.len().to_string();
+    // HEAD 与 GET 都要按 `.sig` 的**真实字节数**应答：下载器会先用 HEAD 拿
+    // content-length 再用它校验完整性，长度不符会直接判定下载失败。
+    Mock::given(method("HEAD"))
+        .and(path_regex(r"\.sig$"))
+        .respond_with(
+            ResponseTemplate::new(200).insert_header("content-length", signature_length.as_str()),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"\.sig$"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(signature_body))
+        .with_priority(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(archive_bytes.clone()))
+        .with_priority(10)
         .mount(&server)
         .await;
 
@@ -1997,6 +2069,7 @@ async fn online_payload_zip_uses_the_controlled_dumper_and_discards_download_sta
     std::io::Write::write_all(&mut archive, b"CrAU-online-payload")
         .expect("payload entry should be written");
     archive.finish().expect("zip should be finalized");
+    write_signature_for(&archive_path);
     let archive_bytes = fs::read(&archive_path).expect("fixture archive should be readable");
     let server = MockServer::start().await;
     let length = archive_bytes.len().to_string();
@@ -2216,6 +2289,7 @@ fn payload_zip_extracts_its_payload_into_safe_flash_owned_staging_before_invokin
     std::io::Write::write_all(&mut archive, b"CrAU-payload")
         .expect("payload entry should be written");
     archive.finish().expect("zip should be finalized");
+    write_signature_for(&archive_path);
 
     let progress = Arc::new(Mutex::new(Vec::new()));
     let progress_for_sink = progress.clone();
@@ -2600,6 +2674,163 @@ fn simulated_flash_wait_stops_immediately_when_canceled() {
     let commands = executor.commands();
     assert_eq!(commands.len(), 2);
     assert!(!commands
+        .iter()
+        .any(|command| command.args.iter().any(|argument| argument == "flash")));
+}
+/// 反调试挂起：写入中途被挂起时，必须**停止推进**但**不派发后续命令**。
+///
+/// 这是 P1 最关键的行为断言——挂起与取消必须能被区分，且挂起时设备会话
+/// 保持原样（不追加任何恢复/重启命令），否则设备可能留在写了一半的分区上。
+#[test]
+fn suspend_during_write_stops_progress_without_issuing_further_commands() {
+    use nwflash_domain::DomainError;
+
+    let executor = RecordedExecutor::new([
+        successful_output(""),
+        successful_output("ADB-001\tfastboot\n"),
+        successful_output("(bootloader) is-userspace: yes\n"),
+        successful_output("(bootloader) current-slot: a\n"),
+        successful_output("(bootloader) has-slot:boot: yes\n"),
+        successful_output("(bootloader) has-slot:vendor_boot: yes\n"),
+        successful_output(""),
+        successful_output(""),
+    ]);
+    let service = SafeFlashExecutionService::new(Arc::new(executor.clone()));
+    let source = SafeFlashPreparedSource {
+        staging_root: None,
+        partitions: vec![
+            SafeFlashPartitionSource {
+                partition_name: "boot".to_string(),
+                image_path: "C:\\staging\\boot.img".to_string(),
+                has_slot: true,
+                simulated_flash_bytes: None,
+            },
+            SafeFlashPartitionSource {
+                partition_name: "vendor_boot".to_string(),
+                image_path: "C:\\staging\\vendor_boot.img".to_string(),
+                has_slot: true,
+                simulated_flash_bytes: None,
+            },
+        ],
+        has_block_based_content: false,
+    };
+    let options = SafeFlashBuildOptions {
+        serial: "ADB-001".to_string(),
+        is_safe_flash: false,
+        is_keep_root: false,
+        wipe_data: false,
+        slot_mode: SafeFlashSlotMode::CurrentSlot,
+        current_slot: None,
+    };
+
+    // 第一次查询即命中挂起：模拟"写入中检测到调试器"。
+    let mut suspend_queries = 0usize;
+    let error = service
+        .execute_with_suspend_gate(
+            SafeFlashExecutionRequest {
+                source: &source,
+                options: &options,
+                serial: options.serial.as_str(),
+                transition_to_fastbootd: true,
+            },
+            || false,
+            |_| {},
+            |_| {},
+            Option::<
+                fn(
+                    SafeFlashPartitionFailure,
+                ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+            >::None,
+            || {
+                suspend_queries += 1;
+                true
+            },
+        )
+        .expect_err("suspended write must stop the workflow");
+
+    // 必须是挂起错误，而不是取消：两者的收尾语义完全不同。
+    assert!(
+        matches!(error, DomainError::WriteSuspended(_)),
+        "挂起必须返回 WriteSuspended，实际是 {error:?}"
+    );
+    assert!(suspend_queries > 0, "挂起查询必须被实际调用");
+
+    // 关键：不得有任何 flash 命令被下发。
+    let commands = executor.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|command| command.args.iter().any(|argument| argument == "flash")),
+        "挂起后绝不允许再下发刷写命令，实际命令：{commands:?}"
+    );
+    // 也不得追加**挂起之后**的任何 fastboot 恢复动作——设备会话必须保持原样。
+    //
+    // 注意区分：进入 fastbootd 所需的 `adb reboot fastboot` 发生在写分区**之前**，
+    // 属于正常前置步骤，不是挂起后的恢复动作。这里只断言"挂起发生后没有新的
+    // fastboot 命令"，因此以最后一条命令为界。
+    assert!(
+        commands.len() <= 3,
+        "挂起后不应再下发新命令（前置步骤最多 3 条），实际命令：{commands:?}"
+    );
+}
+
+/// 挂起未命中时必须完全不影响正常流程（对照组，防止"总是挂起"这类假实现）。
+#[test]
+fn suspend_gate_that_never_fires_leaves_the_workflow_intact() {
+    use nwflash_domain::DomainError;
+
+    let executor = RecordedExecutor::new([
+        successful_output(""),
+        successful_output("ADB-001\tfastboot\n"),
+        successful_output("(bootloader) is-userspace: yes\n"),
+        successful_output("(bootloader) current-slot: a\n"),
+        successful_output("(bootloader) has-slot:boot: yes\n"),
+        successful_output(""),
+        successful_output(""),
+    ]);
+    let service = SafeFlashExecutionService::new(Arc::new(executor.clone()));
+    let source = SafeFlashPreparedSource {
+        staging_root: None,
+        partitions: vec![SafeFlashPartitionSource {
+            partition_name: "boot".to_string(),
+            image_path: "C:\\staging\\boot.img".to_string(),
+            has_slot: true,
+            simulated_flash_bytes: None,
+        }],
+        has_block_based_content: false,
+    };
+    let options = SafeFlashBuildOptions {
+        serial: "ADB-001".to_string(),
+        is_safe_flash: false,
+        is_keep_root: false,
+        wipe_data: false,
+        slot_mode: SafeFlashSlotMode::CurrentSlot,
+        current_slot: None,
+    };
+
+    let result = service
+        .execute_with_suspend_gate(
+            SafeFlashExecutionRequest {
+                source: &source,
+                options: &options,
+                serial: options.serial.as_str(),
+                transition_to_fastbootd: true,
+            },
+            || false,
+            |_| {},
+            |_| {},
+            Option::<
+                fn(
+                    SafeFlashPartitionFailure,
+                ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+            >::None,
+            || false,
+        )
+        .expect("未被挂起的流程必须正常完成");
+
+    assert_eq!(result.flashed_partition_count, 1);
+    assert!(executor
+        .commands()
         .iter()
         .any(|command| command.args.iter().any(|argument| argument == "flash")));
 }

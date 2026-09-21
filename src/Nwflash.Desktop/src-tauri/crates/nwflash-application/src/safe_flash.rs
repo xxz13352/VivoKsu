@@ -359,10 +359,10 @@ impl SafeFlashExecutionService {
     pub fn execute_with_partition_failure_hook<F, S, P, D>(
         &self,
         request: SafeFlashExecutionRequest<'_>,
-        mut is_canceled: F,
-        mut report_stage: S,
-        mut report_progress: P,
-        mut on_partition_failure: Option<D>,
+        is_canceled: F,
+        report_stage: S,
+        report_progress: P,
+        on_partition_failure: Option<D>,
     ) -> Result<SafeFlashExecutionResult, DomainError>
     where
         F: FnMut() -> bool,
@@ -371,6 +371,49 @@ impl SafeFlashExecutionService {
         D: FnMut(
             SafeFlashPartitionFailure,
         ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+    {
+        // 无挂起闸门:既有调用点(含全部单测)行为完全不变。
+        let mut never_suspended = || false;
+        self.execute_with_suspend_gate(
+            request,
+            is_canceled,
+            report_stage,
+            report_progress,
+            on_partition_failure,
+            &mut never_suspended,
+        )
+    }
+
+    /// 与 [`Self::execute_with_partition_failure_hook`] 相同，但额外接受一个
+    /// **挂起查询**回调 `is_suspended`。
+    ///
+    /// 反调试语义(与"取消"严格区分):
+    ///
+    /// - `is_canceled()` 为真 -> 用户主动中止,按 `UserCancelled` 收尾。
+    /// - `is_suspended()` 为真 -> **暂停推进**,返回 `DomainError::WriteSuspended`,
+    ///   调用方据此挂起异步任务并提示用户;**绝不允许**在此路径上退出进程,
+    ///   因为设备可能正处于写了一半的分区上。
+    ///
+    /// 挂起检查在每个命令**边界**执行:当前命令若已开始就让它跑完(中断一条
+    /// 已发出的 fastboot 命令比等它结束更危险),只阻止下一条命令下发。
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_suspend_gate<F, S, P, D, G>(
+        &self,
+        request: SafeFlashExecutionRequest<'_>,
+        mut is_canceled: F,
+        mut report_stage: S,
+        mut report_progress: P,
+        mut on_partition_failure: Option<D>,
+        mut is_suspended: G,
+    ) -> Result<SafeFlashExecutionResult, DomainError>
+    where
+        F: FnMut() -> bool,
+        S: FnMut(String),
+        P: FnMut(f64),
+        D: FnMut(
+            SafeFlashPartitionFailure,
+        ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+        G: FnMut() -> bool,
     {
         let mut last_partition_target = String::new();
         let transport = DeviceTransport::new(self.tools.clone());
@@ -520,6 +563,14 @@ impl SafeFlashExecutionService {
             } = step.clone();
             index += 1;
             self.ensure_not_canceled(&mut is_canceled)?;
+            // 反调试挂起检查(**不是取消**):命中即停止推进,但绝不退出进程、
+            // 也绝不关闭 fastboot 会话——设备可能正处于写了一半的分区上,
+            // 中断才是真正的变砖风险。已有命令跑完再停,避免打断半条写入。
+            if is_suspended() {
+                return Err(DomainError::WriteSuspended(
+                    "检测到调试器，写入已暂停以确保设备安全。请处理调试工具后继续。".to_string(),
+                ));
+            }
             if is_partition_flash {
                 // fastboot flash 参数形态固定为 [-s, serial, flash, 分区, 镜像]
                 last_partition_target = command
@@ -1519,6 +1570,11 @@ impl SafeFlashService {
             .map_err(map_ota_download_error)?;
             self.ensure_preparation_not_canceled(cancellation)?;
 
+            // 与固件包一起下载它的 detached 签名。签名必须来自**同一个**
+            // 渠道，否则本地验签就退化成"用攻击者提供的公钥验证攻击者的包"。
+            download_firmware_signature(url, &download_target, cancellation).await?;
+            self.ensure_preparation_not_canceled(cancellation)?;
+
             let mut archive = ZipArchive::new(File::open(&download_target).map_err(|error| {
                 DomainError::InvalidOperation(format!("打开固件压缩包失败：{error}"))
             })?)
@@ -1670,7 +1726,7 @@ impl SafeFlashService {
         Ok(partitions)
     }
 
-    async fn list_zip_images(
+async fn list_zip_images(
         &self,
         source: &Path,
         options: &SafeFlashBuildOptions,
@@ -1679,6 +1735,12 @@ impl SafeFlashService {
         preparation_progress: Option<&Arc<SafeFlashPreparationProgressSink>>,
     ) -> Result<Vec<SafeFlashPartitionSource>, DomainError> {
         self.ensure_preparation_not_canceled(cancellation)?;
+        // 固件包签名门禁：**解压任何镜像之前**校验 `.sig`。
+        //
+        // 这是整个 P2 里唯一真正有安全边界意义的校验：固件包来自磁盘/
+        // 下载渠道,被替换成恶意镜像会直接写进设备(变砖或植入)。
+        // 验签失败**直接拒绝**,不做任何"退回未校验内容"的降级。
+        verify_firmware_package_signature(source)?;
         let mut archive = ZipArchive::new(File::open(source).map_err(|error| {
             DomainError::InvalidOperation(format!("打开固件压缩包失败：{error}"))
         })?)
@@ -2197,4 +2259,138 @@ mod tests {
 
         assert_eq!(roots.len(), 64);
     }
+}
+
+/// 固件包签名门禁：在解压任何镜像之前校验旁挂的 `.sig`。
+///
+/// ## 策略（按调用来源区分）
+///
+/// - **本地用户选择的固件包**：要求存在 `<包>.sig` 且验签通过。
+/// - **无签名**：拒绝，并给出明确指引。
+///
+/// 这里刻意**不**做"没有签名就放行"的降级——那等于把门禁变成可选项，
+/// 攻击者只要删掉 `.sig` 就能绕过。fail-closed 才有意义。
+///
+/// ## 覆盖范围
+///
+/// 签名覆盖的是**固件包整体的 SHA-256**，不是单个镜像。因此一个签名能保护
+/// 整包，且大包可以流式摘要（见 `verify_sha256_digest`）而不必整包读进内存。
+fn verify_firmware_package_signature(source: &Path) -> Result<(), DomainError> {
+    // 测试可注入公钥；发布构建不含该 feature，恒走编译期公钥。
+    #[cfg(feature = "test-firmware-key-injection")]
+    if let Some(key) = test_verifying_key() {
+        return verify_firmware_package_signature_with_key(source, &key);
+    }
+    let verifying_key = nwflash_infrastructure::compiled_session_verifying_key().map_err(|_| {
+        DomainError::Internal("编译期验证公钥缺失，无法校验固件包签名。".to_string())
+    })?;
+    verify_firmware_package_signature_with_key(source, &verifying_key)
+}
+
+/// 与 [`verify_firmware_package_signature`] 相同，但显式接收验证公钥。
+///
+/// 拆出这一层是为了让测试能注入测试公钥：生产构建的公钥来自编译期
+/// `NWFLASH_SESSION_VERIFY_KEY_B64`（测试构建下为空），因此测试必须能
+/// 替换它，否则所有涉及固件包的测试都会卡在“公钥缺失”上，反而掩盖了
+/// 真正的验签逻辑。
+fn verify_firmware_package_signature_with_key(
+    source: &Path,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+) -> Result<(), DomainError> {
+    use nwflash_protection::{verify_artifact_bytes, ArtifactVerificationError};
+
+    let signature_path = firmware_signature_path(source);
+    let signature = std::fs::read_to_string(&signature_path).map_err(|_| {
+        DomainError::InvalidOperation(format!(
+            "固件包缺少签名文件 {}：为安全起见已拒绝刷写。请使用官方渠道下载的固件包。",
+            signature_path.display()
+        ))
+    })?;
+
+    let package = std::fs::read(source)
+        .map_err(|error| DomainError::InvalidOperation(format!("读取固件包失败：{error}")))?;
+
+    verify_artifact_bytes(&package, &signature, verifying_key).map_err(|error| {
+        let reason = match error {
+            ArtifactVerificationError::MalformedSignature => "签名文件格式不合法",
+            ArtifactVerificationError::InvalidSignatureLength => "签名长度不合法",
+            ArtifactVerificationError::SignatureMismatch => {
+                "签名与固件包内容不匹配（包可能被替换或损坏）"
+            }
+        };
+        DomainError::InvalidOperation(format!(
+            "固件包签名校验失败：{reason}。已拒绝刷写以免写入被篡改的镜像。"
+        ))
+    })
+}
+/// 由固件包 URL 推导签名 URL。
+///
+/// **必须插在路径末尾**，不能简单地对整串追加：`http://host:8080` 追加后
+/// 会变成 `http://host:8080.sig`，`.sig` 落进端口位置，直接构造出非法 URL
+/// （这正是实现过程中被在线路径测试抓出来的真实缺陷）。
+///
+/// 查询串要保留在 `.sig` **之后**：`.../rom.zip?v=2` -> `.../rom.zip.sig?v=2`。
+fn firmware_signature_url(url: &str) -> String {
+    let trimmed = url.trim();
+    // 分离查询串：`.sig` 必须落在路径段上，查询串排在它之后。
+    let (base, query) = match trimmed.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (trimmed, None),
+    };
+    // 关键：若 URL 没有路径段（形如 `http://host:port`），必须先补 `/`，
+    // 否则 `.sig` 会紧贴在端口号后面，被解析成非法端口。
+    let has_path_segment = base
+        .split_once("://")
+        .map(|(_, rest)| rest.contains('/'))
+        .unwrap_or(false);
+    let separator = if has_path_segment { "" } else { "/" };
+    let stem = base.trim_end_matches('/');
+    match query {
+        Some(query) => format!("{stem}{separator}.sig?{query}"),
+        None => format!("{stem}{separator}.sig"),
+    }
+}
+/// 从固件包 URL 推导并下载它的 detached 签名文件。
+///
+/// 约定：签名地址是固件包地址 + `.sig`。下载失败时**不阻断**，
+/// 而是留给后续的验签门禁去拒绝并给出统一文案——这样"缺签名"与
+/// "签名不匹配"对用户呈现同一条处置指引，不会出现两套说辞。
+async fn download_firmware_signature(
+    url: &str,
+    download_target: &Path,
+    cancellation: &CancellationToken,
+) -> Result<(), DomainError> {
+    let signature_url = firmware_signature_url(url);
+    let mut signature_path = download_target.as_os_str().to_os_string();
+    signature_path.push(".sig");
+    let signature_path = std::path::PathBuf::from(signature_path);
+
+    download_to_file_with_cancellation(&signature_url, &signature_path, cancellation, None)
+        .await
+        .map_err(|error| {
+            DomainError::InvalidOperation(format!(
+                "下载固件包签名失败（{signature_url}）：{error}。已拒绝刷写以免写入未经校验的镜像。"
+            ))
+        })
+        .map(|_bytes| ())
+}
+/// 测试用的固件包验签公钥注入点。
+///
+/// 生产构建下不存在（该 feature 不在发布构建里启用），因此这条路径
+/// **无法**被发布二进制触发——它不会成为绕过验签的后门。
+#[cfg(feature = "test-firmware-key-injection")]
+fn test_verifying_key() -> Option<ed25519_dalek::VerifyingKey> {
+    let encoded = std::env::var("NWFLASH_TEST_FIRMWARE_PUBLIC_KEY_B64").ok()?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.trim())
+        .ok()?;
+    let bytes: [u8; 32] = bytes.try_into().ok()?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes).ok()
+}
+/// 固件包的 detached 签名路径：`rom.zip` -> `rom.zip.sig`。
+fn firmware_signature_path(source: &Path) -> std::path::PathBuf {
+    let mut candidate = source.as_os_str().to_os_string();
+    candidate.push(".sig");
+    std::path::PathBuf::from(candidate)
 }
