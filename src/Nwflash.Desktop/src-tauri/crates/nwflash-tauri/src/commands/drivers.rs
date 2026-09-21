@@ -23,6 +23,8 @@ pub struct DriverReinstallDto {
 pub async fn driver_reinstall(
     state: State<'_, crate::AppState>,
 ) -> Result<DriverReinstallDto, String> {
+    // 写类命令入口守卫：驱动安装会在本机产生提权副作用（写入系统驱动目录）。
+    crate::commands::guard::guard_write_command(&state)?;
     let archive = locate_bundled_driver_archive(&nwflash_windows::bundled_resource_root())
         .ok_or_else(|| "未找到随附的 USB 驱动包，请重新安装奶蛙Flash。".to_string())?;
     let adb_usb_ini = default_adb_usb_ini_path()?;

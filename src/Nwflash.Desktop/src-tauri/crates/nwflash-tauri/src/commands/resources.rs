@@ -61,6 +61,8 @@ pub async fn resource_install(
     state: State<'_, crate::AppState>,
     keys: Vec<String>,
 ) -> Result<Vec<String>, String> {
+    // 写类命令入口守卫：内置资源校验会下载并落地可执行组件到本机。
+    crate::commands::guard::guard_write_command(&state)?;
     let selected = validate_resource_selection(keys)?;
     let app_root = nwflash_windows::bundled_resource_root();
     let completed = selected.clone();

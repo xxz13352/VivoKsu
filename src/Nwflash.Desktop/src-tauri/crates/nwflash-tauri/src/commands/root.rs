@@ -1905,6 +1905,8 @@ pub async fn root_install_manager(
     state: State<'_, AppState>,
     manager: RootManager,
 ) -> Result<RootManagerInstallDto, String> {
+    // 写类命令入口守卫：ROOT 流程会把修补后的镜像写回设备分区。
+    crate::commands::guard::guard_write_command(&state)?;
     let lease = state
         .session_capabilities
         .capture()
@@ -1961,6 +1963,8 @@ pub async fn root_patch_vivo_ksu(
     state: State<'_, AppState>,
     options: RootVivoKsuPatchOptionsDto,
 ) -> Result<RootPatchedArtifactDto, String> {
+    // 写类命令入口守卫：ROOT 流程会把修补后的镜像写回设备分区。
+    crate::commands::guard::guard_write_command(&state)?;
     let lease = state
         .session_capabilities
         .capture()
@@ -2024,6 +2028,8 @@ pub async fn root_patch_official_vendor_boot(
     state: State<'_, AppState>,
     options: RootOfficialVendorBootPatchOptionsDto,
 ) -> Result<RootPatchedArtifactDto, String> {
+    // 写类命令入口守卫：ROOT 流程会把修补后的镜像写回设备分区。
+    crate::commands::guard::guard_write_command(&state)?;
     let lease = state
         .session_capabilities
         .capture()
@@ -2108,6 +2114,8 @@ pub async fn root_execute_patched_artifact_flash(
     state: State<'_, AppState>,
     artifact_id: String,
 ) -> Result<crate::commands::quick_flash::CommandExecutionResultDto, String> {
+    // 写类命令入口守卫：ROOT 流程会把修补后的镜像写回设备分区。
+    crate::commands::guard::guard_write_command(&state)?;
     root_execute_patched_artifact_flash_inner(&state, artifact_id).await
 }
 
@@ -2171,6 +2179,8 @@ pub async fn root_run_automatic(
     state: State<'_, AppState>,
     options: RootAutomaticOptionsDto,
 ) -> Result<RootAutomaticResultDto, String> {
+    // 写类命令入口守卫：ROOT 流程会把修补后的镜像写回设备分区。
+    crate::commands::guard::guard_write_command(&state)?;
     let lease = state
         .session_capabilities
         .capture()
@@ -2181,6 +2191,8 @@ pub async fn root_run_automatic(
     let app_root = nwflash_windows::bundled_resource_root();
     let result = Arc::new(Mutex::new(None));
     let result_for_operation = result.clone();
+    // 写入中途的反调试探针，与命令入口使用同一个实例（同源结论）。
+    let probe = state.protection.integrity_probe_handle();
 
     state
         .operation_coordinator
@@ -2295,12 +2307,15 @@ pub async fn root_run_automatic(
                             // 逐条 adb/fastboot 命令只进上报服务器的使用日志 details。
                             let command_recorder = OperationCommandRecorder::new(context.clone());
                             let stage_cancellation = cancellation.clone();
+                            let probe = probe.clone();
                             let execution = task::spawn_blocking(move || {
+                                let mut is_suspended =
+                                    crate::commands::safe_flash::during_write_suspend_query(probe);
                                 SafeFlashExecutionService::system()
                                     .with_executor(Arc::new(RecordingProcessExecutor::new(
                                         command_recorder,
                                     )))
-                                    .execute(
+                                    .execute_with_suspend_gate(
                                         build_root_automatic_execution_request(
                                             &source,
                                             &build_options,
@@ -2316,6 +2331,8 @@ pub async fn root_run_automatic(
                                                 progress,
                                             )
                                         },
+                                        None::<fn(nwflash_application::SafeFlashPartitionFailure) -> Result<nwflash_application::SafeFlashPartitionFailureDecision, nwflash_domain::DomainError>>,
+                                        &mut is_suspended,
                                     )
                             })
                             .await

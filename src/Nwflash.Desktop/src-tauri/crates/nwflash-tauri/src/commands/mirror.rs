@@ -421,6 +421,9 @@ pub fn mirror_status(state: State<'_, AppState>) -> MirrorStatusDto {
 
 #[tauri::command]
 pub async fn mirror_start(state: State<'_, AppState>) -> Result<MirrorStatusDto, String> {
+    // 写类命令入口守卫：投屏会拉起本机进程并启动设备端服务。
+    crate::commands::guard::guard_write_command(&state)?;
+
     state.mirror_runtime.begin_manual_start();
     start_plan_with_device_runtime(
         state.mirror_runtime.clone(),
