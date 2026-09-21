@@ -1,6 +1,6 @@
 [package]
 name = "nwflash-tauri"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "Tauri host crate and command bridge"
 autobins = false

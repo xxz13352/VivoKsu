@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "nwflash-application"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2724,7 +2724,7 @@ dependencies = [
 
 [[package]]
 name = "nwflash-desktop"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "futures",
  "nwflash-application",
@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "nwflash-domain"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "getrandom 0.4.3",
  "serde",
@@ -2757,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "nwflash-infrastructure"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "nwflash-protection"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "nwflash-tauri"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2835,7 +2835,7 @@ dependencies = [
 
 [[package]]
 name = "nwflash-windows"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "nwflash-domain",
  "sevenz-rust",
