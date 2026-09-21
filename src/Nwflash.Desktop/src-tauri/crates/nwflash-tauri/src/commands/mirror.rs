@@ -447,6 +447,10 @@ pub async fn mirror_set_auto(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<MirrorStatusDto, String> {
+    // 修改运行时配置（自动投屏开关）：入口第一行强制本地能力校验。
+    // 开启自动投屏会按设备接入自动拉起 scrcpy 子进程，属于会改变本机
+    // 运行状态的操作，不能由未授权的前端直接触发。
+    crate::commands::guard::guard_write_command(&state)?;
     state.mirror_runtime.set_auto_enabled(enabled);
     if enabled {
         reconcile_after_device_update(

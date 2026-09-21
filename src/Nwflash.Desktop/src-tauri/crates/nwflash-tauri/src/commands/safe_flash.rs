@@ -946,6 +946,10 @@ pub async fn safe_flash_execute_prepared(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<SafeFlashCompletionDto, String> {
+    // 这是真正把镜像写进设备的入口：入口第一行强制本地能力校验。
+    // 预检阶段的 capture_lease 只覆盖预检会话，执行阶段必须独立复检——
+    // 否则预检通过后租约失效（过期/被撤销）仍能落盘写设备。
+    crate::commands::guard::guard_write_command(&state)?;
     safe_flash_execute_prepared_inner(
         &state,
         Some(app_handle),
