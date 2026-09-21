@@ -6,6 +6,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { NWFLASH_APP_PAGES, PAGE_TITLES, type AppPageId } from './pageManifest';
 import { errorMessage } from './error';
 import { APP_OPERATION_LABELS, PROGRESS_CHANNEL_ORDER, type BusyOperationItem } from './window-state';
+import { applyUiScale } from './ui-scale';
+import { animateWindowSize } from './window-transition';
 import {
   IPC_EVENTS,
   type AuthSessionPayload,
@@ -203,6 +205,7 @@ export const App: FC = () => {
   const [driverReadinessError, setDriverReadinessError] = useState('');
   const [partitionFailure, setPartitionFailure] = useState<SafeFlashPartitionFailurePayload | null>(null);
   const closingWindow = useRef(false);
+  const uiScaleRef = useRef(1);
   const startupCancelledRef = useRef(false);
   const startupAttemptRef = useRef(0);
   const currentGenerationRef = useRef<string | null>(null);
@@ -666,14 +669,16 @@ export const App: FC = () => {
 
     let active = true;
     const syncWindowSize = async () => {
+      const target = isLoggedIn ? MAIN_WINDOW_SIZE : LOGIN_WINDOW_SIZE;
       try {
         const appWindow = getCurrentWindow();
         await appWindow.setResizable(isLoggedIn);
-        await appWindow.setSize(isLoggedIn ? MAIN_WINDOW_SIZE : LOGIN_WINDOW_SIZE);
-        // setSize 只改尺寸、保持左上角不动：登录窗(400x564)与主界面(1240x700)
-        // 尺寸不同，缩放后必须重新居中，否则登录页不在屏幕正中间、主界面还会
-        // 顶到屏幕右下角之外。两种状态都居中，登录页即从屏幕正中弹出。
-        await appWindow.center();
+        // 逐帧过渡、每帧重新居中：窗口看起来是从屏幕中心向外展开。
+        // 早先的写法是 setSize（从左上角往右下长）+ 一次 center()（随后跳回中间），
+        // 用户看到的就是「先向右下展开、再突然闪现到中间」。
+        // 注：失败会原样打印错误对象——ACL 拒绝时会写明缺哪条
+        // `core:window:allow-*` 权限，别再把它当成尺寸同步问题。
+        await animateWindowSize(appWindow, target);
       } catch (error) {
         if (active) {
           console.debug('窗口尺寸同步失败:', error);
@@ -686,6 +691,46 @@ export const App: FC = () => {
       active = false;
     };
   }, [isLoggedIn]);
+
+  // 点「放大」（最大化）后窗口从 1240 宽涨到 1920+，但字号是绝对 px，
+  // 于是文字和组件显得很小、内容还被摊平。按视口宽度等比放大 webview 缩放
+  // 级别，窗口越大整体越大；只放大不缩小（见 ui-scale.ts）。
+  const syncUiScale = useCallback(async () => {
+    try {
+      // 传入上次生效的缩放级别：innerWidth 会被缩放本身影响，乘回去才能得到
+      // 与缩放无关的等效宽度，避免 resize 事件把级别来回切（见 ui-scale.ts）。
+      uiScaleRef.current = await applyUiScale(window.innerWidth, uiScaleRef.current);
+    } catch (error) {
+      // 与窗口尺寸同步分开捕获：缺 `core:webview:allow-set-webview-zoom`
+      // 时会被 ACL 拒绝，单独记录便于定位（2026-09-19 的窗口居中丢权限教训）。
+      console.debug('界面缩放同步失败:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasTauriRuntime()) {
+      return;
+    }
+
+    void syncUiScale();
+    let timer: number | undefined;
+    const onResize = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+      timer = window.setTimeout(() => {
+        void syncUiScale();
+      }, 150);
+    };
+
+    window.addEventListener('resize', onResize);
+    return () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+      window.removeEventListener('resize', onResize);
+    };
+  }, [syncUiScale]);
 
   useEffect(() => {
     if (!hasTauriRuntime()) {

@@ -21,7 +21,10 @@ vi.mock('@tauri-apps/api/dpi', () => ({
 const windowApi = vi.hoisted(() => ({
   center: vi.fn().mockResolvedValue(undefined),
   close: vi.fn().mockResolvedValue(undefined),
+  // 窗口过渡要先读当前尺寸再逐帧 setSize + center（见 app/window-transition.ts）。
+  innerSize: vi.fn().mockResolvedValue({ toLogical: () => ({ width: 400, height: 564 }) }),
   minimize: vi.fn().mockResolvedValue(undefined),
+  scaleFactor: vi.fn().mockResolvedValue(1),
   setResizable: vi.fn().mockResolvedValue(undefined),
   setSize: vi.fn().mockResolvedValue(undefined),
   toggleMaximize: vi.fn().mockResolvedValue(undefined),

@@ -63,6 +63,20 @@ button:disabled {
   background: var(--nw-bg-page);
 }
 
+/* 登录 → 主界面（以及登出反向）时，窗口会用 180ms 从屏幕中心向外展开／收拢
+   （见 app/window-transition.ts）。视图本身同步淡入，否则展开过程中新界面
+   先被挤在窄窗口里、看起来是「闪」过去的。 */
+@keyframes nw-view-enter {
+  from {
+    opacity: 0;
+  }
+}
+
+.nw-shell,
+.nw-login-screen {
+  animation: nw-view-enter 220ms ease-out both;
+}
+
 .nw-titlebar {
   min-height: 64px;
   background: rgb(255 255 255 / 0.94);
@@ -193,6 +207,33 @@ button:disabled {
 .nw-page-card > article,
 .nw-page-card > .nw-page-content {
   max-width: 980px;
+}
+
+/* 最大化窗口时不要把工作台锁在 980px，避免主内容缩在左侧、右侧
+   留出大块空白。页面自身负责控制表单和列表的合理宽度。 */
+@media (min-width: 1440px) {
+  .nw-page-card {
+    padding-left: clamp(24px, 3vw, 56px);
+    padding-right: clamp(24px, 3vw, 56px);
+  }
+
+  .nw-page-card > section,
+  .nw-page-card > article,
+  .nw-page-card > .nw-page-content {
+    max-width: none;
+    width: 100%;
+  }
+}
+
+@media (max-width: 1120px) {
+  .nw-shell-layout {
+    grid-template-columns: 156px minmax(0, 1fr) 260px;
+  }
+
+  .nw-page-card {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
 }
 
 .nw-page-eyebrow {
@@ -351,6 +392,10 @@ button:disabled {
 .nw-login-card {
   border-radius: 0;
   box-shadow: none;
+  /* 登录窗固定 400 宽；窗口在过渡过程中会短暂比它宽（登出时比它窄），
+     锁住 400 宽并居中可以让登录表单在整段过渡里原地不动。 */
+  max-width: 400px;
+  margin-inline: auto;
 }
 
 .nw-login-brand p,
@@ -404,6 +449,13 @@ button:disabled {
   .nw-page-card {
     padding-right: 18px;
     padding-left: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nw-shell,
+  .nw-login-screen {
+    animation: none;
   }
 }
 
