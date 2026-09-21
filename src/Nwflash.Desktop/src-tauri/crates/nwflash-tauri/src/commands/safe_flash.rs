@@ -1194,6 +1194,31 @@ async fn execute_session_bound_safe_flash(
     })
 }
 
+/// 反调试"写入中途挂起"查询的唯一构造入口。
+///
+/// 所有把镜像写进设备的路径都必须用**这一个**函数构造挂起查询，否则会出现
+/// "某条刷写路径有反调试挂起、另一条没有"的静默缺口——这正是审计发现的
+/// `root_run_automatic` 缺陷（它直接调用 `SafeFlashExecutionService::execute`，
+/// 绕过了 `execute_with_suspend_gate`）。
+///
+/// 语义要点（与 `anti_debug` 模块的底线一致）：
+/// - 命中时返回 `true` ⇒ 调用方经 `execute_with_suspend_gate` 返回
+///   `DomainError::WriteSuspended`，**暂停推进**而非取消；
+/// - 设备会话保持原样，绝不退出进程——设备可能正处在写了一半的分区上。
+pub(crate) fn during_write_suspend_query(
+    probe: Arc<dyn nwflash_protection::IntegrityProbe>,
+) -> impl FnMut() -> bool {
+    move || {
+        matches!(
+            nwflash_windows::anti_debug::decide(
+                nwflash_windows::anti_debug::is_debugger_attached(probe.as_ref()),
+                nwflash_windows::anti_debug::OperationPhase::DuringWrite,
+            ),
+            nwflash_windows::anti_debug::AntiDebugDecision::SuspendAndWarn
+        )
+    }
+}
+
 async fn execute_safe_flash_request(
     device_runtime: DeviceRuntime,
     prepared: SafeFlashPreparedRequest,
@@ -1235,15 +1260,7 @@ async fn execute_safe_flash_request(
         // 写入中途的反调试挂起查询。注意这里**不是取消**:命中时返回挂起错误,
         // 让上层挂起任务并提示用户,设备会话保持原样(设备可能正处在写了一半
         // 的分区上,中断才是变砖风险)。
-        let mut is_suspended = || {
-            matches!(
-                nwflash_windows::anti_debug::decide(
-                    nwflash_windows::anti_debug::is_debugger_attached(probe.as_ref()),
-                    nwflash_windows::anti_debug::OperationPhase::DuringWrite,
-                ),
-                nwflash_windows::anti_debug::AntiDebugDecision::SuspendAndWarn
-            )
-        };
+        let mut is_suspended = during_write_suspend_query(probe.clone());
         execution_service.execute_with_suspend_gate(
             SafeFlashExecutionRequest {
                 source: &prepared.source,
