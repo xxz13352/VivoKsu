@@ -1462,7 +1462,10 @@
 .nw-safe-flash-current span { font-size: 11px; }
 .nw-safe-flash-current strong { color: var(--nw-text); font-family: Consolas, monospace; font-size: 12px; }
 .nw-safe-flash-current p { margin: 0; color: var(--nw-text); font-size: 12px; }
-.nw-safe-flash-statusbar { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; min-height: 58px; border: 1px solid var(--nw-border); border-top: 0; border-radius: 0 0 8px 8px; background: #f6fafa; padding: 0 22px; }
+/* 刷写总进度：与右侧面板的进度条同一套观感，写入期间由后端按
+   「已完成分区 + 当前分区写入比例」单调推进。 */
+.nw-safe-flash-progress { position: relative; height: 5px; border-radius: 3px; background: var(--nw-accent-strong); overflow: hidden; }
+.nw-safe-flash-progress > span { display: block; height: 100%; border-radius: 3px; background: var(--nw-accent); transition: width 240ms ease; }.nw-safe-flash-statusbar { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; min-height: 58px; border: 1px solid var(--nw-border); border-top: 0; border-radius: 0 0 8px 8px; background: #f6fafa; padding: 0 22px; }
 .nw-safe-flash-statusbar span { color: var(--nw-text-subtle); font: 10px Consolas, monospace; }
 .nw-safe-flash-statusbar button { border-color: var(--nw-danger); background: var(--nw-danger); color: #fff; }
 

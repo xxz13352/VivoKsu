@@ -1241,6 +1241,10 @@ async fn execute_safe_flash_request(
     };
     let stage_context = context.clone();
     let progress_context = context.clone();
+    // 分区写入期间的实时进度：把 sink 挂到同一个 `OperationContext` 上，
+    // 与阶段/总进度同源，避免两条进度通路互相覆盖。
+    let partition_progress: Arc<nwflash_application::SafeFlashPartitionProgressSink> =
+        safe_flash_partition_progress_sink(context.clone());
     // 逐条 adb/fastboot 命令的 argv / 退出码 / 输出只进上报服务器的使用日志
     // details（`report_usage_detail`），本地日志区仍是阶段级文案。
     // 只在真实系统执行器外面套留痕层：测试注入的假执行器必须原样保留，
@@ -1252,6 +1256,11 @@ async fn execute_safe_flash_request(
     } else {
         execution_service
     };
+    // 真刷写用 fastboot 自己打印的实时输出（`Sending` / `<分区>: A KB/B KB` /
+    // `Writing`）算进度，比按耗时估算准得多；只有真实系统执行器才值得包，
+    // 测试注入的假执行器输出是固定夹具，解析它们没有意义。
+    let (execution_service, partition_observer) = execution_service
+        .with_fastboot_output_progress(partition_progress.clone());
     let probe = probe.clone();
     task::spawn_blocking(move || {
         let probe = probe.clone();
@@ -1261,7 +1270,7 @@ async fn execute_safe_flash_request(
         // 让上层挂起任务并提示用户,设备会话保持原样(设备可能正处在写了一半
         // 的分区上,中断才是变砖风险)。
         let mut is_suspended = during_write_suspend_query(probe.clone());
-        execution_service.execute_with_suspend_gate(
+        execution_service.execute_with_partition_progress(
             SafeFlashExecutionRequest {
                 source: &prepared.source,
                 options: &prepared.options,
@@ -1273,10 +1282,32 @@ async fn execute_safe_flash_request(
             |progress| progress_context.report_progress_monotonic(progress),
             on_partition_failure,
             &mut is_suspended,
+            Some(&partition_progress),
+            partition_observer.as_deref(),
         )
     })
     .await
     .map_err(|error| DomainError::Internal(format!("线刷执行调度失败：{error}")))?
+}
+
+/// 分区写入进度 → 操作快照。
+///
+/// 总进度按「已完成分区数 + 当前分区写入比例」折算，保证在整条刷写链路上
+/// **单调推进**：既不会因为分区切换而回退，也不会在单个大分区内长时间不动。
+fn safe_flash_partition_progress_sink(
+    context: nwflash_application::OperationContext,
+) -> Arc<nwflash_application::SafeFlashPartitionProgressSink> {
+    Arc::new(move |progress| {
+        let partition_total = progress.partition_total.max(1);
+        let current_fraction = if progress.total_bytes == 0 {
+            0.0
+        } else {
+            (progress.written_bytes as f64 / progress.total_bytes as f64).clamp(0.0, 1.0)
+        };
+        let completed = progress.partition_index.saturating_sub(1) as f64;
+        let overall = (completed + current_fraction) / partition_total as f64;
+        context.report_progress_monotonic(overall.clamp(0.0, 1.0));
+    })
 }
 
 #[cfg(test)]

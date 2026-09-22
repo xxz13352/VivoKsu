@@ -8,8 +8,9 @@ use std::{
 
 use nwflash_application::{
     SafeFlashBuildOptions, SafeFlashExecutionRequest, SafeFlashExecutionService,
-    SafeFlashPartitionFailure, SafeFlashPartitionFailureDecision, SafeFlashPartitionSource,
-    SafeFlashPreparationPhase, SafeFlashPreparedSource, SafeFlashService, SafeFlashSource,
+    SafeFlashPartitionFailure, SafeFlashPartitionFailureDecision, SafeFlashPartitionProgress,
+    SafeFlashPartitionProgressSink, SafeFlashPartitionSource, SafeFlashPreparationPhase,
+    SafeFlashPreparedSource, SafeFlashService, SafeFlashSource,
     SAFE_FLASH_WIPE_DATA_MANUAL_STEPS,
 };
 use nwflash_domain::{DomainError, SafeFlashSlotMode};
@@ -103,6 +104,50 @@ impl CancellableProcessExecutor for RecordedExecutor {
             .expect("recorded outputs lock should not be poisoned")
             .pop_front()
             .expect("test must provide one output for every command")
+    }
+}
+
+/// 模拟真实进程执行器：`flash` 命令会**持续一段时间**，期间反复轮询取消闭包。
+///
+/// 真实 `run_with_timeout` 在等待子进程时就是这样轮询的，而 `RecordedExecutor`
+/// 立刻返回、不给任何轮询机会——用它测「写入期间的进度」会得到零次观测。
+struct SlowFlashExecutor {
+    commands: Arc<Mutex<Vec<ProcessCommand>>>,
+    flash_duration: std::time::Duration,
+    poll_interval: std::time::Duration,
+}
+
+impl CancellableProcessExecutor for SlowFlashExecutor {
+    fn run(
+        &self,
+        spec: ProcessCommand,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ProcessOutput, DomainError> {
+        let is_flash = spec.args.iter().any(|argument| argument == "flash");
+        // 控制命令（devices / getvar / reboot）必须返回真实形态的输出，否则
+        // 等待 fastbootd 与槽位探测都会失败，根本走不到刷写那一步。
+        let reply = if spec.args.iter().any(|argument| argument == "devices") {
+            "FASTBOOT-001\tfastboot\n"
+        } else if spec.args.iter().any(|argument| argument == "is-userspace") {
+            "(bootloader) is-userspace: yes\n"
+        } else {
+            ""
+        };
+        self.commands
+            .lock()
+            .expect("recorded commands lock should not be poisoned")
+            .push(spec);
+        if !is_flash {
+            return successful_output(reply);
+        }
+        let deadline = std::time::Instant::now() + self.flash_duration;
+        while std::time::Instant::now() < deadline {
+            if should_cancel() {
+                return Err(DomainError::UserCancelled("运行被用户取消".to_string()));
+            }
+            std::thread::sleep(self.poll_interval);
+        }
+        successful_output("")
     }
 }
 
@@ -1180,6 +1225,7 @@ fn partition_failure_retry_decision_retries_the_same_partition_without_advancing
     };
     let progress = Mutex::new(Vec::new());
     let failures = Mutex::new(Vec::new());
+    let stages = Mutex::new(Vec::new());
 
     let result = service
         .execute_with_partition_failure_hook(
@@ -1190,7 +1236,12 @@ fn partition_failure_retry_decision_retries_the_same_partition_without_advancing
                 transition_to_fastbootd: false,
             },
             || false,
-            |_| {},
+            |stage| {
+                stages
+                    .lock()
+                    .expect("stages lock should not be poisoned")
+                    .push(stage)
+            },
             |value| {
                 progress
                     .lock()
@@ -1230,6 +1281,20 @@ fn partition_failure_retry_decision_retries_the_same_partition_without_advancing
         .filter_map(|command| command.args.get(3).cloned())
         .collect::<Vec<_>>();
     assert_eq!(flash_targets, ["boot", "boot", "vendor_boot"]);
+
+    // 第一条分区先失败再重试：两次都报「刷写分区[1/2]」——序号既不推进
+    // （重试落在同一个队列位置），也不把失败那次改写成「失败」文案；
+    // 每行只表示「正在写第几个分区」，失败原因交给分区失败弹窗。
+    let partition_stages = stages
+        .into_inner()
+        .expect("stages lock should not be poisoned")
+        .into_iter()
+        .filter(|stage| stage.starts_with("刷写分区["))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        partition_stages,
+        ["刷写分区[1/2]", "刷写分区[1/2]", "刷写分区[2/2]"]
+    );
 }
 
 #[test]
@@ -2353,7 +2418,7 @@ fn payload_zip_extracts_its_payload_into_safe_flash_owned_staging_before_invokin
 #[test]
 fn protected_partitions_are_reported_as_flashed_but_never_written_to_the_device() {
     // 勾选“安全刷写”：lk、preloader 与八个系统分区全部留在刷写队列里，
-    // 日志逐条显示「刷写分区[i/n] ... OK」、计数与真实刷写完全一致，
+    // 日志逐条显示「刷写分区[i/n]」、计数与真实刷写完全一致，
     // 但执行器一条 fastboot flash 都收不到。
     let executor = RecordedExecutor::new([
         successful_output("FASTBOOT-001\tfastboot\n"),
@@ -2410,13 +2475,25 @@ fn protected_partitions_are_reported_as_flashed_but_never_written_to_the_device(
     let stages = stages
         .into_inner()
         .expect("stages lock should not be poisoned");
+    // 每个分区都留下「写第几个」的进度行（`刷写分区[i/n]`），与真实刷写一字不差。
+    let progress_lines = stages
+        .iter()
+        .filter(|stage| stage.starts_with("刷写分区["))
+        .collect::<Vec<_>>();
     assert_eq!(
-        stages
-            .iter()
-            .filter(|stage| stage.ends_with("OK"))
-            .count(),
+        progress_lines.len(),
         4,
-        "每条分区都必须是普通刷写日志：{stages:?}"
+        "每条分区都必须留下普通刷写日志：{stages:?}"
+    );
+    assert_eq!(
+        progress_lines,
+        vec![
+            "刷写分区[1/4]",
+            "刷写分区[2/4]",
+            "刷写分区[3/4]",
+            "刷写分区[4/4]",
+        ],
+        "日志必须逐条给出分区序号且不追加结论：{stages:?}"
     );
     // 日志里不允许出现任何暗示“没有真的刷”的字样。
     assert!(stages.iter().all(|stage| !stage.contains("假")
@@ -2496,7 +2573,7 @@ fn without_safe_flash_only_lk_and_preloader_are_kept_off_the_device() {
     assert_eq!(
         stages
             .iter()
-            .filter(|stage| stage.ends_with("OK"))
+            .filter(|stage| stage.starts_with("刷写分区["))
             .count(),
         4,
         "{stages:?}"
@@ -2563,10 +2640,10 @@ fn keep_root_partitions_are_reported_as_flashed_but_never_written() {
     assert_eq!(
         stages
             .iter()
-            .filter(|stage| stage.ends_with("OK"))
+            .filter(|stage| stage.starts_with("刷写分区["))
             .count(),
         3,
-        "三个分区都要报出与真实刷写一致的完成日志：{stages:?}"
+        "三个分区都要报出与真实刷写一致的刷写日志：{stages:?}"
     );
 }
 
@@ -2677,7 +2754,187 @@ fn simulated_flash_wait_stops_immediately_when_canceled() {
         .iter()
         .any(|command| command.args.iter().any(|argument| argument == "flash")));
 }
-/// 反调试挂起：写入中途被挂起时，必须**停止推进**但**不派发后续命令**。
+
+#[test]
+fn simulated_flash_reports_byte_progress_while_it_waits() {
+    // 假刷写必须**在等待过程中**持续上报字节进度，而不是只在分区边界跳一次；
+    // 否则大分区（system 动辄数百 MB）在界面上整段静止，用户以为卡死了。
+    let executor = RecordedExecutor::new([
+        successful_output("FASTBOOT-001\tfastboot\n"),
+        successful_output("(bootloader) is-userspace: yes\n"),
+        // 假刷写不派发命令，队列末尾只有收尾 reboot。
+        successful_output(""),
+    ]);
+    let service = SafeFlashExecutionService::new(Arc::new(executor.clone()))
+        .with_fastbootd_wait(1, std::time::Duration::ZERO);
+    let total = 105 * 1024 * 1024; // 按 35MB/s ≈ 3 秒，足以产生多次 tick。
+    let source = SafeFlashPreparedSource {
+        staging_root: None,
+        partitions: vec![simulated_partition("system", total)],
+        has_block_based_content: false,
+    };
+    let options = SafeFlashBuildOptions {
+        serial: "FASTBOOT-001".to_string(),
+        is_safe_flash: true,
+        is_keep_root: false,
+        wipe_data: false,
+        slot_mode: SafeFlashSlotMode::CurrentSlot,
+        current_slot: None,
+    };
+    // 进度观测与断言要共享同一份记录，因此用 `Arc<Mutex<..>>` 而不是裸 `Mutex`。
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_for_sink = progress.clone();
+    let partition_progress = Arc::new(move |update: SafeFlashPartitionProgress| {
+        progress_for_sink
+            .lock()
+            .expect("progress lock should not be poisoned")
+            .push(update);
+    });
+
+    service
+        .execute_with_partition_progress(
+            SafeFlashExecutionRequest {
+                source: &source,
+                options: &options,
+                serial: options.serial.as_str(),
+                transition_to_fastbootd: false,
+            },
+            || false,
+            |_| {},
+            |_| {},
+            Option::<
+                fn(
+                    SafeFlashPartitionFailure,
+                ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+            >::None,
+            || false,
+            Some(&(partition_progress as Arc<SafeFlashPartitionProgressSink>)),
+            None,
+        )
+        .expect("simulated flash should complete");
+
+    let updates = progress
+        .lock()
+        .expect("progress lock should not be poisoned")
+        .clone();
+    assert!(
+        updates.len() >= 3,
+        "假刷写必须产生多次进度观测，实际只有 {} 次",
+        updates.len()
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.partition_name == "system"
+                && update.total_bytes == total
+                && update.partition_index == 1
+                && update.partition_total == 1),
+        "进度观测必须带上分区名、总大小与序号：{updates:?}"
+    );
+    // 写入量必须单调不减，且最终补齐到总大小（不能停在 95%）。
+    assert!(
+        updates
+            .windows(2)
+            .all(|pair| pair[0].written_bytes <= pair[1].written_bytes),
+        "写入量必须单调不减：{updates:?}"
+    );
+    assert!(updates.iter().any(|update| update.written_bytes > 0));
+    assert_eq!(
+        updates.last().map(|update| update.written_bytes),
+        Some(total),
+        "假刷写结束时写入量必须补齐到镜像大小：{updates:?}"
+    );
+}
+
+#[test]
+fn real_flash_reports_capped_estimates_and_completes_at_full_size() {
+    // 真刷写期间 fastboot.exe 不输出可用进度，因此按耗时估算；估算必须
+    // **上限封顶**（不能先跑满再干等），命令返回后才补到 100%。
+    let executor = Arc::new(SlowFlashExecutor {
+        commands: Arc::new(Mutex::new(Vec::new())),
+        // 远大于参考耗时，确保耗时估算有机会产生多次观测。
+        flash_duration: std::time::Duration::from_millis(300),
+        poll_interval: std::time::Duration::from_millis(10),
+    });
+    let service = SafeFlashExecutionService::new(executor.clone())
+        .with_fastbootd_wait(1, std::time::Duration::ZERO);
+    let image = std::env::temp_dir().join(format!(
+        "nwflash-partition-progress-{}.img",
+        std::process::id()
+    ));
+    // 4 MiB 在 35MB/s 下约 0.11 秒，足以在 300ms 的写入窗口里产生多次观测。
+    std::fs::write(&image, vec![0u8; 4 * 1024 * 1024]).expect("image fixture should be written");
+    let source = SafeFlashPreparedSource {
+        staging_root: None,
+        partitions: vec![SafeFlashPartitionSource {
+            partition_name: "boot".to_string(),
+            image_path: image.to_string_lossy().into_owned(),
+            has_slot: false,
+            simulated_flash_bytes: None,
+        }],
+        has_block_based_content: false,
+    };
+    let options = SafeFlashBuildOptions {
+        serial: "FASTBOOT-001".to_string(),
+        is_safe_flash: false,
+        is_keep_root: false,
+        wipe_data: false,
+        slot_mode: SafeFlashSlotMode::CurrentSlot,
+        current_slot: None,
+    };
+    // 进度观测与断言要共享同一份记录，因此用 `Arc<Mutex<..>>` 而不是裸 `Mutex`。
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_for_sink = progress.clone();
+    let partition_progress = Arc::new(move |update: SafeFlashPartitionProgress| {
+        progress_for_sink
+            .lock()
+            .expect("progress lock should not be poisoned")
+            .push(update);
+    });
+
+    service
+        .execute_with_partition_progress(
+            SafeFlashExecutionRequest {
+                source: &source,
+                options: &options,
+                serial: options.serial.as_str(),
+                transition_to_fastbootd: false,
+            },
+            || false,
+            |_| {},
+            |_| {},
+            Option::<
+                fn(
+                    SafeFlashPartitionFailure,
+                ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+            >::None,
+            || false,
+            Some(&(partition_progress as Arc<SafeFlashPartitionProgressSink>)),
+            None,
+        )
+        .expect("real flash should complete");
+
+    let updates = progress
+        .lock()
+        .expect("progress lock should not be poisoned")
+        .clone();
+    assert!(!updates.is_empty(), "真刷写也必须上报进度");
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.total_bytes == 4 * 1024 * 1024
+                && update.partition_name == "boot"),
+        "进度观测必须带镜像大小与分区名：{updates:?}"
+    );
+    // 封顶：任何一次估算都不得超过总大小（95% 上限意味着 < total）。
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.written_bytes <= 4 * 1024 * 1024),
+        "估算写入量不得超过镜像大小：{updates:?}"
+    );
+    let _ = std::fs::remove_file(&image);
+}/// 反调试挂起：写入中途被挂起时，必须**停止推进**但**不派发后续命令**。
 ///
 /// 这是 P1 最关键的行为断言——挂起与取消必须能被区分，且挂起时设备会话
 /// 保持原样（不追加任何恢复/重启命令），否则设备可能留在写了一半的分区上。

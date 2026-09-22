@@ -24,6 +24,72 @@ describe('SafeFlashPage', () => {
     expect(host.textContent).toContain('VIVO 线刷');
   });
 
+  test('刷写中显示总进度条与百分比，未刷牙时不渲染', () => {
+    flushSync(() => root.render(<SafeFlashPage />));
+    // 空闲：没有分区进度语义，不显示进度条。
+    expect(host.querySelector('.nw-safe-flash-progress')).toBeNull();
+
+    flushSync(() => root.render(
+      <SafeFlashPage operationSnapshot={{
+        kind: 'Flashing',
+        operationId: 'operation-safe-flash',
+        title: 'VIVO 线刷',
+        stage: '刷写分区[28/38]',
+        progress: 0.72,
+        startedAt: 1700000000,
+        isCancellable: true,
+        isBusy: true,
+      }} />,
+    ));
+
+    const bar = host.querySelector('.nw-safe-flash-progress');
+    expect(bar).not.toBeNull();
+    expect(bar?.getAttribute('aria-valuenow')).toBe('72');
+    // 当前分区序号来自 stage，百分比来自快照 progress。
+    expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('28/38');
+    expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('72%');
+  });
+
+  test('下载与解包阶段同样显示进度条（这两段最耗时，不能整段静止）', () => {
+    flushSync(() => root.render(
+      <SafeFlashPage operationSnapshot={{
+        kind: 'Transferring',
+        operationId: 'operation-download',
+        title: '下载固件包',
+        stage: '正在下载固件包',
+        progress: 0.35,
+        startedAt: 1700000000,
+        isCancellable: true,
+        isBusy: true,
+      }} />,
+    ));
+
+    // 后端在下载/解包阶段也会单调推进 progress；早先只认「刷写分区[i/n]」，
+    // 导致最耗时的这两段完全没有进度显示——这正是要修的回归。
+    const bar = host.querySelector('.nw-safe-flash-progress');
+    expect(bar).not.toBeNull();
+    expect(bar?.getAttribute('aria-valuenow')).toBe('35');
+    expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('35%');
+  });
+
+  test('进度为 0 且未在操作时不渲染空进度条', () => {
+    flushSync(() => root.render(
+      <SafeFlashPage operationSnapshot={{
+        kind: 'Flashing',
+        operationId: 'operation-safe-flash',
+        title: 'VIVO 线刷',
+        stage: '正在刷写',
+        progress: 0,
+        startedAt: 1700000000,
+        isCancellable: true,
+        isBusy: true,
+      }} />,
+    ));
+
+    // 刚进入、还没推进：不该闪一个 0% 的空条（isBusy 但进度为 0 时隐藏）。
+    expect(host.querySelector('.nw-safe-flash-progress')).toBeNull();
+  });
+
   test('在线预检只提交选项，ROM 标识由 Rust 从已连接设备读取，且不渲染敏感执行数据', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: 'safe-1', source_label: '在线固件', partition_count: 3, safe_partition_count: 2, requires_confirmation: true });
     flushSync(() => root.render(<SafeFlashPage />));

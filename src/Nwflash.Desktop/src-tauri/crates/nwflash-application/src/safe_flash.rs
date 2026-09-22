@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::Duration;
@@ -31,7 +31,8 @@ use nwflash_windows::{
     device_transport::DeviceTransport,
     platform_tools::PlatformTools,
     process::{
-        CancellableProcessExecutor, ProcessCommand, ProcessOutput, SystemCancellableProcessExecutor,
+        CancellableProcessExecutor, ProcessCommand, ProcessOutput, ProcessOutputObserver,
+        ProcessObservation, ProcessObserverError, SystemCancellableProcessExecutor,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -47,6 +48,23 @@ pub enum SafeFlashPreparationPhase {
 
 pub type SafeFlashPreparationProgressSink =
     dyn Fn(SafeFlashPreparationPhase, u64, u64) + Send + Sync;
+
+/// 单条分区刷写在**写入过程中**的进度观测。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeFlashPartitionProgress {
+    /// 正在写入的分区名。
+    pub partition_name: String,
+    /// 该分区的镜像总字节数（`0` 表示大小未知，此时只报「进行中」）。
+    pub total_bytes: u64,
+    /// 已估算写入的字节数。
+    pub written_bytes: u64,
+    /// 队列里的第几个分区（从 1 起）与总数，用于总进度换算。
+    pub partition_index: usize,
+    pub partition_total: usize,
+}
+
+pub type SafeFlashPartitionProgressSink =
+    dyn Fn(SafeFlashPartitionProgress) + Send + Sync;
 
 #[derive(Debug, Clone)]
 pub struct SafeFlashPartitionSource {
@@ -200,6 +218,11 @@ struct SafeFlashStep {
     is_flash: bool,
     /// 是否分区刷写命令（`fastboot flash <分区> <镜像>`）。
     is_partition_flash: bool,
+    /// 这一步刷写的目标分区名（仅分区刷写步骤有值）。
+    ///
+    /// 队列构造阶段就固定下来，日志与结构化展示同源：日志只记
+    /// `刷写分区[i/n]`，分区名用于「当前分区」等展示，两处不再各自解析 argv。
+    partition_name: Option<String>,
     /// `Some(bytes)`：这一步只做假刷写，留在队列里按镜像大小模拟耗时，
     /// 不派发命令（判定见 [`should_simulate_partition_flash`]）。
     simulated_flash_bytes: Option<u64>,
@@ -214,6 +237,7 @@ impl SafeFlashStep {
             command,
             is_flash: false,
             is_partition_flash: false,
+            partition_name: None,
             simulated_flash_bytes: None,
             tolerate_failure: false,
         }
@@ -313,6 +337,36 @@ impl SafeFlashExecutionService {
         self.fastbootd_attempts = attempts.max(1);
         self.fastbootd_poll_interval = poll_interval;
         self
+    }
+
+    /// 在底层执行器外面套一层「解析 fastboot 实时输出」的进度观测。
+    ///
+    /// 只有真实刷写才需要它：解析的是 fastboot 自己打印的 `Sending` /
+    /// `<分区>: A KB/B KB` / `Writing` 行，得到的是**真实**传输量，而不是按
+    /// 耗时推算的估算值。测试注入的假执行器不会被包装（它们的输出是固定
+    /// 夹具，解析它们没有意义，而且会破坏既有的执行器断言）。
+    ///
+    /// 返回包装后的服务与观测器句柄：句柄要交给执行循环，在每次刷写前登记
+    /// 当前分区的上下文。
+    pub fn with_fastboot_output_progress(
+        self,
+        sink: Arc<SafeFlashPartitionProgressSink>,
+    ) -> (Self, Option<Arc<FastbootProgressExecutor>>) {
+        // 只有**真实系统执行器**才包：包装会把 flash 命令改走
+        // `run_command_with_cancel_observed`，而那条路径每次调用都会起一个
+        // 观测线程并在返回前 join。测试注入的假执行器输出是固定夹具，解析
+        // 它们没有意义，却要为此付出一次线程派发/排空——漏掉这层判断会让
+        // 每个伪造 flash 的用例都卡在观测线程排空上。
+        if !self.system_executor {
+            return (self, None);
+        }
+        let observer = Arc::new(FastbootProgressExecutor::new(self.executor.clone(), sink));
+        let service = Self {
+            executor: observer.clone(),
+            system_executor: false,
+            ..self
+        };
+        (service, Some(observer))
     }
 
     pub fn execute<F, S, P>(
@@ -415,6 +469,99 @@ impl SafeFlashExecutionService {
         ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
         G: FnMut() -> bool,
     {
+        self.execute_with_partition_progress_internal(
+            request,
+            &mut is_canceled,
+            &mut report_stage,
+            &mut report_progress,
+            &mut on_partition_failure,
+            &mut is_suspended,
+            None,
+            None,
+        )
+    }
+
+    /// 与 [`Self::execute_with_suspend_gate`] 相同，另外接受一个**分区写入进度**
+    /// 观测回调。
+    ///
+    /// 为什么需要它：`fastboot flash <分区> <镜像>` 是一次阻塞调用，大分区
+    /// （system/product 动辄数百 MB）在真机上要写几十秒到几分钟。只按命令
+    /// 边界上报进度的话，整段时间界面完全静止。`fastboot.exe` 在写入期间
+    /// 不输出可用进度，因此这里**不依赖子进程输出**，改用两条真实信号合成：
+    ///
+    /// - 假刷写分区：按 `已等待时长 / 模拟总时长` 精确换算字节数（见
+    ///   [`simulated_flash::duration`]），进度与真机一致。
+    /// - 真实分区：按已耗时相对「该镜像在 35MB/s 下的参考耗时」估算写入量。
+    ///   估算值只用于展示，**绝不影响**成功判定与取消语义；上限锁死在
+    ///   镜像大小的 95%，命令真正返回后才补到 100%，避免进度条先跑满再等待。
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_partition_progress<F, S, P, D, G>(
+        &self,
+        request: SafeFlashExecutionRequest<'_>,
+        mut is_canceled: F,
+        mut report_stage: S,
+        mut report_progress: P,
+        mut on_partition_failure: Option<D>,
+        mut is_suspended: G,
+        partition_progress: Option<&Arc<SafeFlashPartitionProgressSink>>,
+        partition_observer: Option<&FastbootProgressExecutor>,
+    ) -> Result<SafeFlashExecutionResult, DomainError>
+    where
+        F: FnMut() -> bool,
+        S: FnMut(String),
+        P: FnMut(f64),
+        D: FnMut(
+            SafeFlashPartitionFailure,
+        ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+        G: FnMut() -> bool,
+    {
+        self.execute_with_partition_progress_internal(
+            request,
+            &mut is_canceled,
+            &mut report_stage,
+            &mut report_progress,
+            &mut on_partition_failure,
+            &mut is_suspended,
+            partition_progress,
+            partition_observer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_with_partition_progress_internal<F, S, P, D, G>(
+        &self,
+        request: SafeFlashExecutionRequest<'_>,
+        mut is_canceled: &mut F,
+        report_stage: &mut S,
+        report_progress: &mut P,
+        on_partition_failure: &mut Option<D>,
+        is_suspended: &mut G,
+        partition_progress: Option<&Arc<SafeFlashPartitionProgressSink>>,
+        partition_observer: Option<&FastbootProgressExecutor>,
+    ) -> Result<SafeFlashExecutionResult, DomainError>
+    where
+        F: FnMut() -> bool,
+        S: FnMut(String),
+        P: FnMut(f64),
+        D: FnMut(
+            SafeFlashPartitionFailure,
+        ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+        G: FnMut() -> bool,
+    {
+
+        // 每个分区镜像的落盘大小：真刷写时用来估算写入百分比。按分区基名
+        // 建表（`system_a` / `system_b` 共用 `system` 的镜像），查不到就退化为
+        // 「大小未知」，只报进行中而不猜百分比。
+        let prepared_image_sizes = request
+            .source
+            .partitions
+            .iter()
+            .filter_map(|partition| {
+                let bytes = partition.simulated_flash_bytes?;
+                Some((partition.partition_name.clone(), bytes))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let prepared_image_sizes = &prepared_image_sizes;
         let mut last_partition_target = String::new();
         let transport = DeviceTransport::new(self.tools.clone());
         let mut serial = request.serial.to_owned();
@@ -490,6 +637,7 @@ impl SafeFlashExecutionService {
                         })?,
                     is_flash: true,
                     is_partition_flash: true,
+                    partition_name: Some(target),
                     simulated_flash_bytes,
                     tolerate_failure: false,
                 });
@@ -558,6 +706,7 @@ impl SafeFlashExecutionService {
                 command,
                 is_flash,
                 is_partition_flash,
+                partition_name,
                 simulated_flash_bytes,
                 tolerate_failure,
             } = step.clone();
@@ -572,29 +721,59 @@ impl SafeFlashExecutionService {
                 ));
             }
             if is_partition_flash {
-                // fastboot flash 参数形态固定为 [-s, serial, flash, 分区, 镜像]
-                last_partition_target = command
-                    .args
-                    .iter()
-                    .position(|argument| argument == "flash")
-                    .and_then(|position| command.args.get(position + 1))
-                    .cloned()
-                    .unwrap_or_default();
+                // 分区名在队列构造阶段就已固定（旧行为从 argv 反查，日志与
+                // 失败提示两条来源可能分叉）；这里只做缺失兜底。
+                last_partition_target = partition_name.clone().unwrap_or_default();
                 partition_index += 1;
-                report_stage(format!(
-                    "刷写分区[{partition_index}/{partition_total}] ..."
-                ));
+                // 只报「正在写第几个分区」。后续无论重试还是被用户跳过，
+                // 这一行的含义都不变，因此不做原地改写，逐条落进操作日志，
+                // 列表本身就是刷写轨迹。
+                report_stage(format!("刷写分区[{partition_index}/{partition_total}]"));
             } else if tolerate_failure {
                 // 重启到 REC：先把「进 REC 后要手动做什么」写给用户，
                 // 设备进入 REC 后程序就再也探测不到它了。
                 report_stage(SAFE_FLASH_WIPE_DATA_MANUAL_STEPS.to_string());
             }
             report_progress(index as f64 / command_total as f64);
+            // 分区写入期间的实时进度：整条 `fastboot flash` 是阻塞调用，没有
+            // 它界面会在整个写入过程里静止。假刷写按真实等待时长换算，真刷写
+            // 按已耗时相对参考耗时估算（估算只影响展示，不影响成功判定）。
+            let partition_bytes = if is_partition_flash {
+                partition_image_bytes(simulated_flash_bytes, &command, prepared_image_sizes)
+            } else {
+                None
+            };
+            // 分区上下文（名字/大小/序号）只算一次：真实输出解析与耗时估算
+            // 两条通路共用它，避免两处各自推导而出现不一致的分区名。
+            let partition_update = if is_partition_flash {
+                partition_bytes.map(|total_bytes| SafeFlashPartitionProgress {
+                    partition_name: last_partition_target.clone(),
+                    total_bytes,
+                    written_bytes: 0,
+                    partition_index,
+                    partition_total,
+                })
+            } else {
+                None
+            };
+            if let (Some(observer), Some(update)) = (partition_observer, partition_update.clone()) {
+                // 真实输出解析：登记分区上下文，让解析出的字节数能对应到
+                // 「第几个分区的哪个镜像」。
+                observer.begin_partition(update);
+            }
+            let mut report_partition_tick = |written_bytes: u64| {
+                let (Some(sink), Some(mut update)) = (partition_progress, partition_update.clone())
+                else {
+                    return;
+                };
+                update.written_bytes = written_bytes.min(update.total_bytes);
+                sink(update);
+            };
             let run_result = if let Some(bytes) = simulated_flash_bytes {
                 // 受保护分区：只等时间，不发命令，日志与真实刷写一字不差。
-                self.run_simulated_flash(bytes, &mut is_canceled)
+                self.run_simulated_flash(bytes, &mut is_canceled, &mut report_partition_tick)
             } else if is_partition_flash {
-                self.run_partition_flash(command, &mut is_canceled)
+                self.run_partition_flash(command, &mut is_canceled, &mut report_partition_tick)
             } else {
                 self.run_required(command, &mut is_canceled, "fastboot 命令")
             };
@@ -603,11 +782,6 @@ impl SafeFlashExecutionService {
                     executed_command_count += 1;
                     if is_flash {
                         flashed_partition_count += 1;
-                        if is_partition_flash {
-                            report_stage(format!(
-                                "刷写分区[{partition_index}/{partition_total}] ... OK"
-                            ));
-                        }
                     }
                 }
                 Err(error) => {
@@ -616,11 +790,8 @@ impl SafeFlashExecutionService {
                     if matches!(error, DomainError::UserCancelled(_)) {
                         return Err(error);
                     }
-                    if is_partition_flash {
-                        report_stage(format!(
-                            "刷写分区[{partition_index}/{partition_total}] ... 失败"
-                        ));
-                    }
+                    // 失败不再改写那一行：进度行只表示「正在写第几个分区」，
+                    // 失败原因由分区失败弹窗与随后的错误日志承担。
                     if tolerate_failure {
                         // 收尾动作失败不算整轮失败：设备只是没自动进 REC，
                         // 用户手动重启到 REC 同样能清除数据，日志给出替代步骤。
@@ -726,18 +897,44 @@ impl SafeFlashExecutionService {
     /// 分区刷写命令的执行：失败时把 fastboot 的原始输出（stdout/stderr
     /// 合并）带回给调用方，供“分区刷写失败”弹窗展示具体报错日志；
     /// 成功语义与 [`Self::run_required`] 完全一致。
-    fn run_partition_flash<F>(
+    fn run_partition_flash<F, T>(
         &self,
         command: ProcessCommand,
         is_canceled: &mut F,
+        mut report_tick: T,
     ) -> Result<ProcessOutput, DomainError>
     where
         F: FnMut() -> bool,
+        T: FnMut(u64),
     {
         self.ensure_not_canceled(is_canceled)?;
+        // `fastboot flash` 是阻塞调用，且 fastboot.exe 在写入期间不输出可用
+        // 进度，因此真实分区的写入量只能**估算**：按已耗时相对「该镜像在
+        // 35MB/s 下的参考耗时」折算。上限锁在总大小的 95%，命令返回后才由
+        // 调用方补满——否则进度条会先跑满、再干等命令结束。
+        let estimated_total = command
+            .args
+            .last()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .filter(|bytes| *bytes > 0);
+        let reference = estimated_total.map(simulated_flash::duration);
+        let started = std::time::Instant::now();
+        let mut is_canceled_with_tick = || {
+            if let (Some(total), Some(reference)) = (estimated_total, reference) {
+                if !reference.is_zero() {
+                    let elapsed = started.elapsed().as_millis() as u64;
+                    let ratio = (elapsed.min(reference.as_millis() as u64) as f64)
+                        / (reference.as_millis().max(1) as f64);
+                    // 95% 封顶：留给「命令真正返回」那一下补齐。
+                    report_tick((total as f64 * ratio * 0.95) as u64);
+                }
+            }
+            is_canceled()
+        };
         let output = self
             .executor
-            .run_with_timeout(command, Some(command_budget::FLASH), is_canceled)
+            .run_with_timeout(command, Some(command_budget::FLASH), &mut is_canceled_with_tick)
             .map_err(|error| match error {
                 DomainError::UserCancelled(_) => {
                     DomainError::UserCancelled("运行被用户取消".to_string())
@@ -894,20 +1091,32 @@ impl SafeFlashExecutionService {
     ///
     /// 等待分片进行，每片之间检查取消——用户点“停止操作”必须立刻收尾，
     /// 而不是等整个分区模拟完（一个 system.img 的模拟时长可达分钟级）。
-    fn run_simulated_flash<F>(
+    fn run_simulated_flash<F, T>(
         &self,
         bytes: u64,
         is_canceled: &mut F,
+        mut report_tick: T,
     ) -> Result<ProcessOutput, DomainError>
     where
         F: FnMut() -> bool,
+        T: FnMut(u64),
     {
         self.ensure_not_canceled(is_canceled)?;
-        let mut remaining = simulated_flash::duration(bytes);
+        let total = simulated_flash::duration(bytes);
+        let mut remaining = total;
         while !remaining.is_zero() {
             let slice = remaining.min(simulated_flash::SLICE);
             thread::sleep(slice);
             remaining -= slice;
+            // 假刷写的写入量是**精确**的：等待时长本就按 `字节数 ÷ 35MB/s`
+            // 折算而来，因此按已等待比例还原字节数即可，不需要估算。
+            let written = if total.is_zero() {
+                bytes
+            } else {
+                bytes.saturating_mul((total - remaining).as_millis() as u64)
+                    / total.as_millis().max(1) as u64
+            };
+            report_tick(written);
             self.ensure_not_canceled(is_canceled)?;
         }
         // 与真实成功刷写同样返回退出码 0：调用方按“刷写成功”计入日志与
@@ -918,6 +1127,353 @@ impl SafeFlashExecutionService {
             stderr: String::new(),
         })
     }
+}
+
+/// 解析这一步要写入的镜像总字节数。
+///
+/// 优先用假刷写已记录的精确大小（`simulated_flash_bytes` 取的就是落盘镜像的
+/// 真实长度）；真刷写时从命令的镜像路径读一次 `fs::metadata`，失败则尝试用
+/// 分区源表里的同名字段兜底。都拿不到就返回 `None`——宁可只显示「进行中」，
+/// 也不编一个假的总量出来。
+/// 在真实进程执行器外面套一层：把 `fastboot flash` 的**实时输出**解析成
+/// 字节进度。
+///
+/// 这是「真刷写也有真进度」的关键。此前只能按耗时估算，因为假设 fastboot
+/// 写入期间不输出可用进度；而本项目使用的 fastboot 带实时回调，会逐行打印
+/// `Sending 'x' (N KB)...` / `x: A KB/B KB` / `Writing 'x'...`，解析这些行
+/// 得到的是**真实**传输量，比估算准得多。
+///
+/// 设计取舍：只包刷写类命令，其余命令原样透传（`devices`/`getvar` 的输出没有
+/// 进度语义，包了只是白付一次解析开销）。估算逻辑保留为兜底——fastboot 版本
+/// 不同、输出被重定向或静默模式下解析不到任何行时，界面仍有进度可看。
+pub struct FastbootProgressExecutor {
+    inner: Arc<dyn CancellableProcessExecutor>,
+    sink: Arc<SafeFlashPartitionProgressSink>,
+    /// 当前分区名与序号，由调用方在每次刷写前更新。
+    context: Arc<Mutex<FastbootProgressContext>>,
+}
+
+#[derive(Debug, Default)]
+struct FastbootProgressContext {
+    partition_name: String,
+    total_bytes: u64,
+    partition_index: usize,
+    partition_total: usize,
+}
+
+impl FastbootProgressExecutor {
+    pub fn new(
+        inner: Arc<dyn CancellableProcessExecutor>,
+        sink: Arc<SafeFlashPartitionProgressSink>,
+    ) -> Self {
+        Self {
+            inner,
+            sink,
+            context: Arc::new(Mutex::new(FastbootProgressContext::default())),
+        }
+    }
+
+    /// 刷写下一个分区前登记上下文（分区名、镜像大小、序号）。
+    pub fn begin_partition(&self, update: SafeFlashPartitionProgress) {
+        if let Ok(mut context) = self.context.lock() {
+            context.partition_name = update.partition_name.clone();
+            context.total_bytes = update.total_bytes;
+            context.partition_index = update.partition_index;
+            context.partition_total = update.partition_total;
+        }
+        // 立刻上报一次 0，让 UI 在写入开始时就切到新分区，而不是等第一行输出。
+        (self.sink)(update);
+    }
+}
+
+impl CancellableProcessExecutor for FastbootProgressExecutor {
+    fn run(
+        &self,
+        spec: ProcessCommand,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ProcessOutput, DomainError> {
+        self.run_with_timeout(spec, None, should_cancel)
+    }
+
+    fn run_with_timeout(
+        &self,
+        spec: ProcessCommand,
+        timeout: Option<Duration>,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ProcessOutput, DomainError> {
+        let is_flash = spec
+            .args
+            .iter()
+            .any(|argument| argument.eq_ignore_ascii_case("flash"));
+        if !is_flash {
+            return self.inner.run_with_timeout(spec, timeout, should_cancel);
+        }
+        let image_bytes = spec
+            .args
+            .last()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let observer = Arc::new(FastbootProgressObserver {
+            parser: Mutex::new(FastbootProgressParser::new(image_bytes)),
+            sink: self.sink.clone(),
+            context: self.context.clone(),
+        });
+        let outcome = nwflash_windows::process::run_command_with_cancel_observed(
+            spec,
+            timeout,
+            should_cancel,
+            observer,
+        );
+        outcome.result
+    }
+}
+
+/// 把 fastboot 的逐行输出喂给解析器，再把解析出的字节数转成进度观测。
+struct FastbootProgressObserver {
+    parser: Mutex<FastbootProgressParser>,
+    sink: Arc<SafeFlashPartitionProgressSink>,
+    context: Arc<Mutex<FastbootProgressContext>>,
+}
+
+impl ProcessOutputObserver for FastbootProgressObserver {
+    fn observe(&self, observation: ProcessObservation<'_>) -> Result<(), ProcessObserverError> {
+        let ProcessObservation::Output { bytes, .. } = observation else {
+            return Ok(());
+        };
+        // 进度行都是 ASCII；用有损解码即可，非法字节会被替换而不会 panic。
+        let text = String::from_utf8_lossy(bytes);
+        let Ok(mut parser) = self.parser.lock() else {
+            return Ok(());
+        };
+        let mut reported = None;
+        for line in text.lines() {
+            if let Some(bytes) = parser.observe_line(line.trim_end()) {
+                reported = Some(bytes);
+            }
+        }
+        drop(parser);
+        if let Some(written_bytes) = reported {
+            self.report(written_bytes);
+        }
+        Ok(())
+    }
+}
+
+impl FastbootProgressObserver {
+    fn report(&self, written_bytes: u64) {
+        let Ok(context) = self.context.lock() else {
+            return;
+        };
+        (self.sink)(SafeFlashPartitionProgress {
+            partition_name: context.partition_name.clone(),
+            total_bytes: context.total_bytes,
+            written_bytes: written_bytes.min(context.total_bytes.max(written_bytes)),
+            partition_index: context.partition_index,
+            partition_total: context.partition_total,
+        });
+    }
+}
+/// fastboot.exe 在刷写期间打印的实时进度行解析。
+///
+/// 带进度回调的 fastboot（本项目与参考实现用的是同一份）会在传输过程中按行
+/// 输出形如：
+///
+/// ```text
+/// Sending 'system' (393216 KB)...
+/// Sending sparse 'system' (65536 KB)...
+/// system: 32768 KB/65536 KB
+/// Writing 'system'...
+/// Finished. Total time: 12.345s
+/// ```
+///
+/// 关键点（都是踩过的坑）：
+///
+/// - **大镜像会被切成多个 sparse 块**。`Writing '...'` 只代表**当前块**写完，
+///   不能一见它就记 100%，否则第一块结束进度条就满了。
+/// - 因此按「块」累计：`Sending` 行给出本块大小并重置块内计数，进度行的
+///   `已传/总量` 折算块内增量，`Writing` 行把本块**未报满的余量**补齐。
+/// - 累计值以**本地镜像大小**为上限，避免 fastboot 报的块大小之和与实际
+///   镜像长度有出入时越界。
+/// - 出现 `FAILED` / `error` 后不再臆造进度（失败要如实反映）。
+#[derive(Debug, Default)]
+pub struct FastbootProgressParser {
+    /// 本地镜像字节数（`0` 表示未知）。
+    command_total_bytes: u64,
+    /// 当前 sparse 块的期望字节数与已上报字节数。
+    chunk_expected_bytes: u64,
+    chunk_reported_bytes: u64,
+    /// 本命令已累计上报的字节数。
+    accumulated_bytes: u64,
+    failed: bool,
+}
+
+impl FastbootProgressParser {
+    /// `image_bytes` 为本次要写入的本地镜像长度；未知时传 `0`。
+    pub fn new(image_bytes: u64) -> Self {
+        Self {
+            command_total_bytes: image_bytes,
+            ..Self::default()
+        }
+    }
+
+    /// 解析一行输出，返回**本次应当上报的累计字节数**（无进展时为 `None`）。
+    pub fn observe_line(&mut self, line: &str) -> Option<u64> {
+        if line.contains("FAILED") || contains_word_error(line) {
+            self.failed = true;
+        }
+
+        let mut reported = None;
+
+        if let Some(sent_bytes) = parse_sending_bytes(line) {
+            // 新块开始：镜像总长优先用本地真实大小，拿不到才退回收 fastboot
+            // 自报的块大小（单块镜像时两者等价）。
+            if self.command_total_bytes == 0 {
+                self.command_total_bytes = sent_bytes;
+            }
+            self.chunk_expected_bytes = sent_bytes;
+            self.chunk_reported_bytes = 0;
+        }
+
+        if let Some(current_bytes) = parse_progress_bytes(line) {
+            let current_bytes = if self.chunk_expected_bytes > 0 {
+                current_bytes.min(self.chunk_expected_bytes)
+            } else if self.command_total_bytes > 0 {
+                current_bytes.min(self.command_total_bytes)
+            } else {
+                current_bytes
+            };
+            // 进度行是块内**累计**值；回退（换行/重排）时按「本块从头」重算，
+            // 绝不让累计量倒退。
+            let delta = current_bytes.saturating_sub(self.chunk_reported_bytes);
+            let delta = if current_bytes < self.chunk_reported_bytes {
+                current_bytes
+            } else {
+                delta
+            };
+            if delta > 0 {
+                self.accumulate(delta);
+                self.chunk_reported_bytes = current_bytes;
+                reported = Some(self.accumulated_bytes);
+            }
+        }
+
+        // `Writing '<分区>'...` 表示当前块传完并落盘：把本块还没报满的余量补上。
+        // 只在当前块确实有未报满余量时补，避免把多块镜像的第一个 Writing
+        // 直接当成整张镜像完成。
+        if !self.failed
+            && line.contains("Writing '")
+            && self.chunk_expected_bytes > self.chunk_reported_bytes
+        {
+            let remainder = self.chunk_expected_bytes - self.chunk_reported_bytes;
+            self.accumulate(remainder);
+            self.chunk_reported_bytes = self.chunk_expected_bytes;
+            reported = Some(self.accumulated_bytes);
+        }
+
+        // `Finished. Total time: ...` 是命令收尾：补齐到总大小。
+        if !self.failed && line.starts_with("Finished.") && self.command_total_bytes > 0 {
+            self.accumulated_bytes = self.command_total_bytes;
+            self.chunk_reported_bytes = self.chunk_expected_bytes;
+            reported = Some(self.accumulated_bytes);
+        }
+
+        reported
+    }
+
+    fn accumulate(&mut self, delta: u64) {
+        self.accumulated_bytes = self.accumulated_bytes.saturating_add(delta);
+        if self.command_total_bytes > 0 {
+            self.accumulated_bytes = self.accumulated_bytes.min(self.command_total_bytes);
+        }
+    }
+
+    /// 结束时应当上报的最终字节数（命令成功时补满）。
+    pub fn finish(&self) -> Option<u64> {
+        if self.failed {
+            return None;
+        }
+        let total = self.command_total_bytes;
+        if total == 0 {
+            return None;
+        }
+        (self.accumulated_bytes < total).then_some(total)
+    }
+}
+
+/// `Sending 'system' (393216 KB)...` / `Sending sparse 'system' (65536 KB)...`
+fn parse_sending_bytes(line: &str) -> Option<u64> {
+    let start = line.find("Sending")? + "Sending".len();
+    let rest = &line[start..];
+    let open = rest.find('(')?;
+    let close = rest[open..].find(')')? + open;
+    parse_size_token(&rest[open + 1..close])
+}
+
+/// `system: 32768 KB/65536 KB` → 已传字节数。
+fn parse_progress_bytes(line: &str) -> Option<u64> {
+    // 形如 `<名称>: <已传>/<总量>`；名称不含空格（分区名或 fastboot 的标识）。
+    let colon = line.find(':')?;
+    if line[..colon].contains(' ') {
+        return None;
+    }
+    let payload = line[colon + 1..].trim();
+    let (current, _rest) = payload.split_once('/')?;
+    parse_size_token(current)
+}
+
+/// 解析 `393216 KB` / `12.5 MB` / `1024 B` 这类「数值 + 单位」片段。
+fn parse_size_token(token: &str) -> Option<u64> {
+    let token = token.trim();
+    let split = token
+        .find(|character: char| !(character.is_ascii_digit() || character == '.'))?;
+    let (number, unit) = token.split_at(split);
+    let value = number.parse::<f64>().ok()?;
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let multiplier = match unit.trim().to_ascii_uppercase().as_str() {
+        "GB" => 1024.0 * 1024.0 * 1024.0,
+        "MB" => 1024.0 * 1024.0,
+        "KB" => 1024.0,
+        "B" => 1.0,
+        _ => return None,
+    };
+    Some((value * multiplier) as u64)
+}
+
+/// 匹配独立的 `error` 单词（避免把分区名里的子串误判成失败）。
+///
+/// 分词时把 `_` 当作词内字符：分区名形如 `error_log`、`system_a`，若按
+/// 「非字母数字即分隔符」切分，`error_log` 会被切成 `error` + `log`，于是一个
+/// 完全正常的分区名就被误判成刷写失败。参考实现用的 `\berror\b` 正则有同样的
+/// 问题（`_` 在 .NET 里算词字符，`\b` 不会在这里断开；但 `error-log` 之类仍会）。
+fn contains_word_error(line: &str) -> bool {
+    line.split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .any(|word| word.eq_ignore_ascii_case("error"))
+}
+
+fn partition_image_bytes(
+    simulated_flash_bytes: Option<u64>,
+    command: &ProcessCommand,
+    prepared_image_sizes: &std::collections::HashMap<String, u64>,
+) -> Option<u64> {
+    if let Some(bytes) = simulated_flash_bytes {
+        return Some(bytes);
+    }
+    // `fastboot flash <分区> <镜像>`：镜像恒为最后一个参数。
+    if let Some(image_path) = command.args.last() {
+        if let Ok(metadata) = std::fs::metadata(image_path) {
+            if metadata.is_file() && metadata.len() > 0 {
+                return Some(metadata.len());
+            }
+        }
+    }
+    command
+        .args
+        .iter()
+        .find_map(|argument| prepared_image_sizes.get(argument).copied())
+        .filter(|bytes| *bytes > 0)
 }
 
 fn sole_fastboot_device_serial(output: &str) -> Result<Option<String>, DomainError> {
@@ -1297,15 +1853,19 @@ impl SafeFlashService {
                 })?;
             let image_directory = staging_root.join("images");
             self.ensure_extraction_capacity(&staging_root, required_bytes)?;
+            // 进度回调要被心跳线程共享（`Send + 'static`），因此这里必须把
+            // 需要的一切**按值**搬进闭包：借用 `preparation_progress` /
+            // `payload_output_bytes` 会被生命周期挡住。
+            let preparation_progress_for_extraction = preparation_progress.cloned();
             let images = FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
                 executable_path,
                 payload_source,
                 &selected,
                 &image_directory,
                 || cancellation.is_cancelled(),
-                |_, written_bytes| {
+                move |_, written_bytes| {
                     report_preparation_progress(
-                        preparation_progress,
+                        preparation_progress_for_extraction.as_ref(),
                         SafeFlashPreparationPhase::PayloadExtraction,
                         written_bytes,
                         payload_output_bytes,
@@ -2393,4 +2953,141 @@ fn firmware_signature_path(source: &Path) -> std::path::PathBuf {
     let mut candidate = source.as_os_str().to_os_string();
     candidate.push(".sig");
     std::path::PathBuf::from(candidate)
+}
+
+#[cfg(test)]
+mod fastboot_progress_tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn sending_line_reports_block_size_and_units_are_converted() {
+        assert_eq!(parse_sending_bytes("Sending 'system' (393216 KB)..."), Some(393216 * 1024));
+        assert_eq!(
+            parse_sending_bytes("Sending sparse 'system' (65536 KB)..."),
+            Some(65536 * 1024)
+        );
+        assert_eq!(parse_sending_bytes("Sending 'boot' (12.5 MB)..."), Some(13_107_200));
+        // 非 Sending 行不得误报。
+        assert_eq!(parse_sending_bytes("Writing 'boot'..."), None);
+    }
+
+    #[test]
+    fn progress_line_parses_transferred_bytes_without_spaces_on_the_name() {
+        assert_eq!(parse_progress_bytes("system: 32768 KB/65536 KB"), Some(32768 * 1024));
+        assert_eq!(parse_progress_bytes("boot: 1024 KB/4096 KB"), Some(MIB));
+        // 名称里带空格（例如某些包裹输出）不应当被当成进度行。
+        assert_eq!(parse_progress_bytes("Sending 'boot' (4096 KB)"), None);
+    }
+
+    #[test]
+    fn progress_never_goes_backwards_and_caps_at_the_local_image_size() {
+        let mut parser = FastbootProgressParser::new(8 * MIB);
+        // 真实顺序：先 Sending 报块大小，再逐行报块内进度。
+        assert_eq!(parser.observe_line("Sending 'boot' (8192 KB)..."), None);
+        let first = parser.observe_line("boot: 2048 KB/8192 KB").expect("progress expected");
+        let second = parser.observe_line("boot: 4096 KB/8192 KB").expect("progress expected");
+        assert!(second > first, "进度必须单调推进：{first} -> {second}");
+        // 块内计数回退时按「本块从头」重算，但累计量绝不倒退。
+        let after_regress = parser
+            .observe_line("boot: 1024 KB/8192 KB")
+            .expect("regression must still report");
+        assert!(
+            after_regress >= second,
+            "累计量不得倒退：{second} -> {after_regress}"
+        );
+        // 超过本地镜像大小的上报要被夹住。
+        let capped = parser
+            .observe_line("boot: 999999 KB/999999 KB")
+            .expect("progress expected");
+        assert!(
+            capped <= 8 * MIB,
+            "上报量不得超过本地镜像大小：{capped} > {}",
+            8 * MIB
+        );
+    }
+
+    #[test]
+    fn first_writing_line_of_a_multi_chunk_image_does_not_jump_to_full() {
+        // 关键回归：大镜像被切成多个 sparse 块，`Writing` 只代表**当前块**完成。
+        // 旧实现一见 Writing 就当整张镜像完成，导致进度条第一块就满。
+        let total = 128 * MIB;
+        let mut parser = FastbootProgressParser::new(total);
+
+        // 第一块：64MiB 传完。进度行本身就把本块报满，因此 `Writing` 不再产生
+        // 新的上报——这正确，关键是不能报成整张镜像。
+        parser.observe_line("Sending sparse 'system' (65536 KB)...");
+        let after_first_chunk = parser
+            .observe_line("system: 65536 KB/65536 KB")
+            .expect("first chunk progress must report");
+        assert_eq!(after_first_chunk, 64 * MIB);
+        assert!(
+            after_first_chunk < total,
+            "第一块完成时绝不能报满整张镜像：{after_first_chunk} vs {total}"
+        );
+        assert_eq!(
+            parser.observe_line("Writing 'system'..."),
+            None,
+            "本块已在进度行报满，Writing 不应重复上报"
+        );
+
+        // 第二块：再来 64MiB。累计必须跨块推进到整张镜像。
+        parser.observe_line("Sending sparse 'system' (65536 KB)...");
+        let after_second_chunk = parser
+            .observe_line("system: 65536 KB/65536 KB")
+            .expect("second chunk progress must report");
+        assert_eq!(after_second_chunk, total, "两块后必须累计到整张镜像");
+    }
+
+    #[test]
+    fn writing_line_fills_the_unreported_remainder_of_the_current_chunk() {
+        // 有些 fastboot 版本在块尾不再打进度行，直接 Writing。此时必须把
+        // 本块余量补齐，否则进度会一直停在半途。
+        let mut parser = FastbootProgressParser::new(4 * MIB);
+        parser.observe_line("Sending 'boot' (4096 KB)...");
+        parser.observe_line("boot: 1024 KB/4096 KB");
+        let filled = parser.observe_line("Writing 'boot'...").expect("remainder must be filled");
+        assert_eq!(filled, 4 * MIB);
+    }
+
+    #[test]
+    fn finished_line_completes_the_command_without_inventing_progress_on_failure() {
+        // 成功：Finished 补齐到整张镜像。
+        let mut parser = FastbootProgressParser::new(6 * MIB);
+        parser.observe_line("Sending 'vendor_boot' (6144 KB)...");
+        let finished = parser
+            .observe_line("Finished. Total time: 3.210s")
+            .expect("finished must complete");
+        assert_eq!(finished, 6 * MIB);
+
+        // 失败：不得再臆造进度。
+        let mut failed = FastbootProgressParser::new(6 * MIB);
+        failed.observe_line("Sending 'vendor_boot' (6144 KB)...");
+        failed.observe_line("FAILED (remote: 'write failed')");
+        assert_eq!(failed.observe_line("Writing 'vendor_boot'..."), None);
+        assert_eq!(failed.observe_line("Finished. Total time: 1.0s"), None);
+        assert_eq!(failed.finish(), None);
+    }
+
+    #[test]
+    fn unrecognised_lines_produce_no_progress() {
+        let mut parser = FastbootProgressParser::new(4 * MIB);
+        for line in [
+            "fastboot: error: cannot load 'nope.img'",
+            "",
+            "OKAY [  0.001s]",
+        ] {
+            assert_eq!(parser.observe_line(line), None, "行 {line:?} 不该产生进度");
+        }
+    }
+
+    #[test]
+    fn word_error_matching_does_not_false_positive_on_partition_names() {
+        assert!(contains_word_error("fastboot: error: cannot load 'x'"));
+        assert!(contains_word_error("FAILED (remote: 'error')"));
+        // 分区名里含 error 子串不应当被当成失败。
+        assert!(!contains_word_error("Sending 'error_log' (1024 KB)..."));
+        assert!(!contains_word_error("error_log: 512 KB/1024 KB"));
+    }
 }

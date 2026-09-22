@@ -103,9 +103,22 @@ export const SafeFlashPage: FC<{
     ? `${deviceSnapshot?.connection_label || '设备已连接'}${deviceSnapshot?.model ? ` · ${deviceSnapshot.model}` : ''}`
     : '未连接 ADB/Fastboot 设备';
   const operationStage = operationSnapshot?.isBusy ? operationSnapshot.stage : '';
+  // 进度行只记「刷写分区[i/n]」（后端不再追加  ... /  ... OK），
+  // 因此这里只匹配方括号里的 i/n；不再要求尾随 ] ...。
   const partitionMatch = operationStage.match(/刷写分区\[(\d+\/\d+)\]/);
   const currentPartition = partitionMatch ? partitionMatch[1] : '--';
   const visibleStatus = operationStage || status || '等待操作';
+  // 总进度：后端在**每个阶段**都单调推进它——下载、解包（zip/payload）、
+  // 逐分区刷写各自折算到区间里。早先只认「刷写分区[i/n]」，结果最耗时的
+  // 下载/解包整段看不到进度条，这正是「解包和刷写都没有实时进度」的一半。
+  // 因此这里只要快照带数值进度就显示，不再按阶段名设卡。
+  const progressValue =
+    typeof operationSnapshot?.progress === 'number'
+      ? Math.min(Math.max(operationSnapshot.progress, 0), 1)
+      : null;
+  const flashPercent = progressValue === null ? null : Math.round(progressValue * 100);
+  // 进度条要等到真正开始推进（>0%）才出现，避免刚点下按钮就闪一个 0% 的空条。
+  const showProgress = isPreparing || isExecuting || (flashPercent !== null && flashPercent > 0);
 
   return (
     <section className="nw-safe-flash-workspace" aria-label="VIVO 线刷">
@@ -145,7 +158,15 @@ export const SafeFlashPage: FC<{
           ))}
           <button type="button" disabled>回锁BL</button>
         </section>
-        <section className="nw-safe-flash-current"><span>当前分区: <strong>{currentPartition}</strong></span><p>{visibleStatus}</p></section>
+        <section className="nw-safe-flash-current">
+          <span>当前分区: <strong>{currentPartition}</strong></span>
+          {showProgress && flashPercent !== null ? (
+            <div className="nw-safe-flash-progress" role="progressbar" aria-label="线刷总进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={flashPercent}>
+              <span style={{ width: `${flashPercent}%` }} />
+            </div>
+          ) : null}
+          <p>{visibleStatus}{showProgress && flashPercent !== null ? ` ${flashPercent}%` : ''}</p>
+        </section>
       </form>
       {error ? <p className="nw-error-text">{error}</p> : null}
       <ModalLayer isVisible={preflight !== null} title="确认刷写" onClose={isExecuting ? undefined : () => void cancelPreflight()}>
