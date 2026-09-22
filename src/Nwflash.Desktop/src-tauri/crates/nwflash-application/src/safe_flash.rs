@@ -2977,19 +2977,28 @@ mod fastboot_progress_tests {
 
     #[test]
     fn sending_line_reports_block_size_and_units_are_converted() {
-        assert_eq!(parse_sending_bytes("Sending 'system' (393216 KB)..."), Some(393216 * 1024));
+        assert_eq!(
+            parse_sending_bytes("Sending 'system' (393216 KB)..."),
+            Some(393216 * 1024)
+        );
         assert_eq!(
             parse_sending_bytes("Sending sparse 'system' (65536 KB)..."),
             Some(65536 * 1024)
         );
-        assert_eq!(parse_sending_bytes("Sending 'boot' (12.5 MB)..."), Some(13_107_200));
+        assert_eq!(
+            parse_sending_bytes("Sending 'boot' (12.5 MB)..."),
+            Some(13_107_200)
+        );
         // 非 Sending 行不得误报。
         assert_eq!(parse_sending_bytes("Writing 'boot'..."), None);
     }
 
     #[test]
     fn progress_line_parses_transferred_bytes_without_spaces_on_the_name() {
-        assert_eq!(parse_progress_bytes("system: 32768 KB/65536 KB"), Some(32768 * 1024));
+        assert_eq!(
+            parse_progress_bytes("system: 32768 KB/65536 KB"),
+            Some(32768 * 1024)
+        );
         assert_eq!(parse_progress_bytes("boot: 1024 KB/4096 KB"), Some(MIB));
         // 名称里带空格（例如某些包裹输出）不应当被当成进度行。
         assert_eq!(parse_progress_bytes("Sending 'boot' (4096 KB)"), None);

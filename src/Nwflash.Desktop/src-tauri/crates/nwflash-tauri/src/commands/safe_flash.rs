@@ -1263,8 +1263,8 @@ async fn execute_safe_flash_request(
     // 真刷写用 fastboot 自己打印的实时输出（`Sending` / `<分区>: A KB/B KB` /
     // `Writing`）算进度，比按耗时估算准得多；只有真实系统执行器才值得包，
     // 测试注入的假执行器输出是固定夹具，解析它们没有意义。
-    let (execution_service, partition_observer) = execution_service
-        .with_fastboot_output_progress(partition_progress.clone());
+    let (execution_service, partition_observer) =
+        execution_service.with_fastboot_output_progress(partition_progress.clone());
     let mut report_partition_stage = move |stage: String| {
         partition_stage_context.report_stage_without_log(stage);
     };
