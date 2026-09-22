@@ -1241,6 +1241,10 @@ async fn execute_safe_flash_request(
     };
     let stage_context = context.clone();
     let progress_context = context.clone();
+    // 逐分区进度的状态行通道：只更新界面文案，不写本地操作日志（VIVO 线刷
+    // 的 `刷写分区[i/n]` 要显示 i/n，但不该按分区往日志区刷流水）。
+    // 必须在 `context` 被搬进命令留痕器**之前**克隆。
+    let partition_stage_context = context.clone();
     // 分区写入期间的实时进度：把 sink 挂到同一个 `OperationContext` 上，
     // 与阶段/总进度同源，避免两条进度通路互相覆盖。
     let partition_progress: Arc<nwflash_application::SafeFlashPartitionProgressSink> =
@@ -1261,6 +1265,9 @@ async fn execute_safe_flash_request(
     // 测试注入的假执行器输出是固定夹具，解析它们没有意义。
     let (execution_service, partition_observer) = execution_service
         .with_fastboot_output_progress(partition_progress.clone());
+    let mut report_partition_stage = move |stage: String| {
+        partition_stage_context.report_stage_without_log(stage);
+    };
     let probe = probe.clone();
     task::spawn_blocking(move || {
         let probe = probe.clone();
@@ -1284,6 +1291,7 @@ async fn execute_safe_flash_request(
             &mut is_suspended,
             Some(&partition_progress),
             partition_observer.as_deref(),
+            Some(&mut report_partition_stage),
         )
     })
     .await
@@ -1305,18 +1313,22 @@ fn safe_flash_partition_progress_sink(
 ) -> Arc<nwflash_application::SafeFlashPartitionProgressSink> {
     Arc::new(move |progress| {
         let partition_total = progress.partition_total.max(1);
-        let current_fraction = if progress.total_bytes == 0 {
-            0.0
-        } else {
+        // `total_bytes == 0` 表示**后端也不知道**这个分区多大（假刷写拿不到
+        // 镜像大小、或 fastboot 输出被重定向）。此时如实告诉前端「没有刻度」，
+        // 由它走左右波动的不确定态——而不是把 0% 冒充成真实进度。
+        let has_scale = progress.total_bytes > 0;
+        let current_fraction = if has_scale {
             (progress.written_bytes as f64 / progress.total_bytes as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
         };
         let completed = progress.partition_index.saturating_sub(1) as f64;
         let overall = ((completed + current_fraction) / partition_total as f64).clamp(0.0, 1.0);
         context.report_progress_monotonic(overall);
-        // 当前分区行：分区名来自后端登记的上下文，比例就是本分区自己的刻度。
         context.report_now_partition_task(
             progress.partition_name.clone(),
             current_fraction,
+            has_scale,
         );
     })
 }

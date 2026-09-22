@@ -2756,6 +2756,87 @@ fn simulated_flash_wait_stops_immediately_when_canceled() {
 }
 
 #[test]
+fn partition_stage_can_be_routed_to_a_no_log_channel_for_line_flash() {
+    // VIVO 线刷的 `刷写分区[i/n]` 要出现在状态行里（界面靠它定位进度），但
+    // 不该按分区往本地操作日志刷流水。这里锁定：接了专用通道时，逐分区文案
+    // 只走该通道，`report_stage`（会被写成日志）一条都不产生。
+    let executor = RecordedExecutor::new([
+        // devices + is-userspace + 两条 flash + 收尾 reboot = 5 条命令。
+        successful_output("FASTBOOT-001\tfastboot\n"),
+        successful_output("(bootloader) is-userspace: yes\n"),
+        successful_output(""),
+        successful_output(""),
+        successful_output(""),
+    ]);
+    let service = SafeFlashExecutionService::new(Arc::new(executor.clone()))
+        .with_fastbootd_wait(1, std::time::Duration::ZERO);
+    let source = SafeFlashPreparedSource {
+        staging_root: None,
+        partitions: vec![real_partition("boot"), real_partition("vendor_boot")],
+        has_block_based_content: false,
+    };
+    let options = SafeFlashBuildOptions {
+        serial: "FASTBOOT-001".to_string(),
+        is_safe_flash: false,
+        is_keep_root: false,
+        wipe_data: false,
+        slot_mode: SafeFlashSlotMode::CurrentSlot,
+        current_slot: None,
+    };
+    let logged: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let staged: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    service
+        .execute_with_partition_progress(
+            SafeFlashExecutionRequest {
+                source: &source,
+                options: &options,
+                serial: options.serial.as_str(),
+                transition_to_fastbootd: false,
+            },
+            || false,
+            |stage| {
+                logged
+                    .lock()
+                    .expect("logged lock should not be poisoned")
+                    .push(stage)
+            },
+            |_| {},
+            Option::<
+                fn(
+                    SafeFlashPartitionFailure,
+                ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+            >::None,
+            || false,
+            None,
+            None,
+            Some(&mut |stage: String| {
+                staged
+                    .lock()
+                    .expect("staged lock should not be poisoned")
+                    .push(stage)
+            }),
+        )
+        .expect("line flash should complete");
+
+    let staged = staged
+        .into_inner()
+        .expect("staged lock should not be poisoned");
+    assert_eq!(
+        staged,
+        vec!["刷写分区[1/2]", "刷写分区[2/2]"],
+        "逐分区文案必须走无日志通道：{staged:?}"
+    );
+    let logged = logged
+        .into_inner()
+        .expect("logged lock should not be poisoned");
+    assert!(
+        !logged.iter().any(|stage| stage.contains("刷写分区[")),
+        "逐分区文案**不得**写进本地操作日志：{logged:?}"
+    );
+}
+
+#[test]
 fn simulated_flash_reports_byte_progress_while_it_waits() {
     // 假刷写必须**在等待过程中**持续上报字节进度，而不是只在分区边界跳一次；
     // 否则大分区（system 动辄数百 MB）在界面上整段静止，用户以为卡死了。
@@ -2809,6 +2890,7 @@ fn simulated_flash_reports_byte_progress_while_it_waits() {
             >::None,
             || false,
             Some(&(partition_progress as Arc<SafeFlashPartitionProgressSink>)),
+            None,
             None,
         )
         .expect("simulated flash should complete");
@@ -2910,6 +2992,7 @@ fn real_flash_reports_capped_estimates_and_completes_at_full_size() {
             >::None,
             || false,
             Some(&(partition_progress as Arc<SafeFlashPartitionProgressSink>)),
+            None,
             None,
         )
         .expect("real flash should complete");

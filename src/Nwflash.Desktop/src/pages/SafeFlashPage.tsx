@@ -125,16 +125,22 @@ export const SafeFlashPage: FC<{
   const overallPercent = progressValue === null ? null : Math.round(progressValue * 100);
 
   // ── 进度条之二：当前分区 ─────────────────────────────────────────────
-  // 后端在写入期间用 `partitionTask` 单独上报本分区自己的刻度。拿不到刻度
-  // （`total_bytes == 0`：假刷写取不到镜像大小、或 fastboot 输出被重定向）
-  // 时**不猜**百分比，改成左右波动的不确定态——宁可表示「正在写、不知道
-  // 还剩多少」，也不要显示一个编出来的数字。
+  // 后端在写入期间用 `partitionTask` 单独上报本分区自己的刻度，并用 `state`
+  // 区分「有刻度」与「没刻度」：
+  //   - Running = 后端确实知道本分区多大 → 显示真实百分比（含 0%，因为
+  //     一个刚起步的分区就是 0%，那是**真实进度**而不是未知）。
+  //   - Waiting = 后端也不知道（假刷写取不到镜像大小、fastboot 输出被重定向）
+  //     → 左右波动的不确定态，**不猜**百分比。
+  //
+  // 不能用 `fraction > 0` 当"有没有刻度"的判据：假刷写的进度是从 0 平滑涨到
+  // 100 的真实进度，用 `> 0` 会把它的起步阶段误判成"没刻度"而全程波动。
   const partitionTask = operationSnapshot?.partitionTask ?? null;
+  const partitionHasScale = partitionTask?.state === 'Running';
   const partitionFraction =
     partitionTask && typeof partitionTask.overall_progress === 'number'
       ? Math.min(Math.max(partitionTask.overall_progress, 0), 1)
       : null;
-  const partitionDeterminate = partitionFraction !== null && partitionFraction > 0;
+  const partitionDeterminate = partitionHasScale && partitionFraction !== null;
   const partitionPercent = partitionDeterminate ? Math.round(partitionFraction * 100) : null;
 
   // 刷写阶段才有「当前分区」的语义；下载/解包阶段只显示总进度那一条。

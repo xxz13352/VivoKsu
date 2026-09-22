@@ -72,8 +72,9 @@ describe('SafeFlashPage', () => {
         startedAt: 1700000000,
         isCancellable: true,
         isBusy: true,
-        // 后端拿不到镜像大小：按约定上报 0，前端**不猜**百分比。
-        partitionTask: { partition_name: 'system', state: 'Running', overall_progress: 0 },
+        // 后端拿不到镜像大小：state 用 Waiting 表示「没有刻度」，前端**不猜**
+        // 百分比。（0% 本身不是"没刻度"的信号——真进度起步就是 0%。）
+        partitionTask: { partition_name: 'system', state: 'Waiting', overall_progress: 0 },
       }} />,
     ));
 
@@ -88,6 +89,32 @@ describe('SafeFlashPage', () => {
     expect(bars[1].getAttribute('aria-valuenow')).toBe('72');
     // 当前分区行显示 `--`，而不是编出来的 0%。
     expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('--');
+  });
+
+  test('假刷写从 0% 起步时是确定态，不是波动态', () => {
+    // 回归：假刷写的进度是从 0 平滑涨到 100 的**真实**进度。旧实现用
+    // `fraction > 0` 当"有没有刻度"的判据，于是起步的 0% 被误判成"没刻度"，
+    // 整个假刷过程都在左右波动，看不到真实百分比。
+    flushSync(() => root.render(
+      <SafeFlashPage operationSnapshot={{
+        kind: 'Flashing',
+        operationId: 'operation-safe-flash',
+        title: 'VIVO 线刷',
+        stage: '刷写分区[1/38]',
+        progress: 0.02,
+        startedAt: 1700000000,
+        isCancellable: true,
+        isBusy: true,
+        partitionTask: { partition_name: 'system', state: 'Running', overall_progress: 0 },
+      }} />,
+    ));
+
+    const bars = host.querySelectorAll('.nw-safe-flash-progress');
+    expect(bars).toHaveLength(2);
+    // 有刻度（Running）→ 确定态，0% 如实显示为 0%，不波动。
+    expect(bars[0].classList.contains('is-indeterminate')).toBe(false);
+    expect(bars[0].getAttribute('aria-valuenow')).toBe('0');
+    expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('0%');
   });
 
   test('无分区阶段的快照不渲染「当前分区」那一条', () => {

@@ -478,6 +478,7 @@ impl SafeFlashExecutionService {
             &mut is_suspended,
             None,
             None,
+            None,
         )
     }
 
@@ -505,6 +506,10 @@ impl SafeFlashExecutionService {
         mut is_suspended: G,
         partition_progress: Option<&Arc<SafeFlashPartitionProgressSink>>,
         partition_observer: Option<&FastbootProgressExecutor>,
+        // 逐分区进度的**状态行**通道：只更新界面文案，不写本地操作日志。
+        // 与 `report_stage` 分开是因为 VIVO 线刷的 `刷写分区[i/n]` 要显示在
+        // 状态行与进度行里，但不该按分区往日志区刷流水。
+        report_partition_stage: Option<&mut dyn FnMut(String)>,
     ) -> Result<SafeFlashExecutionResult, DomainError>
     where
         F: FnMut() -> bool,
@@ -524,6 +529,7 @@ impl SafeFlashExecutionService {
             &mut is_suspended,
             partition_progress,
             partition_observer,
+            report_partition_stage,
         )
     }
 
@@ -538,6 +544,7 @@ impl SafeFlashExecutionService {
         is_suspended: &mut G,
         partition_progress: Option<&Arc<SafeFlashPartitionProgressSink>>,
         partition_observer: Option<&FastbootProgressExecutor>,
+        mut report_partition_stage: Option<&mut dyn FnMut(String)>,
     ) -> Result<SafeFlashExecutionResult, DomainError>
     where
         F: FnMut() -> bool,
@@ -725,10 +732,17 @@ impl SafeFlashExecutionService {
                 // 失败提示两条来源可能分叉）；这里只做缺失兜底。
                 last_partition_target = partition_name.clone().unwrap_or_default();
                 partition_index += 1;
-                // 只报「正在写第几个分区」。后续无论重试还是被用户跳过，
-                // 这一行的含义都不变，因此不做原地改写，逐条落进操作日志，
-                // 列表本身就是刷写轨迹。
-                report_stage(format!("刷写分区[{partition_index}/{partition_total}]"));
+                // 只报「正在写第几个分区」，且**只进状态行、不进本地日志**：
+                // 界面需要 i/n 来定位进度，但逐分区的流水会把日志区淹掉
+                // （用户看日志是看"发生了什么"）。分区名本来就不在这条文案里，
+                // 点此不会泄漏"当前在刷哪个分区"。
+                let partition_line = format!("刷写分区[{partition_index}/{partition_total}]");
+                match report_partition_stage.as_deref_mut() {
+                    // 有专用通道：只更新状态行，不写日志。
+                    Some(emit) => emit(partition_line),
+                    // 没接线时退回原语义（写日志），保证既有调用点行为不变。
+                    None => report_stage(partition_line),
+                }
             } else if tolerate_failure {
                 // 重启到 REC：先把「进 REC 后要手动做什么」写给用户，
                 // 设备进入 REC 后程序就再也探测不到它了。

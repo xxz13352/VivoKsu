@@ -496,6 +496,21 @@ impl OperationContext {
         });
     }
 
+    /// 只推进界面上的阶段文案，**不写本地操作日志**。
+    ///
+    /// 给「状态行需要、日志区不需要」的进度文案用：VIVO 线刷的
+    /// `刷写分区[i/n]` 要显示在页面的状态行与进度行里，但不该按每个分区
+    /// 往日志区刷一行——用户看日志是看"发生了什么"，逐分区流水会把它淹掉。
+    pub fn report_stage_without_log(&self, stage: impl Into<String>) {
+        self.state.report(StageUpdate {
+            stage: Some(stage.into()),
+            kind: None,
+            progress: None,
+            monotonic_progress: false,
+            partition_task: None,
+        });
+    }
+
     pub fn report_stage_with_kind(&self, stage: impl Into<String>, kind: OperationKind) {
         let stage = stage.into();
         self.state.log(
@@ -565,7 +580,15 @@ impl OperationContext {
     /// 用的：那条路径每次都会写一条 `分区 X：Running` 日志，按 60ms 一次的
     /// 上报频率会把本地日志区刷爆。这里只更新快照，状态固定为 `Running`
     /// （调用方本来就在写这个分区）。
-    pub fn report_now_partition_task(&self, partition_name: impl Into<String>, progress: f64) {
+    ///
+    /// `has_scale` 标明后端是否真的知道本分区的刻度：`false` 时前端走
+    /// 「左右波动」的不确定态，而不是把一个未知的 0% 当成真实进度。
+    pub fn report_now_partition_task(
+        &self,
+        partition_name: impl Into<String>,
+        progress: f64,
+        has_scale: bool,
+    ) {
         self.state.report(StageUpdate {
             stage: None,
             kind: None,
@@ -573,7 +596,11 @@ impl OperationContext {
             monotonic_progress: false,
             partition_task: Some(PartitionTaskSnapshot {
                 partition_name: partition_name.into(),
-                state: PartitionTaskState::Running,
+                state: if has_scale {
+                    PartitionTaskState::Running
+                } else {
+                    PartitionTaskState::Waiting
+                },
                 overall_progress: progress.clamp(0.0, 1.0),
             }),
         });
