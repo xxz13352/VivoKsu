@@ -559,6 +559,26 @@ impl OperationContext {
             .await;
     }
 
+    /// 只推进「当前分区」这一行的刻度，不写日志、不动总进度。
+    ///
+    /// 与 [`Self::report_partition_task`] 的区别，是给**高频的字节级进度**
+    /// 用的：那条路径每次都会写一条 `分区 X：Running` 日志，按 60ms 一次的
+    /// 上报频率会把本地日志区刷爆。这里只更新快照，状态固定为 `Running`
+    /// （调用方本来就在写这个分区）。
+    pub fn report_now_partition_task(&self, partition_name: impl Into<String>, progress: f64) {
+        self.state.report(StageUpdate {
+            stage: None,
+            kind: None,
+            progress: None,
+            monotonic_progress: false,
+            partition_task: Some(PartitionTaskSnapshot {
+                partition_name: partition_name.into(),
+                state: PartitionTaskState::Running,
+                overall_progress: progress.clamp(0.0, 1.0),
+            }),
+        });
+    }
+
     pub fn operation_id(&self) -> &str {
         &self.operation_id
     }

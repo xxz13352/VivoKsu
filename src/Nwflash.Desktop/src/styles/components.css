@@ -1462,10 +1462,24 @@
 .nw-safe-flash-current span { font-size: 11px; }
 .nw-safe-flash-current strong { color: var(--nw-text); font-family: Consolas, monospace; font-size: 12px; }
 .nw-safe-flash-current p { margin: 0; color: var(--nw-text); font-size: 12px; }
-/* 刷写总进度：与右侧面板的进度条同一套观感，写入期间由后端按
-   「已完成分区 + 当前分区写入比例」单调推进。 */
+/* 线刷页的两条进度条（当前分区 / 总进度）：与右侧面板同一套观感，复用它的
+   行/标签/百分比样式，条本身也沿用 `.nw-progress-bar` 的动画语义。 */
 .nw-safe-flash-progress { position: relative; height: 5px; border-radius: 3px; background: var(--nw-accent-strong); overflow: hidden; }
-.nw-safe-flash-progress > span { display: block; height: 100%; border-radius: 3px; background: var(--nw-accent); transition: width 240ms ease; }.nw-safe-flash-statusbar { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; min-height: 58px; border: 1px solid var(--nw-border); border-top: 0; border-radius: 0 0 8px 8px; background: #f6fafa; padding: 0 22px; }
+.nw-safe-flash-progress > span { display: block; height: 100%; border-radius: 3px; background: var(--nw-accent); transition: width 240ms ease; }
+/* 拿不到当前分区的实时刻度时（假刷写无镜像大小、fastboot 输出被重定向）
+   改走「左右波动」的不确定态：只表示正在写，不编造百分比。 */
+.nw-safe-flash-progress.is-indeterminate > span { width: 34%; animation: nw-progress-indeterminate 1.15s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .nw-safe-flash-progress > span { transition: none; }
+  .nw-safe-flash-progress.is-indeterminate > span { animation: none; }
+}
+/* 页面内的进度行：沿用右侧面板的层次（标签弱化、数值强调），但按页面字号
+   放大——面板是 9px 的窄栏排版，直接复用会过小。 */
+.nw-safe-flash-progress-row { display: flex; align-items: baseline; gap: 8px; font-size: 11px; }
+.nw-safe-flash-progress-label { flex: none; color: var(--nw-text-subtle); }
+.nw-safe-flash-progress-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--nw-text); font-family: Consolas, monospace; font-weight: 600; }
+.nw-safe-flash-progress-count { flex: none; color: var(--nw-text-subtle); font-family: Consolas, monospace; }
+.nw-safe-flash-progress-percent { flex: none; color: var(--nw-accent); font-family: Consolas, monospace; font-weight: 600; }.nw-safe-flash-statusbar { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; min-height: 58px; border: 1px solid var(--nw-border); border-top: 0; border-radius: 0 0 8px 8px; background: #f6fafa; padding: 0 22px; }
 .nw-safe-flash-statusbar span { color: var(--nw-text-subtle); font: 10px Consolas, monospace; }
 .nw-safe-flash-statusbar button { border-color: var(--nw-danger); background: var(--nw-danger); color: #fff; }
 

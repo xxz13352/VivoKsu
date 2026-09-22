@@ -24,11 +24,13 @@ describe('SafeFlashPage', () => {
     expect(host.textContent).toContain('VIVO 线刷');
   });
 
-  test('刷写中显示总进度条与百分比，未刷牙时不渲染', () => {
+  test('空闲时不渲染任何进度条', () => {
     flushSync(() => root.render(<SafeFlashPage />));
-    // 空闲：没有分区进度语义，不显示进度条。
-    expect(host.querySelector('.nw-safe-flash-progress')).toBeNull();
 
+    expect(host.querySelectorAll('.nw-safe-flash-progress')).toHaveLength(0);
+  });
+
+  test('刷写中同时显示「当前分区」与「总进度」两条进度条', () => {
     flushSync(() => root.render(
       <SafeFlashPage operationSnapshot={{
         kind: 'Flashing',
@@ -39,15 +41,73 @@ describe('SafeFlashPage', () => {
         startedAt: 1700000000,
         isCancellable: true,
         isBusy: true,
+        partitionTask: { partition_name: 'system', state: 'Running', overall_progress: 0.5 },
       }} />,
     ));
 
-    const bar = host.querySelector('.nw-safe-flash-progress');
-    expect(bar).not.toBeNull();
-    expect(bar?.getAttribute('aria-valuenow')).toBe('72');
-    // 当前分区序号来自 stage，百分比来自快照 progress。
-    expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('28/38');
-    expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('72%');
+    // 两条条：当前分区（本分区刻度 50%）与总进度（快照 72%）。
+    const bars = host.querySelectorAll('.nw-safe-flash-progress');
+    expect(bars).toHaveLength(2);
+    expect(bars[0].getAttribute('aria-label')).toBe('当前分区进度');
+    expect(bars[0].getAttribute('aria-valuenow')).toBe('50');
+    expect(bars[1].getAttribute('aria-label')).toBe('线刷总进度');
+    expect(bars[1].getAttribute('aria-valuenow')).toBe('72');
+
+    const current = host.querySelector('.nw-safe-flash-current')?.textContent ?? '';
+    expect(current).toContain('28/38');
+    expect(current).toContain('system');
+    expect(current).toContain('50%');
+    expect(current).toContain('72%');
+  });
+
+  test('当前分区拿不到实时刻度时改为左右波动的不确定态', () => {
+    flushSync(() => root.render(
+      <SafeFlashPage operationSnapshot={{
+        kind: 'Flashing',
+        operationId: 'operation-safe-flash',
+        title: 'VIVO 线刷',
+        stage: '刷写分区[28/38]',
+        progress: 0.72,
+        startedAt: 1700000000,
+        isCancellable: true,
+        isBusy: true,
+        // 后端拿不到镜像大小：按约定上报 0，前端**不猜**百分比。
+        partitionTask: { partition_name: 'system', state: 'Running', overall_progress: 0 },
+      }} />,
+    ));
+
+    const bars = host.querySelectorAll('.nw-safe-flash-progress');
+    expect(bars).toHaveLength(2);
+    // 当前分区走不确定态：带 is-indeterminate、不给 aria-valuenow（屏幕阅读器
+    // 不该念一个并不存在的百分比）。
+    expect(bars[0].classList.contains('is-indeterminate')).toBe(true);
+    expect(bars[0].hasAttribute('aria-valuenow')).toBe(false);
+    // 总进度仍然是确定的。
+    expect(bars[1].classList.contains('is-indeterminate')).toBe(false);
+    expect(bars[1].getAttribute('aria-valuenow')).toBe('72');
+    // 当前分区行显示 `--`，而不是编出来的 0%。
+    expect(host.querySelector('.nw-safe-flash-current')?.textContent).toContain('--');
+  });
+
+  test('无分区阶段的快照不渲染「当前分区」那一条', () => {
+    flushSync(() => root.render(
+      <SafeFlashPage operationSnapshot={{
+        kind: 'Transferring',
+        operationId: 'operation-download',
+        title: '下载固件包',
+        stage: '正在下载固件包',
+        progress: 0.35,
+        startedAt: 1700000000,
+        isCancellable: true,
+        isBusy: true,
+      }} />,
+    ));
+
+    // 下载/解包没有「第几个分区」的语义：只显示总进度那一条。
+    const bars = host.querySelectorAll('.nw-safe-flash-progress');
+    expect(bars).toHaveLength(1);
+    expect(bars[0].getAttribute('aria-label')).toBe('线刷总进度');
+    expect(bars[0].getAttribute('aria-valuenow')).toBe('35');
   });
 
   test('下载与解包阶段同样显示进度条（这两段最耗时，不能整段静止）', () => {

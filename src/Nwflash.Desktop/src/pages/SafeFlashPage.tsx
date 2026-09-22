@@ -107,18 +107,40 @@ export const SafeFlashPage: FC<{
   // 因此这里只匹配方括号里的 i/n；不再要求尾随 ] ...。
   const partitionMatch = operationStage.match(/刷写分区\[(\d+\/\d+)\]/);
   const currentPartition = partitionMatch ? partitionMatch[1] : '--';
-  const visibleStatus = operationStage || status || '等待操作';
-  // 总进度：后端在**每个阶段**都单调推进它——下载、解包（zip/payload）、
-  // 逐分区刷写各自折算到区间里。早先只认「刷写分区[i/n]」，结果最耗时的
-  // 下载/解包整段看不到进度条，这正是「解包和刷写都没有实时进度」的一半。
-  // 因此这里只要快照带数值进度就显示，不再按阶段名设卡。
+  // 分区阶段的 stage 文案本身就是 `刷写分区[i/n]`，而该计数已经显示在进度行里；
+  // 再原样印一遍就是重复。这类阶段改用固定文案，其余阶段照常显示 stage。
+  const partitionPhase = /刷写分区\[/.test(operationStage);
+  const visibleStatus =
+    (partitionPhase ? '正在写入分区镜像' : operationStage) || status || '等待操作';
+
+  // ── 进度条之一：总进度 ───────────────────────────────────────────────
+  // 后端在**每个阶段**都单调推进它——下载、解包（zip/payload）、逐分区刷写
+  // 各自折算到区间里。早先只认「刷写分区[i/n]」，结果最耗时的下载/解包整段
+  // 看不到进度条，这正是「解包和刷写都没有实时进度」的一半。因此这里只要
+  // 快照带数值进度就显示，不再按阶段名设卡。
   const progressValue =
     typeof operationSnapshot?.progress === 'number'
       ? Math.min(Math.max(operationSnapshot.progress, 0), 1)
       : null;
-  const flashPercent = progressValue === null ? null : Math.round(progressValue * 100);
-  // 进度条要等到真正开始推进（>0%）才出现，避免刚点下按钮就闪一个 0% 的空条。
-  const showProgress = isPreparing || isExecuting || (flashPercent !== null && flashPercent > 0);
+  const overallPercent = progressValue === null ? null : Math.round(progressValue * 100);
+
+  // ── 进度条之二：当前分区 ─────────────────────────────────────────────
+  // 后端在写入期间用 `partitionTask` 单独上报本分区自己的刻度。拿不到刻度
+  // （`total_bytes == 0`：假刷写取不到镜像大小、或 fastboot 输出被重定向）
+  // 时**不猜**百分比，改成左右波动的不确定态——宁可表示「正在写、不知道
+  // 还剩多少」，也不要显示一个编出来的数字。
+  const partitionTask = operationSnapshot?.partitionTask ?? null;
+  const partitionFraction =
+    partitionTask && typeof partitionTask.overall_progress === 'number'
+      ? Math.min(Math.max(partitionTask.overall_progress, 0), 1)
+      : null;
+  const partitionDeterminate = partitionFraction !== null && partitionFraction > 0;
+  const partitionPercent = partitionDeterminate ? Math.round(partitionFraction * 100) : null;
+
+  // 刷写阶段才有「当前分区」的语义；下载/解包阶段只显示总进度那一条。
+  const isPartitionPhase = partitionPhase;
+  // 进度条要等到真正开始推进才出现，避免刚点下按钮就闪一个 0% 的空条。
+  const showOverall = isPreparing || isExecuting || (overallPercent !== null && overallPercent > 0);
 
   return (
     <section className="nw-safe-flash-workspace" aria-label="VIVO 线刷">
@@ -159,13 +181,53 @@ export const SafeFlashPage: FC<{
           <button type="button" disabled>回锁BL</button>
         </section>
         <section className="nw-safe-flash-current">
-          <span>当前分区: <strong>{currentPartition}</strong></span>
-          {showProgress && flashPercent !== null ? (
-            <div className="nw-safe-flash-progress" role="progressbar" aria-label="线刷总进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={flashPercent}>
-              <span style={{ width: `${flashPercent}%` }} />
+          {isPartitionPhase ? (
+            <div className="nw-safe-flash-progress-row">
+              <span className="nw-safe-flash-progress-label">当前分区</span>
+              <span className="nw-safe-flash-progress-name">
+                {partitionTask?.partition_name ?? '--'}
+              </span>
+              <span className="nw-safe-flash-progress-count">
+                {currentPartition}
+              </span>
+              <span className="nw-safe-flash-progress-percent">
+                {partitionPercent !== null ? `${partitionPercent}%` : '--'}
+              </span>
+            </div>
+          ) : (
+            <span>当前分区: <strong>{currentPartition}</strong></span>
+          )}
+          {isPartitionPhase ? (
+            <div
+              className={`nw-safe-flash-progress${partitionDeterminate ? '' : ' is-indeterminate'}`}
+              role="progressbar"
+              aria-label="当前分区进度"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={partitionPercent ?? undefined}
+            >
+              {partitionDeterminate ? <span style={{ width: `${partitionPercent}%` }} /> : <span />}
             </div>
           ) : null}
-          <p>{visibleStatus}{showProgress && flashPercent !== null ? ` ${flashPercent}%` : ''}</p>
+          {showOverall && overallPercent !== null ? (
+            <div className="nw-safe-flash-progress-row">
+              <span className="nw-safe-flash-progress-label">总进度</span>
+              <span className="nw-safe-flash-progress-percent">{overallPercent}%</span>
+            </div>
+          ) : null}
+          {showOverall && overallPercent !== null ? (
+            <div
+              className="nw-safe-flash-progress"
+              role="progressbar"
+              aria-label="线刷总进度"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={overallPercent}
+            >
+              <span style={{ width: `${overallPercent}%` }} />
+            </div>
+          ) : null}
+          <p>{visibleStatus}</p>
         </section>
       </form>
       {error ? <p className="nw-error-text">{error}</p> : null}

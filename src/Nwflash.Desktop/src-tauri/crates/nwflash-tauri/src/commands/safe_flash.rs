@@ -1290,10 +1290,16 @@ async fn execute_safe_flash_request(
     .map_err(|error| DomainError::Internal(format!("线刷执行调度失败：{error}")))?
 }
 
-/// 分区写入进度 → 操作快照。
+/// 分区写入进度 → 操作快照（**两条**进度：当前分区 + 总进度）。
 ///
 /// 总进度按「已完成分区数 + 当前分区写入比例」折算，保证在整条刷写链路上
 /// **单调推进**：既不会因为分区切换而回退，也不会在单个大分区内长时间不动。
+///
+/// 当前分区进度单独用 `partition_task` 上报：界面要把它和总进度分成两条
+/// 进度条，并且在没有实时刻度（`total_bytes == 0`，例如假刷写拿不到镜像
+/// 大小、或 fastboot 输出被重定向）时走「左右波动」的不确定态。这里把
+/// `total_bytes == 0` 如实传成 `0.0`，由前端决定是否转不确定态——后端不
+/// 猜一个假的百分比出来。
 fn safe_flash_partition_progress_sink(
     context: nwflash_application::OperationContext,
 ) -> Arc<nwflash_application::SafeFlashPartitionProgressSink> {
@@ -1305,8 +1311,13 @@ fn safe_flash_partition_progress_sink(
             (progress.written_bytes as f64 / progress.total_bytes as f64).clamp(0.0, 1.0)
         };
         let completed = progress.partition_index.saturating_sub(1) as f64;
-        let overall = (completed + current_fraction) / partition_total as f64;
-        context.report_progress_monotonic(overall.clamp(0.0, 1.0));
+        let overall = ((completed + current_fraction) / partition_total as f64).clamp(0.0, 1.0);
+        context.report_progress_monotonic(overall);
+        // 当前分区行：分区名来自后端登记的上下文，比例就是本分区自己的刻度。
+        context.report_now_partition_task(
+            progress.partition_name.clone(),
+            current_fraction,
+        );
     })
 }
 
