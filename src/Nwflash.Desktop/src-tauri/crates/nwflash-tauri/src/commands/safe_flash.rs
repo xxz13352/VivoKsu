@@ -1304,10 +1304,15 @@ async fn execute_safe_flash_request(
 /// **单调推进**：既不会因为分区切换而回退，也不会在单个大分区内长时间不动。
 ///
 /// 当前分区进度单独用 `partition_task` 上报：界面要把它和总进度分成两条
-/// 进度条，并且在没有实时刻度（`total_bytes == 0`，例如假刷写拿不到镜像
-/// 大小、或 fastboot 输出被重定向）时走「左右波动」的不确定态。这里把
-/// `total_bytes == 0` 如实传成 `0.0`，由前端决定是否转不确定态——后端不
-/// 猜一个假的百分比出来。
+/// 进度条。
+///
+/// 「有没有刻度」由 `has_scale`（即 `total_bytes > 0`）明确表达，而不是让
+/// 前端靠百分比猜：真刷写与假刷写**都有**真实刻度（假刷写的镜像是照常解包
+/// 落盘的，`simulated_flash_bytes` 就是它的真实长度），因此都显示真实百分比
+/// ——包括刚起步的 0%。只有后端确实不知道分区大小时（`total_bytes == 0`）
+/// 才传 `has_scale = false`，由前端走「左右波动」的不确定态。
+///
+/// 后端**不猜**任何假百分比：拿不到刻度就如实说拿不到。
 fn safe_flash_partition_progress_sink(
     context: nwflash_application::OperationContext,
 ) -> Arc<nwflash_application::SafeFlashPartitionProgressSink> {
