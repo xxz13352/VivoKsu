@@ -525,6 +525,9 @@ async fn resolve_fastbootd_serial_with_probe(
     let deadline = wait
         .wait_deadline
         .map(|budget| tokio::time::Instant::now() + budget);
+    // 阶段文案只报**一次**：放进下面的轮询循环里会按每秒一条的频率刷爆
+    // 日志区（实测真实会话里重复过 527 次）。
+    context.report_stage("正在等待 fastbootd 设备");
     loop {
         if cancellation.is_cancelled() {
             return Err(nwflash_domain::DomainError::UserCancelled(
@@ -542,7 +545,6 @@ async fn resolve_fastbootd_serial_with_probe(
                 )));
             }
         }
-        context.report_stage("正在等待 fastbootd 设备");
         let output = fastboot_probe(
             ProcessCommand::new(
                 bundled_platform_tool("fastboot.exe"),

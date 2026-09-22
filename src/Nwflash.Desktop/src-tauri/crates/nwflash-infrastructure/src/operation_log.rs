@@ -64,6 +64,23 @@ impl OperationLogStore {
         self.clear_memory();
     }
 
+    /// 追加一条日志，并**跳过与上一条完全相同的消息**。
+    ///
+    /// 为什么在存储层去重，而不是逐个修调用点：`report_stage` 会被放在轮询/
+    /// 重试循环里（例如等待 fastbootd 每秒探测一次就上报一次），于是同一句话
+    /// 会以每秒一条的频率把日志区刷满——实测某次会话里
+    /// 「正在等待 fastbootd 设备」重复了 788 次。这类重复是**同一处代码的
+    /// 同一句文案**在循环里反复触发，逐点修既容易漏、又会在新增循环时回归；
+    /// 在唯一的写入收口处按「消息 + 级别 + 操作」判重，才能一次覆盖整类问题。
+    ///
+    /// 判定范围刻意收窄，避免误吞真实日志：
+    /// - 只与**紧邻的上一条**比较（不是全局去重）。同一文案在流程中第二次
+    ///   出现时，中间必然隔着别的日志，因此不会被吞掉。
+    /// - 必须 `message`、`level`、`operation_id` **三者全同**才算重复。不同
+    ///   操作各自记录同一句文案（例如两次刷写）互不影响。
+    ///
+    /// 注意：这**不是**把日志"合并"成一条带计数的记录——被跳过的重复不改变
+    /// 已落盘的那一条，磁盘历史与内存快照行为一致。
     pub fn write(&self, level: OperationLogLevel, message: String, operation_id: Option<String>) {
         let entry = OperationLogEntry {
             timestamp_utc: unix_timestamp_seconds().unwrap_or(0),
@@ -77,6 +94,16 @@ impl OperationLogStore {
                 .entries
                 .lock()
                 .expect("operation log lock should not be poisoned");
+
+            // 与**紧邻的上一条**完全同源（消息 + 级别 + 操作全同）时跳过：
+            // 这是循环里反复上报同一句文案产生的噪声，不是新的信息。
+            if entries.last().is_some_and(|last| {
+                last.message == entry.message
+                    && last.level == entry.level
+                    && last.operation_id == entry.operation_id
+            }) {
+                return;
+            }
 
             entries.push(entry.clone());
             if entries.len() > self.max_entries {
@@ -168,6 +195,84 @@ fn rotate_file(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consecutive_identical_messages_are_collapsed_to_one() {
+        // 回归：轮询循环里每秒上报同一句 stage，会把日志区刷满。实测真实会话里
+        // 「正在等待 fastbootd 设备」重复过 527 次，占整个日志的 67%。
+        let path = std::env::temp_dir().join(format!(
+            "nwflash-operation-log-dedupe-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let store = OperationLogStore::new(Some(path.clone()), 100);
+        let op = Some("op-1".to_string());
+
+        store.write(
+            OperationLogLevel::Info,
+            "正在等待设备".to_owned(),
+            op.clone(),
+        );
+        for _ in 0..50 {
+            store.write(
+                OperationLogLevel::Info,
+                "正在等待设备".to_owned(),
+                op.clone(),
+            );
+        }
+        store.write(OperationLogLevel::Info, "开始刷写".to_owned(), op.clone());
+
+        let messages = store
+            .snapshot()
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        assert_eq!(messages, vec!["正在等待设备", "开始刷写"]);
+
+        // 磁盘历史同样只落一条重复项（与内存快照一致）。
+        let persisted = fs::read_to_string(&path).expect("log should be readable");
+        assert_eq!(
+            persisted.matches("正在等待设备").count(),
+            1,
+            "重复项不得写进磁盘历史：{persisted}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dedupe_is_scoped_to_consecutive_entries_and_full_triple() {
+        let path = std::env::temp_dir().join(format!(
+            "nwflash-operation-log-dedupe-scope-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let store = OperationLogStore::new(Some(path.clone()), 100);
+
+        // 同一文案被**别的日志**隔开时是真实事件，必须保留。
+        store.write(OperationLogLevel::Info, "A".to_owned(), None);
+        store.write(OperationLogLevel::Info, "B".to_owned(), None);
+        store.write(OperationLogLevel::Info, "A".to_owned(), None);
+        // 只有 message 相同的行仍要按级别区分。
+        store.write(OperationLogLevel::Warning, "A".to_owned(), None);
+        // 只有 message + 级别相同、但操作不同，也要区分（两次刷写各记各的）。
+        store.write(
+            OperationLogLevel::Warning,
+            "A".to_owned(),
+            Some("op-2".to_string()),
+        );
+
+        let messages = store
+            .snapshot()
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec!["A", "B", "A", "A", "A"],
+            "被隔开 / 级别不同 / 操作不同的同一文案都不得被吞"
+        );
+        let _ = fs::remove_file(path);
+    }
 
     #[test]
     fn clear_memory_removes_the_snapshot_without_erasing_the_persisted_log() {
