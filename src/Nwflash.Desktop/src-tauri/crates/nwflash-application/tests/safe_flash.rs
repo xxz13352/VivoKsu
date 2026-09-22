@@ -2496,9 +2496,12 @@ fn protected_partitions_are_reported_as_flashed_but_never_written_to_the_device(
         "日志必须逐条给出分区序号且不追加结论：{stages:?}"
     );
     // 日志里不允许出现任何暗示“没有真的刷”的字样。
-    assert!(stages.iter().all(|stage| !stage.contains("假")
-        && !stage.contains("模拟")
-        && !stage.contains("跳过")), "{stages:?}");
+    assert!(
+        stages.iter().all(|stage| !stage.contains("假")
+            && !stage.contains("模拟")
+            && !stage.contains("跳过")),
+        "{stages:?}"
+    );
 
     assert_eq!(dispatched_flash_targets(&executor), ["userdata"]);
     // 分区存在性校验已删除：整条链路不再出现 getvar partition-type。
@@ -3003,10 +3006,9 @@ fn real_flash_reports_capped_estimates_and_completes_at_full_size() {
         .clone();
     assert!(!updates.is_empty(), "真刷写也必须上报进度");
     assert!(
-        updates
-            .iter()
-            .all(|update| update.total_bytes == 4 * 1024 * 1024
-                && update.partition_name == "boot"),
+        updates.iter().all(|update| {
+            update.total_bytes == 4 * 1024 * 1024 && update.partition_name == "boot"
+        }),
         "进度观测必须带镜像大小与分区名：{updates:?}"
     );
     // 封顶：任何一次估算都不得超过总大小（95% 上限意味着 < total）。
@@ -3017,7 +3019,9 @@ fn real_flash_reports_capped_estimates_and_completes_at_full_size() {
         "估算写入量不得超过镜像大小：{updates:?}"
     );
     let _ = std::fs::remove_file(&image);
-}/// 反调试挂起：写入中途被挂起时，必须**停止推进**但**不派发后续命令**。
+}
+
+/// 反调试挂起：写入中途被挂起时，必须**停止推进**但**不派发后续命令**。
 ///
 /// 这是 P1 最关键的行为断言——挂起与取消必须能被区分，且挂起时设备会话
 /// 保持原样（不追加任何恢复/重启命令），否则设备可能留在写了一半的分区上。
