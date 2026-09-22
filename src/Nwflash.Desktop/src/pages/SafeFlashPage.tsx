@@ -184,9 +184,6 @@ export const SafeFlashPage: FC<{
           {isPartitionPhase ? (
             <div className="nw-safe-flash-progress-row">
               <span className="nw-safe-flash-progress-label">当前分区</span>
-              <span className="nw-safe-flash-progress-name">
-                {partitionTask?.partition_name ?? '--'}
-              </span>
               <span className="nw-safe-flash-progress-count">
                 {currentPartition}
               </span>

@@ -55,9 +55,10 @@ describe('SafeFlashPage', () => {
 
     const current = host.querySelector('.nw-safe-flash-current')?.textContent ?? '';
     expect(current).toContain('28/38');
-    expect(current).toContain('system');
     expect(current).toContain('50%');
     expect(current).toContain('72%');
+    // 分区名不在界面上暴露（只给 i/n 计数与百分比）。
+    expect(current).not.toContain('system');
   });
 
   test('当前分区拿不到实时刻度时改为左右波动的不确定态', () => {
