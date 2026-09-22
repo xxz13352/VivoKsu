@@ -67,6 +67,7 @@
 - [管理员 Web/API 验证](docs/2026-09-04-web-api-validation.md)
 - [Tauri 测试 manifest 报告](docs/2026-09-04-tauri-test-manifest-report.md)
 - [Safe Flash 流程与日志](docs/2026-09-03-safe-flash-pipeline-and-logging.md)
+- [线刷实时进度与日志时间戳](docs/2026-09-22-safe-flash-progress-and-log-timestamps.md)
 - [当前项目架构](docs/project-architecture.md)
 - [产品决策](docs/product-decisions.md)
 
