@@ -1270,10 +1270,19 @@ impl ProcessOutputObserver for FastbootProgressObserver {
         // 会停在这一块的中途（实测能停在 ~60%）。这样直到 `Finished.` 才补齐，
         // 而有些版本/重定向下根本没有 `Finished.` 行，进度条就永远停在半途。
         // `finish()` 不臆造进度：失败时返回 `None`，成功时只补到本地镜像长度。
-        if let ProcessObservation::Finished(_) = observation {
-            let remainder = self.parser.lock().ok().and_then(|parser| parser.finish());
-            if let Some(written_bytes) = remainder {
-                self.report(written_bytes);
+        if let ProcessObservation::Finished(metadata) = observation {
+            // 只有真正成功才补满：`exit_code == 0` 且进程正常结束。取消、超时、
+            // 输出超限都以非 0 退出码或非 `Completed` 的 termination 收尾，此时
+            // 补满会把被打断的刷写谎报成 100%。
+            let succeeded = metadata.exit_code == Some(0)
+                && matches!(
+                    metadata.termination,
+                    nwflash_windows::process::ProcessTermination::Completed
+                );
+            if succeeded {
+                if let Some(written_bytes) = self.parser.lock().ok().and_then(|p| p.finish()) {
+                    self.report(written_bytes);
+                }
             }
             return Ok(());
         }
@@ -1427,11 +1436,16 @@ impl FastbootProgressParser {
         }
     }
 
-    /// 命令结束时应当上报的最终字节数：成功时把最后一块的余量补满，
+    /// 命令**成功**结束时应当上报的最终字节数：把最后一块没报满的余量补上，
     /// 失败时返回 `None`（绝不臆造进度）。
     ///
-    /// 由 [`FastbootProgressObserver`] 在 `ProcessObservation::Finished` 上调用；
+    /// 由 [`FastbootProgressObserver`] 在 `ProcessObservation::Finished` 上调用，
     /// 这是「最后一块没有被 `Writing` / `Finished.` 行报满」时的唯一收口。
+    ///
+    /// 判「成功」必须看命令的真实结局，不能只看输出里有没有 `FAILED`：取消、
+    /// 超时、输出超限触发终止时 fastboot 往往还没打出任何 `FAILED` 行，只看输出
+    /// 就会把一次被打断的刷写谎报成 100%。因此成败由调用方按退出码/终止原因
+    /// 判定，这里再叠一层输出侧证据。
     pub fn finish(&self) -> Option<u64> {
         if self.failed {
             return None;
@@ -3184,6 +3198,55 @@ mod fastboot_progress_tests {
             *reported.lock().unwrap().last().unwrap(),
             total,
             "命令结束时必须把最后一块的余量补满"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_flash_never_reports_full_progress() {
+        // 回归：`finish()` 只看输出里有没有 `FAILED`，而取消/超时触发的终止
+        // 通常发生在 fastboot 打出 FAILED 之前。若收尾时无条件补满，一次被用户
+        // 打断的刷写会被谎报成 100%——「失败绝不臆造进度」的承诺就失效了。
+        let total = 128 * MIB;
+        let reported = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let collected = Arc::clone(&reported);
+        let sink: Arc<SafeFlashPartitionProgressSink> = Arc::new(move |progress| {
+            collected.lock().unwrap().push(progress.written_bytes);
+        });
+        let observer = FastbootProgressObserver {
+            parser: Mutex::new(FastbootProgressParser::new(total)),
+            sink,
+            context: Arc::new(Mutex::new(FastbootProgressContext {
+                partition_name: "system".to_string(),
+                total_bytes: total,
+                partition_index: 1,
+                partition_total: 1,
+            })),
+        };
+
+        observer
+            .observe(ProcessObservation::Output {
+                stream: nwflash_windows::process::ProcessOutputStream::Stdout,
+                sequence: 0,
+                bytes: b"Sending 'system' (131072 KB)...\nsystem: 32768 KB/131072 KB\n",
+            })
+            .expect("output observation must be accepted");
+
+        // 用户取消：进程被终止，退出码不是 0。
+        observer
+            .observe(ProcessObservation::Finished(
+                nwflash_windows::process::ProcessFinishMetadata {
+                    exit_code: None,
+                    termination:
+                        nwflash_windows::process::ProcessTermination::TerminationUnconfirmed,
+                    process_tree_termination_requested: true,
+                },
+            ))
+            .expect("finish observation must be accepted");
+
+        let last = *reported.lock().unwrap().last().unwrap();
+        assert!(
+            last < total,
+            "被取消的刷写绝不能补满到 100%：{last} vs {total}"
         );
     }
 
