@@ -59,8 +59,6 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "auth_logout",
     "auth_validate_token",
     "device_refresh",
-    "device_identity_refresh",
-    "driver_status",
     "files_list",
     "files_download",
     "firmware_inspect_local",
@@ -208,6 +206,35 @@ fn the_write_and_read_only_lists_cover_every_declared_command() {
     assert!(
         unclassified.is_empty(),
         "以下命令既未列为写类也未列为只读，必须显式分类: {unclassified:?}"
+    );
+}
+
+/// 清单里**不能有幽灵条目**：列进去的命令名必须真的出现在源码里。
+///
+/// 这两个清单是安全契约的一部分，但此前只做了「源码 -> 清单」方向的一致性检查
+/// （每个已声明命令都被分类）。反方向没有查：`device_identity_refresh` 与
+/// `driver_status` 早已被改名/吸收，却一直留在只读清单里。
+///
+/// 后果不是"多一行废话"，而是**静默豁免**：`every_write_command_calls_the_entry_guard`
+/// 只看「这个名字是否在 WRITE_COMMANDS 里」，而"是否已分类"又只看
+/// 「是否在任一清单里」。于是将来若真有人新增一个同名的写类命令，它会因为撞上
+/// 这条幽灵只读条目而被当成"已分类的只读命令"，两条断言都不会失败，入口守卫
+/// 就这样被绕过——正是这份契约要防的事。
+#[test]
+fn every_classified_command_actually_exists() {
+    let names: BTreeSet<String> = command_bodies().into_iter().map(|(name, _)| name).collect();
+    let ghosts: Vec<&str> = WRITE_COMMANDS
+        .iter()
+        .chain(READ_ONLY_COMMANDS.iter())
+        .copied()
+        .filter(|name| !names.contains(*name))
+        .collect();
+
+    assert!(
+        ghosts.is_empty(),
+        "以下命令名出现在分类清单里，但源码中并不存在（幽灵条目会造成守卫静默豁免）: \
+         {ghosts:?}\n\
+         改名/删除命令时请同步清理这两个清单。"
     );
 }
 
