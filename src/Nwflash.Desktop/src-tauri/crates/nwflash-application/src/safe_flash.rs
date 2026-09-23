@@ -1263,6 +1263,20 @@ struct FastbootProgressObserver {
 
 impl ProcessOutputObserver for FastbootProgressObserver {
     fn observe(&self, observation: ProcessObservation<'_>) -> Result<(), ProcessObserverError> {
+        // 命令结束：把最后一块**未报满的余量**补上。
+        //
+        // fastboot 的进度行是按「块」打印的，最后一块很可能只打了
+        // `Writing 'X'...` 或是直接以 `OKAY` 收尾，于是解析器手里的累计字节数
+        // 会停在这一块的中途（实测能停在 ~60%）。这样直到 `Finished.` 才补齐，
+        // 而有些版本/重定向下根本没有 `Finished.` 行，进度条就永远停在半途。
+        // `finish()` 不臆造进度：失败时返回 `None`，成功时只补到本地镜像长度。
+        if let ProcessObservation::Finished(_) = observation {
+            let remainder = self.parser.lock().ok().and_then(|parser| parser.finish());
+            if let Some(written_bytes) = remainder {
+                self.report(written_bytes);
+            }
+            return Ok(());
+        }
         let ProcessObservation::Output { bytes, .. } = observation else {
             return Ok(());
         };
@@ -1413,7 +1427,11 @@ impl FastbootProgressParser {
         }
     }
 
-    /// 结束时应当上报的最终字节数（命令成功时补满）。
+    /// 命令结束时应当上报的最终字节数：成功时把最后一块的余量补满，
+    /// 失败时返回 `None`（绝不臆造进度）。
+    ///
+    /// 由 [`FastbootProgressObserver`] 在 `ProcessObservation::Finished` 上调用；
+    /// 这是「最后一块没有被 `Writing` / `Finished.` 行报满」时的唯一收口。
     pub fn finish(&self) -> Option<u64> {
         if self.failed {
             return None;
@@ -3102,6 +3120,71 @@ mod fastboot_progress_tests {
         assert_eq!(failed.observe_line("Writing 'vendor_boot'..."), None);
         assert_eq!(failed.observe_line("Finished. Total time: 1.0s"), None);
         assert_eq!(failed.finish(), None);
+    }
+
+    #[test]
+    fn observer_fills_the_last_chunk_remainder_when_the_command_finishes() {
+        // 回归：fastboot 的进度行按「块」打印，最后一块常常只打 `Writing 'X'...`
+        // 或直接以 `OKAY` 收尾，解析器手里的累计字节数会停在这一块的中途。
+        // `FastbootProgressParser::finish()` 本来是唯一的收口，但**生产路径从没
+        // 调用过它**（只有测试调），于是「当前分区」进度条在命令成功返回后仍停在
+        // 半途。这条用例驱动真实的 observer，要求 Finished 事件把余量补满。
+        let total = 128 * MIB;
+        let reported = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let collected = Arc::clone(&reported);
+        let sink: Arc<SafeFlashPartitionProgressSink> = Arc::new(move |progress| {
+            collected.lock().unwrap().push(progress.written_bytes);
+        });
+        let observer = FastbootProgressObserver {
+            parser: Mutex::new(FastbootProgressParser::new(total)),
+            sink,
+            context: Arc::new(Mutex::new(FastbootProgressContext {
+                partition_name: "system".to_string(),
+                total_bytes: total,
+                partition_index: 1,
+                partition_total: 1,
+            })),
+        };
+
+        // 第一块传完 64MiB，第二块只开了一半就结束（没有 Writing / Finished 行）。
+        let first = b"Sending sparse 'system' (65536 KB)...\nsystem: 65536 KB/65536 KB\n";
+        observer
+            .observe(ProcessObservation::Output {
+                stream: nwflash_windows::process::ProcessOutputStream::Stdout,
+                sequence: 0,
+                bytes: first,
+            })
+            .expect("output observation must be accepted");
+        let second = b"Sending sparse 'system' (65536 KB)...\nsystem: 32768 KB/65536 KB\n";
+        observer
+            .observe(ProcessObservation::Output {
+                stream: nwflash_windows::process::ProcessOutputStream::Stdout,
+                sequence: 1,
+                bytes: second,
+            })
+            .expect("output observation must be accepted");
+
+        let before_finish = *reported.lock().unwrap().last().unwrap();
+        assert!(
+            before_finish < total,
+            "第二块只传了一半，收尾前不该报满：{before_finish} vs {total}"
+        );
+
+        observer
+            .observe(ProcessObservation::Finished(
+                nwflash_windows::process::ProcessFinishMetadata {
+                    exit_code: Some(0),
+                    termination: nwflash_windows::process::ProcessTermination::Completed,
+                    process_tree_termination_requested: false,
+                },
+            ))
+            .expect("finish observation must be accepted");
+
+        assert_eq!(
+            *reported.lock().unwrap().last().unwrap(),
+            total,
+            "命令结束时必须把最后一块的余量补满"
+        );
     }
 
     #[test]
