@@ -41,27 +41,42 @@ impl WriteCommandAdmission {
         state
             .protection
             .admit_write_command()
-            .map_err(local_protection_failure_message)?;
+            .map_err(|failure| local_protection_failure_message(state, failure))?;
         Ok(Self {
             token: session_token(state)?,
         })
     }
 }
 
-/// 把本地保护失败映射成面向用户的文案。
+/// 把本地保护失败映射成面向用户的文案，并**把具体原因写进本地操作日志**。
 ///
-/// `NotAuthenticated` 之外的分支都用同一句面向用户的提示，但**日志里**
-/// 仍然能通过 `LocalProtectionFailure` 的 Debug 区分具体原因——不把内部
-/// 判定细节告诉前端，避免它成为探测本地保护状态的探针。
+/// 面向用户只区分三类（未登录 / 租约过期 / 其它统一文案）：把内部判定细节
+/// 全盘回给前端，等于给攻击者一个探测本地保护状态的探针。
+///
+/// 但**日志必须记下具体原因**。早先的实现在这里只返回统一文案、且没有任何
+/// 地方打印 `LocalProtectionFailure` 的 Debug——于是注释承诺的"日志里仍能
+/// 区分具体原因"实际不成立：运维看到一排「本地保护状态未通过校验」，
+/// 无法分辨是构建身份不匹配、序列号不连续、进程 nonce 不符还是镜像完整性
+/// 失败，而这几种的处置方式完全不同（重新登录 / 重装 / 排查篡改）。
+/// 现在按同一原则补齐：用户看到的仍是统一文案，日志留下 `Debug` 原因。
 fn local_protection_failure_message(
+    state: &AppState,
     failure: crate::LocalProtectionFailure,
 ) -> String {
     use crate::LocalProtectionFailure as F;
-    match failure {
+    let user_message = match failure {
         F::NotAuthenticated => "未登录，无法执行写操作：请先完成登录。".to_string(),
         F::LeaseExpired => "登录状态已过期，请重新登录后再试。".to_string(),
         _ => "本地保护状态未通过校验，已拒绝本次写操作。".to_string(),
-    }
+    };
+    // 只写本地操作日志，未登录故不带 operation_id；这条不进服务端使用日志，
+    // 避免把本地保护状态外泄。
+    state.operation_log_store.write(
+        nwflash_domain::OperationLogLevel::Warning,
+        format!("本地保护校验失败（{failure:?}）：{user_message}"),
+        None,
+    );
+    user_message
 }
 
 /// 写类命令入口守卫：校验本地能力，失败即返回 `Err`。

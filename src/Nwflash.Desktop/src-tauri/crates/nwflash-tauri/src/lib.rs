@@ -294,6 +294,13 @@ struct ProtectionContext {
     clock_anchor: ClockRegressionAnchor,
     terminal_sink: Arc<dyn ProtectionTerminalSink>,
     allow_unavailable_probe: bool,
+    /// 本地保护被拒时把**具体原因**写进本地操作日志。
+    ///
+    /// 面向用户只给统一文案（避免前端成为探测保护状态的探针），但排障必须
+    /// 能区分「构建身份不匹配 / 序列号不连续 / 进程 nonce 不符 / 镜像完整性
+    /// 失败」——这几种处置方式完全不同。`None` 表示该上下文不接日志（测试
+    /// 与探针路径），此时行为与从前一致。
+    log_sink: Option<Arc<OperationLogStore>>,
 }
 
 impl ProtectionContext {
@@ -313,7 +320,26 @@ impl ProtectionContext {
             clock_anchor: ClockRegressionAnchor::default(),
             terminal_sink,
             allow_unavailable_probe,
+            log_sink: None,
         }
+    }
+
+    /// 接上本地操作日志，使保护拒绝的具体原因可排障。
+    fn with_log_sink(mut self, log_sink: Arc<OperationLogStore>) -> Self {
+        self.log_sink = Some(log_sink);
+        self
+    }
+
+    /// 记录一次保护拒绝的**具体原因**（用户侧仍只看到统一文案）。
+    fn record_denial(&self, operation: OperationKind, failure: LocalProtectionFailure) {
+        let Some(log_sink) = self.log_sink.as_ref() else {
+            return;
+        };
+        log_sink.write(
+            nwflash_domain::OperationLogLevel::Warning,
+            format!("本地保护校验失败（{failure:?}，操作 {operation:?}）"),
+            None,
+        );
     }
 
     fn verify_safe_point(
@@ -500,10 +526,18 @@ impl OperationPermissionGate for LocalProtectionGate {
         let authorization =
             match requires_high_risk_recheck(operation).then(|| self.context.admit_operation()) {
                 None | Some(Ok(())) => OperationAuthorization::allow(),
-                Some(Err(LocalProtectionFailure::NotAuthenticated)) => {
+                Some(Err(failure @ LocalProtectionFailure::NotAuthenticated)) => {
+                    // 这一支也要留原因：未登录是**最常见的**拒绝形态，若只记
+                    // 「未登录」而丢掉 LocalProtectionFailure，同样无法区分
+                    // 「租约未激活」与「租约已失效」。
+                    self.context.record_denial(operation, failure);
                     OperationAuthorization::deny("未登录，无法执行受控操作。")
                 }
-                Some(Err(_)) => {
+                Some(Err(failure)) => {
+                    // 用户只看到统一文案，但日志留下具体原因（实测线上 129 条
+                    // 拒绝记录全无 operation_id，无法分辨是构建身份、序列号、
+                    // nonce 还是镜像完整性失败）。
+                    self.context.record_denial(operation, failure);
                     OperationAuthorization::deny("本地保护状态未通过校验，已拒绝本次操作。")
                 }
             };
@@ -846,15 +880,19 @@ impl AppState {
                 supervisor: supervisor_slot.clone(),
             })
         });
-        let protection = Arc::new(ProtectionContext::new(
-            process_identity.clone(),
-            session_capabilities.clone(),
-            protection_dependencies.probe,
-            protection_dependencies.clock,
-            terminal_sink,
-            protection_dependencies.allow_unavailable_probe,
-        ));
+        // 日志存储先建：保护上下文要把保护拒绝的**具体原因**写进它。
         let operation_log_store = Arc::new(OperationLogStore::with_default_path(500));
+        let protection = Arc::new(
+            ProtectionContext::new(
+                process_identity.clone(),
+                session_capabilities.clone(),
+                protection_dependencies.probe,
+                protection_dependencies.clock,
+                terminal_sink,
+                protection_dependencies.allow_unavailable_probe,
+            )
+            .with_log_sink(operation_log_store.clone()),
+        );
         operation_log_store.start_new_session();
         let operation_log_buffer = Arc::new(OperationLogBuffer {
             entries: operation_log_store.clone(),
@@ -1337,7 +1375,7 @@ mod protection_context_tests {
         OperationPermissionGate,
     };
     use nwflash_domain::{DomainError, OperationKind};
-    use nwflash_infrastructure::{CloudflareClient, ProcessIdentity};
+    use nwflash_infrastructure::{CloudflareClient, OperationLogStore, ProcessIdentity};
     use nwflash_protection::{
         accept_signed_login_lease, IntegrityProbe, IntegritySignals, LeaseBinding, LeaseClaims,
         LeaseKind, SessionLease, SignedEnvelope, TokenDigest,
@@ -1694,6 +1732,66 @@ mod protection_context_tests {
            anchor.observe(1_799_992_900),
             Err(1_800_000_200)
         );
+    }
+
+    #[tokio::test]
+    async fn denying_a_high_risk_operation_logs_the_specific_protection_failure() {
+        // 回归：面向用户只给统一文案（不给攻击者探针），但**日志必须留下
+        // 具体原因**——否则运维看到的一排「本地保护状态未通过校验」无法区分
+        // 构建身份不匹配 / 序列号不连续 / 进程 nonce 不符 / 镜像完整性失败，
+        // 而这几种的处置方式完全不同。实测线上 129 条拒绝记录全无 operation_id
+        // 也全无原因，正属此列。
+        let scope = Arc::new(SessionCapabilityScope::new());
+        // 未激活任何会话 => admit_local 返回 Inactive => StaleCapability 之外的
+        // 通用失败，足以触发「具体原因」这条路径。
+        let probe = Arc::new(CountingProbe::valid());
+        let sink = Arc::new(RecordingTerminalSink::default());
+        let clock = Arc::new(MutableClock::new(NOW));
+        let log_path = std::env::temp_dir().join(format!(
+            "nwflash-protection-denial-log-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log_path);
+        let log_store = Arc::new(OperationLogStore::new(Some(log_path.clone()), 50));
+        let context = Arc::new(
+            ProtectionContext::new(
+                ProcessIdentity::new_injected("debug-build", "process-nonce").unwrap(),
+                scope,
+                probe,
+                clock,
+                sink,
+                false,
+            )
+            .with_log_sink(log_store.clone()),
+        );
+        let gate = Arc::new(CompositeOperationPermissionGate::new(
+            Arc::new(LocalProtectionGate::new(context)),
+            Arc::new(RecordingRemoteGate::default()),
+        ));
+        let coordinator = OperationCoordinator::new(None, Some(gate), None, None, None);
+
+        let _ = coordinator
+            .run_async(OperationKind::Installing, "高危操作", |_, _| async { Ok(()) })
+            .await;
+
+        let logged = log_store
+            .snapshot()
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
+        assert!(
+            logged
+                .iter()
+                .any(|message| message.starts_with("本地保护校验失败（")),
+            "必须把保护拒绝的具体原因写进日志：{logged:?}"
+        );
+        // 具体原因要带上 LocalProtectionFailure 的 Debug 名。未激活任何会话时
+        // `admit_local` 返回 Inactive，映射为 NotAuthenticated。
+        assert!(
+            logged.iter().any(|message| message.contains("NotAuthenticated")),
+            "日志要能区分具体失败类型：{logged:?}"
+        );
+        let _ = std::fs::remove_file(log_path);
     }
 
     #[tokio::test]
