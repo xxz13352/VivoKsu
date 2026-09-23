@@ -16,6 +16,74 @@ use nwflash_domain::{DomainError, OperationKind, PartitionTaskState, UsageLogEnt
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[tokio::test]
+async fn reporting_the_title_as_the_first_stage_does_not_log_twice() {
+    // 回归：操作协调器在派发前已用**标题**写过一条日志并把快照 stage 设为它。
+    // 操作体开头再 `report_stage(<同一文案>)` 会产出同一秒、同一 operation_id、
+    // 同一文案的第二条记录——实测真实日志里有 111 条这类真重复。
+    let logger = TestLogger::default();
+    let coordinator =
+        OperationCoordinator::new(None, None, None, Some(Arc::new(logger.clone())), None);
+
+    let _ = coordinator
+        .run_async(
+            OperationKind::Rebooting,
+            "重启到系统",
+            |context, _| async move {
+                context.report_stage("重启到系统");
+                Ok(())
+            },
+        )
+        .await;
+
+    let entries = logger.entries();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.as_str() == "重启到系统")
+            .count(),
+        1,
+        "与标题相同的首条 stage 不得重复落日志：{entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn distinct_stages_are_still_all_logged() {
+    // 对照组：不同阶段必须照常逐条记录，不能被上面的规则吞掉。
+    let logger = TestLogger::default();
+    let coordinator =
+        OperationCoordinator::new(None, None, None, Some(Arc::new(logger.clone())), None);
+
+    let _ = coordinator
+        .run_async(OperationKind::Flashing, "线刷", |context, _| async move {
+            context.report_stage("正在重启设备");
+            context.report_stage("正在等待 fastbootd");
+            // 与标题不同，所以这第一条「正在刷写」必须落盘；
+            // 第二条是相邻重复，但中间隔着别的 stage，仍应各自记录。
+            context.report_stage("正在刷写");
+            context.report_stage("正在等待 fastbootd");
+            Ok(())
+        })
+        .await;
+
+    let entries = logger.entries();
+    for expected in ["线刷", "正在重启设备", "正在等待 fastbootd", "正在刷写"] {
+        assert!(
+            entries.iter().any(|entry| entry.as_str() == expected),
+            "阶段 {expected:?} 必须被记录：{entries:?}"
+        );
+    }
+    // 「正在等待 fastbootd」出现两次（被「正在刷写」隔开），两次都要保留。
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.as_str() == "正在等待 fastbootd")
+            .count(),
+        2,
+        "被其他 stage 隔开的同一文案必须保留：{entries:?}"
+    );
+}
+
 #[derive(Clone, Default)]
 struct Recorder {
     logs: Arc<std::sync::Mutex<Vec<String>>>,

@@ -477,16 +477,50 @@ pub struct OperationContext {
     operation_id: String,
     state: Arc<OperationCoordinatorState>,
     admission: Arc<AdmissionGate>,
+    /// 本操作**最近一条已写进日志**的 stage 文案。
+    ///
+    /// 用来压制「操作体开头重复上报标题」这类真重复（协调器派发前已用标题落过
+    /// 一条日志）。共享同一个 `Arc`，因此 clone 出去的 context 视图一致。
+    last_logged_stage: Arc<StdMutex<Option<String>>>,
 }
 
 impl OperationContext {
+    /// 推进阶段文案（界面 + 本地操作日志）。
+    ///
+    /// 开场那一条由操作协调器落盘：`run_with_permit` 在派发前已经用**标题**
+    /// 写过一条日志、并把快照 stage 设为同一个标题。因此操作体开头再写
+    /// `report_stage(<与标题相同的文案>)` 会产出**同一秒、同一 operation_id、
+    /// 同一文案的第二条记录**——实测日志里这类真重复有 111 条
+    /// （「重启到系统」「启动 ADB 投屏」「正在读取设备目录」等）。
+    ///
+    /// 这里对「与当前 stage 相同」的上报只更新快照、**不再写日志**：文案没有
+    /// 变化时，第二条日志不携带任何新信息。注意必须比较**当前快照 stage**
+    /// 而不是无条件去重——不同阶段之间的合法重复（例如两次 `正在刷写`）中间
+    /// 必然夹着别的 stage，不会被吞掉。
     pub fn report_stage(&self, stage: impl Into<String>) {
         let stage = stage.into();
-        self.state.log(
-            OperationLogLevel::Info,
-            stage.clone(),
-            Some(self.operation_id.clone()),
-        );
+        // 与**本操作已经落过日志的最近一条 stage** 相同时不再写日志。
+        // 不能读快照来判断：`set_running` 走的是异步 spawn 写入，操作体开始时
+        // 快照可能还没落地（实测就是如此）。因此由 context 自己记住最近一次
+        // 已落盘的 stage。
+        //
+        // 只比「最近一条」而不是全局去重：合法重复（例如两次 `正在刷写`）中间
+        // 必然夹着别的 stage，不会被吞掉。
+        let unchanged = self
+            .last_logged_stage
+            .lock()
+            .map(|last| last.as_deref() == Some(stage.as_str()))
+            .unwrap_or(false);
+        if !unchanged {
+            self.state.log(
+                OperationLogLevel::Info,
+                stage.clone(),
+                Some(self.operation_id.clone()),
+            );
+            if let Ok(mut last) = self.last_logged_stage.lock() {
+                *last = Some(stage.clone());
+            }
+        }
         self.state.report(StageUpdate {
             stage: Some(stage),
             kind: None,
@@ -981,6 +1015,9 @@ impl OperationCoordinator {
             operation_id: operation_id.clone(),
             state: self.state.clone(),
             admission: self.admission.clone(),
+            // 协调器刚用标题落过日志，因此初始值就是标题：操作体开头再
+            // `report_stage(<同一文案>)` 不会产生第二条。
+            last_logged_stage: Arc::new(StdMutex::new(Some(title.clone()))),
         };
 
         let outcome = operation(context, cancellation.clone()).await;
