@@ -137,9 +137,16 @@ fn fastboot_output_reports_failure(output: &ProcessOutput) -> Option<String> {
         .map(str::trim)
         .find(|line| {
             let line = line.strip_prefix("(bootloader)").unwrap_or(line).trim();
+            // 与 `command_detail.rs::output_reports_failure` 对齐：那里把 `error:`
+            // 也列为 fastboot 的失败形态（其文档明确写了 `FAILED (...)`、
+            // `ERROR ...`、`error:`、`remote error` 四种）。这里此前只看 `FAILED`
+            // / `ERROR` 前缀与大写 `REMOTE ERROR`，于是 `fastboot: error: cannot
+            // generate image` 这种**退出码 0** 的协议失败会被漏掉，接着往下刷下
+            // 一个分区——正是这段扫描要防的"半刷状态机"。
             (line.starts_with("FAILED")
                 || line.starts_with("ERROR")
-                || line.to_ascii_uppercase().contains("REMOTE ERROR"))
+                || line.to_ascii_uppercase().contains("REMOTE ERROR")
+                || line.to_ascii_uppercase().contains("ERROR:"))
                 && !line.is_empty()
         })
         .map(str::to_string)?;
@@ -2098,6 +2105,30 @@ mod tests {
             stderr: "Finished. Total data: 4 bytes".to_string(),
         };
         assert!(fastboot_output_reports_failure(&output).is_none());
+    }
+    #[test]
+    fn fastboot_lowercase_error_line_is_detected_even_with_zero_exit_code() {
+        // 回归：`command_detail.rs::output_reports_failure` 的文档把 `error:` 列为
+        // 失败形态之一，但**决策**路径（本函数与 safe_flash 的同名函数）此前只看
+        // `FAILED` / `ERROR` 前缀和大写 `REMOTE ERROR`，于是 `fastboot: error: ...`
+        // 这种退出码 0 的协议失败会被漏掉，接着往下刷下一个分区。
+        let output = ProcessOutput {
+            exit_code: 0,
+            stdout: "Sending 'super' (4096 KB)...".to_string(),
+            stderr: "fastboot: error: cannot generate image for super".to_string(),
+        };
+        assert!(
+            fastboot_output_reports_failure(&output).is_some(),
+            "`error:` 形态的失败必须被识别，否则会半刷后继续刷下一分区"
+        );
+
+        // 大写变体同样要认。
+        let output = ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: "ERROR: usb_write failed".to_string(),
+        };
+        assert!(fastboot_output_reports_failure(&output).is_some());
     }
 
     #[test]

@@ -272,9 +272,16 @@ fn fastboot_output_reports_failure(output: &ProcessOutput) -> Option<String> {
         .map(str::trim)
         .find(|line| {
             let line = line.strip_prefix("(bootloader)").unwrap_or(line).trim();
+            // 与 `command_detail.rs::output_reports_failure` 对齐：那里把 `error:`
+            // 也列为 fastboot 的失败形态（其文档明确写了 `FAILED (...)`、
+            // `ERROR ...`、`error:`、`remote error` 四种）。这里此前只看 `FAILED`
+            // / `ERROR` 前缀与大写 `REMOTE ERROR`，于是 `fastboot: error: cannot
+            // generate image` 这种**退出码 0** 的协议失败会被漏掉，接着往下刷下
+            // 一个分区——正是这段扫描要防的"半刷状态机"。
             (line.starts_with("FAILED")
                 || line.starts_with("ERROR")
-                || line.to_ascii_uppercase().contains("REMOTE ERROR"))
+                || line.to_ascii_uppercase().contains("REMOTE ERROR")
+                || line.to_ascii_uppercase().contains("ERROR:"))
                 && !line.is_empty()
         })
         .map(str::to_string)?;
@@ -3337,6 +3344,46 @@ mod fastboot_progress_tests {
         );
     }
 
+    #[test]
+    fn protocol_failure_lines_are_detected_even_with_zero_exit_code() {
+        // 退出码 0 不等于成功：这些协议失败行必须被识别，否则会"半刷后继续刷
+        // 下一分区"。`error:` 形态此前只有 `command_detail.rs` 的留痕判定认，
+        // 本决策路径漏掉了。
+        let failing = |stdout: &str, stderr: &str| ProcessOutput {
+            exit_code: 0,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        };
+
+        for output in [
+            failing("OKAY", "FAILED (remote: 'write failed')"),
+            failing(
+                "Sending sparse... (bootloader) REMOTE ERROR: write failure",
+                "",
+            ),
+            failing(
+                "Sending 'super' (4096 KB)...",
+                "fastboot: error: cannot generate image",
+            ),
+            failing("", "ERROR: usb_write failed with status e00002be"),
+        ] {
+            assert!(
+                fastboot_output_reports_failure(&output).is_some(),
+                "协议失败行必须被识别：{output:?}"
+            );
+        }
+
+        // 良性输出不得误报。
+        for output in [
+            failing("OKAY           [  0.005s]", ""),
+            failing("Sending 'boot' (4096 KB)...", "Finished. Total time: 1.0s"),
+        ] {
+            assert!(
+                fastboot_output_reports_failure(&output).is_none(),
+                "良性输出不得误报：{output:?}"
+            );
+        }
+    }
     #[test]
     fn unrecognised_lines_produce_no_progress() {
         let mut parser = FastbootProgressParser::new(4 * MIB);
