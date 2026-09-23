@@ -51,7 +51,18 @@ let host: HTMLDivElement;
 let root: Unmount;
 
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
-const waitUntil = async (predicate: () => boolean, timeoutMs = 1000) => {
+/// 轮询等待某个界面条件成立。
+///
+/// 默认超时给到 5s：轮询步长是 `setTimeout(0)`，满足条件时立刻返回，所以把上限
+/// 调大**不会**拖慢正常用例；但**全量并行**跑时机器被 28 个测试文件占满，一次
+/// 「任务结束 -> 后端重读设备 -> 广播快照 -> React 渲染」的往返偶尔会超过原
+/// 1000ms，于是这条用例随机报 `timeout waiting for async state update`。
+/// 默认超时给到 15s：轮询步长是 `setTimeout(0)`，条件一满足就立刻返回，所以
+/// 把上限调大**不会**拖慢任何正常用例；但**全量并行**跑时机器被 28 个测试
+/// 文件占满，「任务结束 -> 后端重读设备 -> 广播快照 -> React 渲染」这类多跳
+/// 往返实测偶发超过 5s，于是用例随机报 `timeout waiting for async state
+/// update`。宁可给足预算，也不要留一条靠机器空闲才能过的用例。
+const waitUntil = async (predicate: () => boolean, timeoutMs = 15_000) => {
   const startedAt = Date.now();
   while (!predicate() && Date.now() - startedAt < timeoutMs) {
     await flushPromises();
@@ -125,6 +136,7 @@ const renderApp = () => {
   });
 };
 
+
 describe('会话事件联动', () => {
   beforeEach(() => {
     host = document.createElement('div');
@@ -150,7 +162,10 @@ describe('会话事件联动', () => {
 
   test('会话强退事件会切换为未登录并清空顶部状态', async () => {
     renderApp();
-    await flushPromises();
+    // 等首屏真正渲染出登出按钮：单个 flushPromises 在并行跑时会抢跑。
+    await waitUntil(
+        () => host.querySelector('[data-role="logout-button"]') !== null,
+    );
 
     const logoutBefore = host.querySelector('[data-role="logout-button"]') as HTMLButtonElement;
     expect(logoutBefore).not.toBeNull();
@@ -186,7 +201,13 @@ describe('会话事件联动', () => {
         downloadUrl: 'https://example.com/nwflash-update',
       },
     });
-    await flushPromises();
+    // 事件派发是异步的，且登录按钮与「需要更新」弹窗分属**两次** React 提交：
+    // 只等登录按钮出现仍可能抢在弹窗渲染之前，于是 `textContent` 断言随机失败。
+    // 这里同时等到弹窗（该用例断言的最终状态）就绪。
+    await waitUntil(() =>
+        host.querySelector('[aria-label="点击登录"]') !== null
+            && host.querySelector('[role="dialog"][aria-label="奶蛙Flash 需要更新"]') !== null,
+    );
 
     const loginButton = host.querySelector('[aria-label="点击登录"]') as HTMLButtonElement;
     expect(loginButton).not.toBeNull();
@@ -232,7 +253,10 @@ describe('会话事件联动', () => {
 
   test('点击退出会调用会话与认证退出命令', async () => {
     renderApp();
-    await flushPromises();
+    // 同「关闭窗口」那条：先等按钮真正渲染，避免并行跑时拿到 null。
+    await waitUntil(
+        () => host.querySelector('[data-role="logout-button"]') !== null,
+    );
 
     const logoutButton = host.querySelector('[data-role="logout-button"]') as HTMLButtonElement;
     expect(logoutButton).not.toBeNull();
@@ -267,7 +291,11 @@ describe('会话事件联动', () => {
 
   test('关闭已登录主窗口前停止会话并清理认证状态', async () => {
     renderApp();
-    await flushPromises();
+    // 必须等标题栏真正渲染出来再取按钮：只 await 一次 flushPromises 在全量并行
+    // 跑时偶尔会拿到 null，`.click()` 于是抛错（这条用例随机失败的根因）。
+    await waitUntil(
+        () => host.querySelector('.nw-titlebar-controls [aria-label="关闭"]') !== null,
+    );
 
     (host.querySelector('.nw-titlebar-controls [aria-label="关闭"]') as HTMLButtonElement).click();
 
@@ -297,7 +325,13 @@ describe('会话事件联动', () => {
         isBusy: true,
       },
     });
-    await flushPromises();
+    // 事件派发是异步的：固定的单次 flushPromises 偶尔抢在 React 渲染之前断言，
+    // 导致这条用例随机报「无进行中的操作」。改用轮询等待真正渲染完成。
+    await waitUntil(() =>
+        (host.querySelector('[data-role="operation-progress"]')?.textContent ?? '').includes(
+            '快速刷写',
+        ),
+    );
 
     const progress = host.querySelector('[data-role="operation-progress"]') as HTMLParagraphElement;
     expect(progress).not.toBeNull();

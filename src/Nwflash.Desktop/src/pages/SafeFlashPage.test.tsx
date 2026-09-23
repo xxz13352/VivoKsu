@@ -10,6 +10,26 @@ let host: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 const wait = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/// 轮询等待某个界面条件成立，超时抛错。
+///
+/// 本文件多处原先只 `await wait()`（一个宏任务）就立刻操作弹窗。**全量并行**
+/// 跑时机器被 28 个测试文件占满，一次「invoke 解析 -> 状态更新 -> React 渲染
+/// 弹窗」的往返偶尔会超过一个宏任务，于是 `querySelectorAll('[role="dialog"]
+/// button')` 拿到空集、`.find(...)` 返回 undefined，`.click()` 静默不生效，
+/// 后续断言随即失败（这几条用例随机报红的共同根因）。
+///
+/// 默认超时 15s：满足条件即立刻返回，所以把上限调大不会拖慢正常用例，
+/// 只是不再让「机器忙」把用例判死。
+const waitUntil = async (predicate: () => boolean, timeoutMs = 15_000) => {
+  const started = Date.now();
+  while (!predicate() && Date.now() - started < timeoutMs) {
+    await wait();
+  }
+  if (!predicate()) {
+    throw new Error('timeout waiting for the UI to reach the expected state');
+  }
+};
+
 describe('SafeFlashPage', () => {
   beforeEach(() => { host = document.createElement('div'); document.body.appendChild(host); root = createRoot(host); });
   afterEach(() => { flushSync(() => root.unmount()); host.remove(); vi.clearAllMocks(); });
@@ -182,7 +202,7 @@ describe('SafeFlashPage', () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: 'safe-1', source_label: '在线固件', partition_count: 3, safe_partition_count: 2, requires_confirmation: true });
     flushSync(() => root.render(<SafeFlashPage />));
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    await waitUntil(() => host.querySelector('[role="dialog"]') !== null);
     expect(invoke).toHaveBeenCalledWith('safe_flash_prepare_online', { options: { is_safe_flash: true, is_keep_root: false, wipe_data: false, slot_mode: 'CurrentSlot' } });
     expect(host.textContent).not.toContain('https://');
     expect(host.textContent).not.toContain('fastboot.exe');
@@ -197,7 +217,13 @@ describe('SafeFlashPage', () => {
     flushSync(() => root.render(<SafeFlashPage />));
 
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    // 这条用例的 invoke 是**永不 resolve** 的 promise，弹窗不会出现；
+    // 真正被观测的是「准备期间选项被锁定」，等这个状态。
+    await waitUntil(
+        () =>
+            (host.querySelector('.nw-test-safe-source-mode') as HTMLSelectElement | null)
+                ?.disabled === true,
+    );
 
     expect((host.querySelector('.nw-test-safe-source-mode') as HTMLSelectElement).disabled).toBe(true);
     expect((host.querySelector('input[type="checkbox"]') as HTMLInputElement).disabled).toBe(true);
@@ -233,7 +259,7 @@ describe('SafeFlashPage', () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 'safe-1', source_label: '在线固件', partition_count: 2, safe_partition_count: 2, requires_confirmation: true }).mockResolvedValueOnce({ flashed_partition_count: 2, skipped_partition_count: 0, status: '已刷入 2 个分区' });
     flushSync(() => root.render(<SafeFlashPage />));
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    await waitUntil(() => host.querySelector('[role="dialog"]') !== null);
     Array.from(host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
       .find((button) => button.textContent === '确认刷写')?.click();
     await wait();
@@ -248,7 +274,7 @@ describe('SafeFlashPage', () => {
     invokeMock.mockImplementationOnce(() => new Promise<void>((resolve) => { resolveExecution = resolve; }));
     flushSync(() => root.render(<SafeFlashPage />));
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    await waitUntil(() => host.querySelector('[role="dialog"]') !== null);
 
     Array.from(host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
       .find((button) => button.textContent === '确认刷写')?.click();
@@ -269,7 +295,7 @@ describe('SafeFlashPage', () => {
       .mockResolvedValueOnce(undefined);
     flushSync(() => root.render(<SafeFlashPage />));
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    await waitUntil(() => host.querySelector('[role="dialog"]') !== null);
     Array.from(host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
       .find((button) => button.textContent === '确认刷写')?.click();
     await wait();
@@ -291,7 +317,7 @@ describe('SafeFlashPage', () => {
       .mockRejectedValueOnce(new Error('当前会话已失效，请重新完成线刷预检。'));
     flushSync(() => root.render(<SafeFlashPage />));
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    await waitUntil(() => host.querySelector('[role="dialog"]') !== null);
 
     Array.from(host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'))
       .find((button) => button.textContent === '取消')?.click();
@@ -308,7 +334,7 @@ describe('SafeFlashPage', () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ session_id: 'safe-1', source_label: '在线固件', partition_count: 2, safe_partition_count: 2, requires_confirmation: true }).mockResolvedValueOnce(undefined);
     flushSync(() => root.render(<SafeFlashPage />));
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    await waitUntil(() => host.querySelector('[role="dialog"]') !== null);
     expect((host.querySelector('.nw-test-safe-source-mode') as HTMLSelectElement).disabled).toBe(true);
     expect((host.querySelector('input[type="checkbox"]') as HTMLInputElement).disabled).toBe(true);
     const cancelButton = Array.from(host.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).find((button) => button.textContent === '取消');
@@ -322,7 +348,7 @@ describe('SafeFlashPage', () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: 'safe-block', source_label: '在线固件', partition_count: 2, safe_partition_count: 2, has_block_based_content: true, requires_confirmation: true });
     flushSync(() => root.render(<SafeFlashPage />));
     (host.querySelector('.nw-test-safe-flash-form') as HTMLFormElement).requestSubmit();
-    await wait();
+    await waitUntil(() => host.querySelector('[role="dialog"]') !== null);
     expect(host.querySelector('[role="dialog"]')?.textContent).toContain('这些分区将保持原样');
   });
 
