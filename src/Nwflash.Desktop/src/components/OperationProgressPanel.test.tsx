@@ -96,27 +96,59 @@ describe('OperationProgressPanel', () => {
     expect((bars[1].querySelector('span') as HTMLElement).style.width).toBe('68%');
   });
 
-  test('分区运行中进度为零时当前分区条显示流动动画', () => {
+  test('仿真刷写从 0% 起步时当前分区条是确定态，不波动', () => {
+    // 回归：假刷写的进度是从 0 平滑涨到 100 的**真实**进度。旧实现用
+    // `overall_progress > 0` 当“有没有刻度”的判据，于是起步的 0% 被误判成“没刻度”。
     renderPanel(
       [{ kind: 'safeFlash', message: '正在写入分区' }],
       {
         kind: 'Flashing',
-        operationId: 'op-2',
+        operationId: 'op-2b',
         title: 'VIVO 线刷',
-        stage: '正在写入 boot',
+        stage: '刷写分区[1/38]',
         progress: 0,
         startedAt: 1,
         isCancellable: true,
-        partitionTask: partitionTask('boot', 'Running', 0),
-        partitionTasks: [partitionTask('boot', 'Running', 0)],
+        partitionTask: partitionTask('system', 'Running', 0),
+        partitionTasks: [partitionTask('system', 'Running', 0)],
         isBusy: true,
       },
     );
 
     const bars = [...host.querySelectorAll('.nw-progress-bar')];
     expect(bars).toHaveLength(2);
+    // 有刻度（Running）→ 确定态，0% 如实显示，不波动。
+    expect(bars[0].classList.contains('is-indeterminate')).toBe(false);
+    expect(bars[0].getAttribute('aria-valuenow')).toBe('0');
+    expect((bars[0].querySelector('span') as HTMLElement).style.width).toBe('0%');
+    const rows = [...host.querySelectorAll('.nw-progress-row')];
+    expect(rows[0].textContent).toContain('0%');
+  });
+
+  test('分区按 Waiting 上报（0%）时当前分区条才波动', () => {
+    // Waiting = 后端拿不到本分区刻度，这才该左右波动。
+    renderPanel(
+      [{ kind: 'safeFlash', message: '正在写入分区' }],
+      {
+        kind: 'Flashing',
+        operationId: 'op-2c',
+        title: 'VIVO 线刷',
+        stage: '刷写分区[4/38]',
+        progress: 0.07,
+        startedAt: 1,
+        isCancellable: true,
+        partitionTask: partitionTask('system', 'Waiting', 0),
+        partitionTasks: [partitionTask('system', 'Waiting', 0)],
+        isBusy: true,
+      },
+    );
+
+    const bars = [...host.querySelectorAll('.nw-progress-bar')];
     expect(bars[0].classList.contains('is-indeterminate')).toBe(true);
+    expect(bars[0].hasAttribute('aria-valuenow')).toBe(false);
     expect((bars[0].querySelector('span') as HTMLElement).style.width).toBe('');
+    // 没刻度时不能编一个 0% 出来，只能显示 `--`。
+    expect([...host.querySelectorAll('.nw-progress-row')][0].textContent).toContain('--');
   });
 
   test('无分区任务但有进度值时显示单条总进度条', () => {

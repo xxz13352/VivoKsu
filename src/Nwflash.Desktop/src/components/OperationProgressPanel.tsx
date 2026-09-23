@@ -27,6 +27,10 @@ const resolveOverallProgress = (
   return null;
 };
 
+/// 判「有没有刻度」只认 null：后端报 progress 为 null = 这一步算不出百分比，
+/// 才该左右波动。0 是一个真实百分比（真进度起步就是 0%），别拿 > 0 当判据。
+const hasScale = (value: number | null): value is number => value !== null;
+
 type OperationProgressPanelProps = {
   operations: ReadonlyArray<BusyOperationItem>;
   operationSnapshot?: OperationSnapshotPayload | null;
@@ -41,8 +45,11 @@ export const OperationProgressPanel: FC<OperationProgressPanelProps> = ({
   const partitionTask = operationSnapshot?.partitionTask ?? null;
   const overallProgress = resolveOverallProgress(operationSnapshot);
   const currentProgress = partitionTask ? clampProgress(partitionTask.overall_progress) : null;
-  const currentIndeterminate =
-    partitionTask !== null && partitionTask.state === 'Running' && partitionTask.overall_progress <= 0;
+  /// 「当前分区」条有没有刻度，由后端 state 决定：Running 表示后端能算出百分比
+  ///（真刷写和假刷写都是，且真进度起步本来就可能是 0%），Waiting 才是「拿不到
+  /// 刻度，该左右波动」。不要用 overall_progress>0 当判据——那会把 0% 起步的
+  /// 真实进度误判成没刻度，整个刷写过程都在波动。判据与 SafeFlashPage 对齐。
+  const currentDeterminate = partitionTask !== null && partitionTask.state === 'Running';
 
   return (
     <section className="nw-progress-panel" data-role="operation-progress">
@@ -54,19 +61,21 @@ export const OperationProgressPanel: FC<OperationProgressPanelProps> = ({
             <span className="nw-progress-label">当前分区</span>
             <span className="nw-progress-partition">{partitionTask.partition_name}</span>
             <span className="nw-progress-percent">
-              {currentProgress !== null && currentProgress > 0 ? formatPercent(currentProgress) : '--'}
+              {currentDeterminate ? formatPercent(currentProgress ?? 0) : '--'}
             </span>
           </div>
           <div
-            className={`nw-progress-bar${currentIndeterminate ? ' is-indeterminate' : ''}`}
+            className={`nw-progress-bar${currentDeterminate ? '' : ' is-indeterminate'}`}
             role="progressbar"
             aria-label="当前分区进度"
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={currentIndeterminate ? undefined : Math.round((currentProgress ?? 0) * 100)}
+            aria-valuenow={currentDeterminate ? Math.round((currentProgress ?? 0) * 100) : undefined}
           >
             <span
-              style={currentIndeterminate ? undefined : { width: `${Math.round((currentProgress ?? 0) * 100)}%` }}
+              style={
+                currentDeterminate ? { width: `${Math.round((currentProgress ?? 0) * 100)}%` } : undefined
+              }
             />
           </div>
           <div className="nw-progress-row">
@@ -87,7 +96,7 @@ export const OperationProgressPanel: FC<OperationProgressPanelProps> = ({
           </div>
         </>
       ) : null}
-      {!isIdle && !partitionTask && overallProgress !== null ? (
+      {!isIdle && !partitionTask && hasScale(overallProgress) ? (
         <>
           <div className="nw-progress-row">
             <span className="nw-progress-label">总进度</span>
@@ -105,7 +114,7 @@ export const OperationProgressPanel: FC<OperationProgressPanelProps> = ({
           </div>
         </>
       ) : null}
-      {!isIdle && !partitionTask && overallProgress === null ? (
+      {!isIdle && !partitionTask && !hasScale(overallProgress) ? (
         <div className="nw-progress-bar is-indeterminate" role="progressbar" aria-label="操作进行中">
           <span />
         </div>
