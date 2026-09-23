@@ -266,6 +266,11 @@ impl RefreshGuard {
         fn extend<'a>(
             guard: tokio::sync::MutexGuard<'a, ()>,
         ) -> tokio::sync::MutexGuard<'static, ()> {
+            // SAFETY: `RefreshGuard` 把互斥锁的 `Arc` 与 guard **存在同一个结构体**
+            // 里，且字段声明顺序是 `_gate` 在前、`locked` 在后——Rust 按声明顺序
+            // drop 字段，因此 guard 必然先于 `Arc` 释放，延展成 `'static` 期间
+            // 互斥锁一定仍然存活，不会出现悬垂引用。`tokio::sync::MutexGuard`
+            // 是 Send 的，跨 `.await` 持有由调用方保证。
             unsafe { std::mem::transmute(guard) }
         }
         Some(Self {

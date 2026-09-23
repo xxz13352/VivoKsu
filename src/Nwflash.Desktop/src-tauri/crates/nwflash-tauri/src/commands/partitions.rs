@@ -389,6 +389,11 @@ fn replace_backup_file_atomically(partial_path: &Path, output_path: &Path) -> Re
         .collect();
 
     // Windows replaces the destination only after the source has been accepted.
+    //
+    // SAFETY: `MoveFileExW` 接收两个以 NUL 结尾的宽字符串指针。上面两条
+    // `encode_wide().chain(once(0))` 已经保证各自 `Vec<u16>` 以 0 结尾，
+    // 且 `as_ptr()` 指向的缓冲区在本调用期间由这两个 `Vec` 持有、不会移动。
+    // 第三个参数只传上面两个合法位标志。
     let moved = unsafe {
         MoveFileExW(
             existing.as_ptr(),
