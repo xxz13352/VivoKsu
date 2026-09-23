@@ -21,8 +21,40 @@ fn commands_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("commands")
 }
 
-/// 收集所有**真正下发刷写命令**的执行点：调用 `.execute(` 或
-/// `.execute_with_suspend_gate(` 的位置及其所属文件。
+/// 判定一行是否为**刷写执行入口**：`SafeFlashExecutionService` 上的 `.execute*`。
+///
+/// 两条真实写法都要认：
+///   - `execution_service.execute_with_partition_progress(`（接收端与方法名同行）
+///   - `.execute_with_suspend_gate(`（链式表达式，方法名单独成行）
+///
+/// **不写死具体方法名**——这正是原先的盲区：旧实现只精确匹配 `.execute(` 与
+/// `.execute_with_suspend_gate(` 两个字符串，于是 `safe_flash.rs` 里真实存在的
+/// `.execute_with_partition_progress(` 对它**完全不可见**（既不报"绕过闸门"，
+/// 也不报"未覆盖"）。将来再新增一个 `.execute_*` 入口且忘了接挂起闸门，
+/// 扫描器同样看不见，缺口静默通过。
+///
+/// 反过来，文件事务那一套（`self.execute_with_progress(..)`、
+/// `transaction.execute_with_progress(..)`）虽然同名，却属于**另一套执行器
+/// 抽象**、与反调试闸门无关，必须排除——否则会误报一片。
+fn is_flash_execution_call(trimmed: &str) -> bool {
+    // 先摘出 `.execute*` 的方法名（含紧跟在后面的 `(`）。
+    let Some(dot) = trimmed.find(".execute") else {
+        return false;
+    };
+    let rest = &trimmed[dot + 1..];
+    let name_end = rest.find('(').unwrap_or(rest.len());
+    let name = &rest[..name_end];
+    if name != "execute" && !name.starts_with("execute_") {
+        return false;
+    }
+    // 接收端：同行前缀；没有前缀时（链式写法）视为合格——那种写法只出现在
+    // `SafeFlashExecutionService` 的链上（`.with_executor(..).execute_*`）。
+    let receiver = trimmed[..dot].trim();
+    receiver.is_empty() || receiver == "execution_service"
+}
+
+/// 收集所有**真正下发刷写命令**的执行点：`SafeFlashExecutionService` 上以
+/// `execute` 开头的方法调用，及其所属文件与行号。
 fn execution_call_sites() -> Vec<(String, String, usize)> {
     let mut sites = Vec::new();
     let mut files: Vec<_> = fs::read_dir(commands_dir())
@@ -40,11 +72,15 @@ fn execution_call_sites() -> Vec<(String, String, usize)> {
             .unwrap_or_default()
             .to_string();
         let text = fs::read_to_string(&file).expect("command source must be readable");
-        for (index, line) in text.lines().enumerate() {
+        // 只扫**非测试**部分：测试模块里会有大量与本契约无关的同名调用。
+        //
+        // 边界取 `mod tests {` 而不是第一个 `#[cfg(test)]`：后者常出现在正文里
+        // 零散的测试专用小函数上（如 `#[cfg(test)] fn replace(..)`），可能比真实
+        // 刷写调用点还靠前，用它截断会把整个正文跳过、扫描器空转。
+        let production_end = text.find("mod tests {").unwrap_or(text.len());
+        for (index, line) in text[..production_end].lines().enumerate() {
             let trimmed = line.trim();
-            // 只看 SafeFlashExecutionService 的执行入口，忽略 file manager
-            // 等其它 `.execute(`（它们走的是不同的执行器抽象）。
-            if trimmed == ".execute(" || trimmed == ".execute_with_suspend_gate(" {
+            if is_flash_execution_call(trimmed) {
                 sites.push((name.clone(), trimmed.to_string(), index + 1));
             }
         }
@@ -55,9 +91,20 @@ fn execution_call_sites() -> Vec<(String, String, usize)> {
 #[test]
 fn every_safe_flash_execution_call_site_uses_the_suspend_gate() {
     let sites = execution_call_sites();
+    // 被认可的入口是**带挂起闸门参数**的那些。按 `SafeFlashExecutionService`
+    // 的实际签名，接 `is_suspended` 的正是：
+    //   - `execute_with_suspend_gate(...)`
+    //   - `execute_with_partition_progress(...)`（内部同样透传 `is_suspended`）
+    // 而 `execute(...)` / `execute_with_partition_failure_hook(...)` 没有这个参数，
+    // 走它们就绕过了闸门。这里只认名字，是因为签名无法从调用行直接读出来；
+    // 名字与"是否接闸门"的对应关系由 `safe_flash.rs` 的签名保证（见其文档）。
+    const GATED_ENTRIES: [&str; 2] = [
+        ".execute_with_suspend_gate(",
+        ".execute_with_partition_progress(",
+    ];
     let ungated: Vec<_> = sites
         .iter()
-        .filter(|(_, call, _)| call == ".execute(")
+        .filter(|(_, call, _)| !GATED_ENTRIES.iter().any(|entry| call.contains(entry)))
         .collect();
 
     assert!(
@@ -65,6 +112,26 @@ fn every_safe_flash_execution_call_site_uses_the_suspend_gate() {
         "以下刷写执行点绕过了反调试挂起闸门（调用了 `.execute(` 而不是 \
          `.execute_with_suspend_gate(`）：\n{ungated:#?}\n\
          这会制造\"某条刷写路径会挂起、另一条不会\"的静默缺口。"
+    );
+}
+
+/// 扫描器自检：真实源码里存在**多个** `execute*` 执行入口，扫描器必须都能看见。
+///
+/// 没有这条，"扫描器看不见任何东西"与"没有任何绕过"在测试结果上完全一样——
+/// 旧的精确字符串匹配就栽在这里（只看 1 个，漏掉了 partition-progress 那个）。
+#[test]
+fn the_scanner_sees_every_execute_entry_point() {
+    let sites = execution_call_sites();
+    assert!(
+        sites.len() >= 2,
+        "扫描器只找到 {} 个 execute* 入口：{sites:?}",
+        sites.len()
+    );
+    assert!(
+        sites
+            .iter()
+            .any(|(_, call, _)| call.contains(".execute_with_partition_progress(")),
+        "扫描器必须看得见 `.execute_with_partition_progress(`（旧实现的盲区）。"
     );
 }
 
