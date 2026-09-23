@@ -48,6 +48,38 @@ async fn reporting_the_title_as_the_first_stage_does_not_log_twice() {
 }
 
 #[tokio::test]
+async fn file_transfer_style_title_stage_does_not_duplicate_the_log() {
+    // 真实形态复刻：`files.rs` 的上传/下载把 `operation_title` 同时作为
+    // run_async 标题**和**操作体首条 stage 上报。实测这类真重复在日志里有
+    // 72 条（上传 44 + 下载 28），是剩余重复里占比最大的一类。
+    let logger = TestLogger::default();
+    let coordinator =
+        OperationCoordinator::new(None, None, None, Some(Arc::new(logger.clone())), None);
+
+    for title in ["上传设备文件", "下载设备文件"] {
+        let _ = coordinator
+            .run_async(OperationKind::Transferring, title, |context, _| async move {
+                context.report_stage(title);
+                context.report_stage("正在传输");
+                Ok(())
+            })
+            .await;
+
+        let entries = logger.entries();
+        assert_eq!(
+            entries.iter().filter(|entry| entry.as_str() == title).count(),
+            // 两次操作各留一条：标题那一条。
+            1,
+            "{title} 不得重复落日志：{entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| entry.as_str() == "正在传输"),
+            "后续不同 stage 必须照常记录：{entries:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn distinct_stages_are_still_all_logged() {
     // 对照组：不同阶段必须照常逐条记录，不能被上面的规则吞掉。
     let logger = TestLogger::default();
