@@ -1128,6 +1128,20 @@ impl SafeFlashExecutionService {
     {
         self.ensure_not_canceled(is_canceled)?;
         let total = simulated_flash::duration(bytes);
+        let total_ms = total.as_millis() as u64;
+        if total_ms == 0 {
+            // `duration` 是整型毫秒截断：小于约 36KB 的镜像会算出 **0ms**，
+            // 于是下面的等待循环一次都不执行、一个 tick 都不发，「当前分区」
+            // 进度条在这类镜像上根本不会动。这里如实上报整张镜像已写完——
+            // 按定义它就是"瞬间写完"。
+            report_tick(bytes);
+            self.ensure_not_canceled(is_canceled)?;
+            return Ok(ProcessOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
         let mut remaining = total;
         while !remaining.is_zero() {
             let slice = remaining.min(simulated_flash::SLICE);
@@ -1135,12 +1149,7 @@ impl SafeFlashExecutionService {
             remaining -= slice;
             // 假刷写的写入量是**精确**的：等待时长本就按 `字节数 ÷ 35MB/s`
             // 折算而来，因此按已等待比例还原字节数即可，不需要估算。
-            let written = if total.is_zero() {
-                bytes
-            } else {
-                bytes.saturating_mul((total - remaining).as_millis() as u64)
-                    / total.as_millis().max(1) as u64
-            };
+            let written = bytes.saturating_mul((total - remaining).as_millis() as u64) / total_ms;
             report_tick(written);
             self.ensure_not_canceled(is_canceled)?;
         }
@@ -3247,6 +3256,43 @@ mod fastboot_progress_tests {
         assert!(
             last < total,
             "被取消的刷写绝不能补满到 100%：{last} vs {total}"
+        );
+    }
+
+    struct UselessExecutor;
+
+    impl CancellableProcessExecutor for UselessExecutor {
+        fn run(
+            &self,
+            _spec: ProcessCommand,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<ProcessOutput, DomainError> {
+            Err(DomainError::Internal("假刷写不该执行进程".to_string()))
+        }
+    }
+
+    #[test]
+    fn a_tiny_simulated_partition_still_reports_progress() {
+        // 回归：`simulated_flash::duration` 是整型毫秒截断，小于约 36KB 的镜像算
+        // 出来是 0ms，等待循环一次都不执行，因此**一个 tick 都不发**，「当前分区」
+        // 进度条在这类分区上完全不动。旧实现把"total 为 0"的分支放在循环体里，
+        // 而循环体在 total==0 时根本不会执行——那是个可达性为零的假保护。
+        let ticks = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let collected = Arc::clone(&ticks);
+        let service = SafeFlashExecutionService::new(Arc::new(UselessExecutor));
+        let mut canceled = || false;
+
+        let out = service
+            .run_simulated_flash(4096, &mut canceled, move |written| {
+                collected.lock().unwrap().push(written);
+            })
+            .expect("假刷写应当成功返回");
+
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(
+            *ticks.lock().unwrap(),
+            vec![4096],
+            "0ms 的假刷写也必须上报一次整张镜像已写完"
         );
     }
 
