@@ -205,7 +205,10 @@ impl ApiTlsPolicy {
     }
 
     /// Explicit dependency-injected construction for local integration tests.
-    /// Production callers must use [`Self::production`].
+    ///
+    /// 生产路径走 `ApiTlsPolicy::production()`（`pub(crate)`，因此这里只写名字、
+    /// 不做 rustdoc 链接——链接到私有项会让 `cargo doc` 报错），
+    /// 线上入口则是 `CloudflareClient::new_default()`。
     #[cfg(debug_assertions)]
     pub fn injected_with_floor(
         base_url: impl AsRef<str>,

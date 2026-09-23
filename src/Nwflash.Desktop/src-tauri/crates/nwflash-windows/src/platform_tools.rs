@@ -163,8 +163,8 @@ fn is_verified_bundled_tools_cached(key: u64) -> Option<bool> {
 /// it is used, so replacing both a binary and its adjacent manifest cannot make
 /// the modified package appear trusted.
 ///
-/// Results are cached per process keyed by the directory fingerprint; see
-/// [`VERIFIED_BUNDLED_TOOLS`].
+/// Results are cached per process keyed by the directory fingerprint (the cache
+/// static itself is private, so it is named rather than linked).
 pub fn verify_bundled_platform_tools(root: &Path) -> Result<(), DomainError> {
     if let Some(key) = platform_tools_fingerprint(root) {
         if let Some(true) = is_verified_bundled_tools_cached(key) {

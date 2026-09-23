@@ -491,7 +491,7 @@ impl SafeFlashExecutionService {
     /// 不输出可用进度，因此这里**不依赖子进程输出**，改用两条真实信号合成：
     ///
     /// - 假刷写分区：按 `已等待时长 / 模拟总时长` 精确换算字节数（见
-    ///   [`simulated_flash::duration`]），进度与真机一致。
+    ///   `simulated_flash::duration`（私有模块，故不做 rustdoc 链接）），进度与真机一致。
     /// - 真实分区：按已耗时相对「该镜像在 35MB/s 下的参考耗时」估算写入量。
     ///   估算值只用于展示，**绝不影响**成功判定与取消语义；上限锁死在
     ///   镜像大小的 95%，命令真正返回后才补到 100%，避免进度条先跑满再等待。
@@ -1455,7 +1455,7 @@ impl FastbootProgressParser {
     /// 命令**成功**结束时应当上报的最终字节数：把最后一块没报满的余量补上，
     /// 失败时返回 `None`（绝不臆造进度）。
     ///
-    /// 由 [`FastbootProgressObserver`] 在 `ProcessObservation::Finished` 上调用，
+    /// 由 `FastbootProgressObserver`（私有类型）在 `ProcessObservation::Finished` 上调用，
     /// 这是「最后一块没有被 `Writing` / `Finished.` 行报满」时的唯一收口。
     ///
     /// 判「成功」必须看命令的真实结局，不能只看输出里有没有 `FAILED`：取消、
