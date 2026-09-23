@@ -1325,7 +1325,14 @@ impl FastbootProgressObserver {
         (self.sink)(SafeFlashPartitionProgress {
             partition_name: context.partition_name.clone(),
             total_bytes: context.total_bytes,
-            written_bytes: written_bytes.min(context.total_bytes.max(written_bytes)),
+            // 按分区总长封顶。原文案是
+            // `written_bytes.min(context.total_bytes.max(written_bytes))`，
+            // 那个 `.max(written_bytes)` 让内层恒 ≥ written_bytes、外层恒取
+            // written_bytes —— 整个表达式等价于**原样放行**，是个看着像封顶、
+            // 实际什么都没做的假保护。解析器的总量取自**本命令镜像**，而这里
+            // 的总量取自**分区镜像表**，两者不一致时（例如镜像被换过、或块数与
+            // 本地大小有出入）written 会越过 total，让下游拿到 >100% 的进度。
+            written_bytes: written_bytes.min(context.total_bytes),
             partition_index: context.partition_index,
             partition_total: context.partition_total,
         });
@@ -3293,6 +3300,40 @@ mod fastboot_progress_tests {
             *ticks.lock().unwrap(),
             vec![4096],
             "0ms 的假刷写也必须上报一次整张镜像已写完"
+        );
+    }
+
+    #[test]
+    fn observer_never_reports_more_than_the_partition_total() {
+        // 回归：`report()` 原本按
+        // `written_bytes.min(context.total_bytes.max(written_bytes))` 封顶，
+        // 而 `.max(written_bytes)` 让内层恒 >= written_bytes，外层于是恒取
+        // written_bytes —— 等价于原样放行。解析器的总量来自**本命令镜像**，
+        // 这里的总量来自**分区镜像表**，两者不一致时 written 会越过 total，
+        // 下游拿到 >100% 的进度。
+        let reported = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let collected = Arc::clone(&reported);
+        let sink: Arc<SafeFlashPartitionProgressSink> = Arc::new(move |progress| {
+            collected.lock().unwrap().push(progress.written_bytes);
+        });
+        // context 认为分区总长 100，但解析器被喂了 200 的镜像。
+        let observer = FastbootProgressObserver {
+            parser: Mutex::new(FastbootProgressParser::new(200)),
+            sink,
+            context: Arc::new(Mutex::new(FastbootProgressContext {
+                partition_name: "system".to_string(),
+                total_bytes: 100,
+                partition_index: 1,
+                partition_total: 1,
+            })),
+        };
+
+        observer.report(150);
+
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![100],
+            "上报值必须按分区总长封顶，绝不能放行 150"
         );
     }
 
