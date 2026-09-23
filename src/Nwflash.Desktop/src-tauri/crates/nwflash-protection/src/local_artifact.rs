@@ -19,8 +19,20 @@
 //!
 //! 校验失败**绝不**"退回未校验内容"：
 //! - `verify_artifact_bytes` 返回 `Err`，调用方必须拒绝使用该数据。
-//! - `select_verified_or_default` 用于配置类场景：验签失败时回退到**编译期
+//! - `select_verified_config` 用于配置类场景：验签失败时回退到**编译期
 //!   默认值**（安全的那一份），而不是回退到磁盘上那份未验证的内容。
+//!
+//! ## 当前唯一的生产用途是**固件包**
+//!
+//! 本模块最初还打算覆盖 `settings.json`，但那条路**已按设计否决**：客户端
+//! 没有签名私钥（`SESSION_SIGNING_PRIVATE_KEY_PKCS8` 只在 Cloudflare Worker
+//! 侧），强制验签会让工具自己写出的配置必然失败、每次重启都被清空，且并不
+//! 提供额外边界——能改这个文件的人本来就能改 exe。本地配置因此改用**平台
+//! 信任**（限定私有配置目录 + 常规文件），实现见
+//! `nwflash-infrastructure::preferences`。
+//!
+//! 因此 `select_verified_config` 与 `VerifiedConfigSource` 目前**没有生产
+//! 调用方**（只有单元测试）。别误以为 `settings.json` 经过它们校验。
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
@@ -79,6 +91,8 @@ pub enum VerifiedConfigSource {
     ///
     /// 这个分支必须让调用方**可见**（而不是静默替换），因为它意味着本地
     /// 配置被改过——是需要留痕的安全事件。
+    ///
+    /// 注意：本地配置当前不走这条路径（见模块说明）。
     FellBackToDefault,
 }
 
@@ -89,6 +103,8 @@ pub enum VerifiedConfigSource {
 ///
 /// 返回 `None` 是刻意的：它强迫调用方**显式**写出"用默认值"这一步，
 /// 而不是拿到一份来源不明的数据继续用。
+///
+/// **目前没有生产调用方**：本地配置按模块说明改用了平台信任。
 pub fn select_verified_config<'a>(
     config_bytes: Option<&'a [u8]>,
     signature_b64: Option<&str>,
