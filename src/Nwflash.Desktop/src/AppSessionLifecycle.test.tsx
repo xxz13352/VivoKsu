@@ -414,17 +414,31 @@ describe('会话事件联动', () => {
       (invoke as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([command]) => command === 'device_refresh',
       ).length;
-    // 等启动期读取（外壳 + 概览页挂载）全部落地再取基线，
-    // 否则会把挂载读取误判成任务结束后的重读。
+    // 基线必须等**所有**启动期读取落地后再取。
+    //
+    // `App` 里 `deviceRefreshPendingRef` 初值为 true：第一条非 busy 快照就会触发
+    // 一次重读（应用在任务中途启动也要拿新状态）。而概览页挂载本身也会读一次。
+    // 旧实现用「连续两次读数相同」当作已静止——那只是**一个宏任务的巧合**，
+    // 启动期那次重读若晚一拍落地，基线就偏小，后面的 `> beforeBusy` 断言随之
+    // 不稳定（全量并行下偶发 15s 超时的根因）。
+    //
+    // 改为等一个**肯定会出现**的信号：设备档案渲染出来（说明挂载读取已落地）
+    // 之后，再等读数在若干轮内不再变化。
+    await waitUntil(() => (host.textContent ?? '').includes('RF8T123'));
     const settleRefreshCalls = async (): Promise<number> => {
-      let previous = -1;
-      while (previous !== refreshCalls()) {
-        previous = refreshCalls();
+      let stable = 0;
+      let previous = refreshCalls();
+      // 需要连续 5 轮（而非 1 轮）读数不变才认为启动期读取已全部落地：
+      // 每次 `flushPromises` 都会推进所有已排队的微/宏任务，5 轮足以覆盖
+      // 「挂载读取 -> 派发非 busy 快照 -> 补偿重读」这条链。
+      while (stable < 5) {
         await flushPromises();
+        const current = refreshCalls();
+        stable = current === previous ? stable + 1 : 0;
+        previous = current;
       }
       return previous;
     };
-    await waitUntil(() => (host.textContent ?? '').includes('RF8T123'));
     const beforeBusy = await settleRefreshCalls();
 
     const onOperationSnapshot = hostListeners.get(IPC_EVENTS.operationSnapshot);
