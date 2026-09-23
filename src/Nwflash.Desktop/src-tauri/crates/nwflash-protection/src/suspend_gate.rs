@@ -6,8 +6,8 @@
 //! 因为检测到调试器就 `Err` 返回或退出进程，设备会停在**写了一半**的
 //! 分区上——这是变砖的直接原因。
 //!
-//! 因此本模块只提供**挂起**语义：检测到调试器时，把写入循环挡在
-//! `wait_until_cleared()` 上等待，期间：
+//! 因此本模块只提供**挂起**语义：检测到调试器时，把写入循环**停在命令边界**
+//! 等待（查询 [`SuspendGate::blocks_progress`]），期间：
 //! - 不发新命令、不改设备状态；
 //! - 不 drop 任何凭据、不关闭会话；
 //! - 由 UI 提示用户处置，用户确认后才继续。
@@ -23,8 +23,12 @@ use std::sync::Arc;
 
 /// 写入中途的挂起闸门。
 ///
-/// 由命令层创建、UI 层解锁（用户点击"我已处理"），写入循环在每个分区
-/// 边界调用 [`SuspendGate::wait_until_cleared`]。
+/// 由命令层创建、UI 层解锁（用户点击"我已处理"）。写入循环在每个分区边界
+/// 调用 [`SuspendGate::blocks_progress`] 查询；为真就返回
+/// `DomainError::WriteSuspended` 暂停推进，由调用方等待用户处置后再继续。
+///
+/// 本类型**不自己做等待**（见 `blocks_progress` 的说明）——早先的文档写成
+/// 「调用 `wait_until_cleared`」，但那个方法从来没有存在过。
 #[derive(Debug, Clone, Default)]
 pub struct SuspendGate {
     suspended: Arc<AtomicBool>,
@@ -51,8 +55,9 @@ impl SuspendGate {
 
     /// 挂起状态下返回 `true`，表示"现在不能继续写设备"。
     ///
-    /// 纯查询，不做等待——等待由异步调用方实现（见 `wait_until_cleared`），
-    /// 这样本类型不依赖任何运行时，可以被同步的写入循环直接使用。
+    /// 纯查询，不做等待——等待由调用方实现（拿到 `WriteSuspended` 后自行
+    /// 等待用户处置），这样本类型不依赖任何运行时，可以被同步的写入循环直接
+    /// 使用。
     pub fn blocks_progress(&self) -> bool {
         self.is_suspended()
     }
