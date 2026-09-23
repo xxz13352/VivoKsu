@@ -2090,18 +2090,56 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|(_, bytes)| bytes.len() <= PROCESS_OBSERVER_BUFFER_BYTES));
-        assert_eq!(
-            chunks
-                .iter()
-                .map(|(sequence, _)| *sequence)
-                .collect::<Vec<_>>(),
-            (0..chunks.len() as u64).collect::<Vec<_>>()
-        );
-        let observed = chunks
-            .into_iter()
-            .flat_map(|(_, bytes)| bytes)
+        // 只断言「序号严格递增」，**不要**断言它是连续 0..n。
+        //
+        // 观测队列容量只有 64（`PROCESS_OBSERVER_QUEUE_CAPACITY`），而这里会产出
+        // 几千个 chunk；一旦消费端跟不上，`dispatch` 会按设计**丢观测**（有界的
+        // 丢失计数，见 `PROCESS_OBSERVER_MAX_LOSSES`）。reader 的 `sequence` 是它
+        // 自己的局部计数器、照常自增，所以序号出现空洞是**正常且预期**的行为。
+        // 此前断言连续性，单跑不炸、并行跑满 CPU 时才偶发失败——正是这条在
+        // CI/本地全量跑时反复报红的原因。
+        let sequences = chunks
+            .iter()
+            .map(|(sequence, _)| *sequence)
             .collect::<Vec<_>>();
-        assert_eq!(observed, output.stdout.as_bytes());
+        assert!(
+            sequences.windows(2).all(|pair| pair[0] < pair[1]),
+            "序号必须严格递增（允许因有界丢失产生空洞）：{sequences:?}"
+        );
+        assert_eq!(sequences[0], 0, "第一个 chunk 的序号必须是 0");
+        let ordered_bytes = chunks
+            .iter()
+            .map(|(_, bytes)| bytes.clone())
+            .collect::<Vec<_>>();
+        let observed = ordered_bytes
+            .iter()
+            .flat_map(|bytes| bytes.iter().copied())
+            .collect::<Vec<_>>();
+        // 拼接结果只在与 `reading` 的产出完全对应时才等于整份 stdout；有界丢失
+        // 发生时观测到的是「带空洞的子集」，因此这条等值断言只在**本次没有任何
+        // 观测丢失**时成立。丢失本身由 `observer_losses_are_bounded` 覆盖。
+        if outcome.observer_losses.is_empty() {
+            assert_eq!(observed, output.stdout.as_bytes());
+        } else {
+            // 有丢失：`dispatch` 丢的是**当时投递不进去的那一块**（队列满时按 2ms
+            // 截止放弃），所以被丢的块可能落在中间——观测结果既不是完整 stdout、
+            // 也不是它的前缀，而是 stdout 的一个**保序子序列**。
+            //
+            // 这里断言那个真实性质：按顺序逐块在 stdout 里向前推进，每一块都必须
+            // 能在游标之后找到（不倒退、不掺假、不重排），且最终累计体量合理
+            // （fixture 约 1 MiB，远大于 64 槽队列）。
+            let stdout = output.stdout.as_bytes();
+            let mut cursor = 0usize;
+            for bytes in &ordered_bytes {
+                let offset = stdout[cursor..]
+                    .windows(bytes.len())
+                    .position(|window| window == bytes.as_slice())
+                    .unwrap_or_else(|| {
+                        panic!("观测块在 stdout 中找不到（丢失只允许是保序子序列，不得乱序/掺假）")
+                    });
+                cursor += offset + bytes.len();
+            }
+        }
         assert!(observed.len() >= expected_len / 2);
     }
 
@@ -2443,11 +2481,25 @@ mod tests {
         assert!(err.to_string().contains("命令不能为空"));
     }
 
-    fn write_bulk_fixture(tag: &str) -> (PathBuf, usize) {
-        let nonce = std::time::SystemTime::now()
+    /// 测试用临时文件名后缀。测试默认并行跑，固定文件名会让两个用例/线程
+    /// 同时读写同一份临时文件而互相破坏；纳秒 + 进程内单调计数足够避免碰撞。
+    ///
+    /// 刻意**不含括号等 cmd 元字符**：其中几个用例会把这个名字（换扩展名后）
+    /// 嵌进 `type "<path>"` 的批处理脚本里，`ThreadId(7)` 那种带括号的后缀会让
+    /// cmd 把括号当成分组语法，脚本直接以退出码 1 失败。
+    fn unique_test_nonce() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock should be available")
             .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{nanos}-{seq}")
+    }
+
+    fn write_bulk_fixture(tag: &str) -> (PathBuf, usize) {
+        let nonce = unique_test_nonce();
         let path = std::env::temp_dir().join(format!("nwflash-{tag}-{nonce}.txt"));
         // ~1 MiB, far past any OS pipe buffer (4 KiB - 64 KiB on Windows).
         let mut payload = String::with_capacity(1024 * 1024);
@@ -2776,7 +2828,10 @@ mod tests {
 
     #[test]
     fn run_command_with_file_stdin_streams_the_selected_file_to_the_child_process() {
-        let input_path = std::env::temp_dir().join("nwflash-process-stdin-test.bin");
+        // 唯一的临时名：测试默认并行跑，固定文件名会让两个线程同时读写同一份
+        // fixture（一个删、另一个还在读），本文件其它用例早就改用了 nonce 后缀。
+        let input_path =
+            std::env::temp_dir().join(format!("nwflash-process-stdin-{}.bin", unique_test_nonce()));
         std::fs::write(&input_path, b"partition-image-bytes")
             .expect("fixture input should be written");
 
@@ -2795,7 +2850,11 @@ mod tests {
 
     #[test]
     fn run_command_with_file_stdout_streams_child_output_to_the_selected_file() {
-        let output_path = std::env::temp_dir().join("nwflash-process-stdout-test.bin");
+        // 同上：固定名会在并行测试下互相覆盖。
+        let output_path = std::env::temp_dir().join(format!(
+            "nwflash-process-stdout-{}.bin",
+            unique_test_nonce()
+        ));
 
         let output = run_command_with_file_stdout_and_cancel(
             ProcessCommand::new(
