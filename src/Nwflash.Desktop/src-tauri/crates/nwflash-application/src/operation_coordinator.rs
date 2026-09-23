@@ -337,6 +337,10 @@ fn operation_failure_detail(error: &DomainError) -> Option<String> {
 
 /// 日志区是给人看的，但也会被抄走/截图：本地路径、URL、`token=` 一类赋值一律隐藏，
 /// 只保留"退出码 1：error: no devices"这种真正有用的诊断片段。
+///
+/// 注意这些是**子串**匹配（见 `hides_failure_token`）：命令行里同一个凭据字段
+/// 会以多种形态出现——`--token=x`、`x-token=x`、`session_token=x`、`token:x`
+/// （curl 风格冒号分隔）——只做全等比较会漏掉全部带前缀/后缀/冒号的写法。
 const HIDDEN_ASSIGNMENT_KEYS: [&str; 6] = [
     "token",
     "secret",
@@ -373,11 +377,23 @@ fn hides_failure_token(token: &str) -> bool {
     if is_windows_path {
         return true;
     }
-    token.split_once('=').is_some_and(|(key, _)| {
-        HIDDEN_ASSIGNMENT_KEYS
-            .iter()
-            .any(|candidate| key.eq_ignore_ascii_case(candidate))
-    })
+    // 先按 `=` 切（`--token=x` / `x-token=x` / `TOKEN=x`）；没有 `=` 时再按
+    // `:` 切（curl 的 `Authorization: Bearer …`、`token:abc`）。两者都没有就
+    // 不是赋值形态。
+    let (key, _) = match token.split_once('=') {
+        Some(pair) => pair,
+        None => match token.split_once(':') {
+            Some(pair) => pair,
+            None => return false,
+        },
+    };
+    // 键名做**子串**匹配而不是全等：命令行凭据字段普遍带前缀/后缀
+    // （`--token`、`session_token`、`x-auth-token`、`api_password`）。
+    // 收紧到全等会让这些形态全部漏过，把凭据原样上报服务器。
+    let key = key.trim_start_matches('-');
+    HIDDEN_ASSIGNMENT_KEYS
+        .iter()
+        .any(|candidate| key.to_ascii_lowercase().contains(candidate))
 }
 
 fn public_operation_failure_message(error: &DomainError) -> &'static str {
@@ -1488,6 +1504,47 @@ mod tests {
                     "authorization unavailable".to_string(),
                 ))
             })
+        }
+    }
+
+    #[test]
+    fn credential_assignments_are_hidden_in_every_command_line_form() {
+        // 回归：命令行凭据字段普遍带前缀/后缀或冒号分隔（`--token=x`、
+        // `x-auth-token=x`、`session_token=x`、`token:x`），旧实现只对
+        // `key=value` 的 key 做**全等**比较，于是这些形态全部原样上报。
+        for credential in [
+            "token=abc123",
+            "--token=abc123",
+            "SESSION_TOKEN=abc123",
+            "x-token=abc123",
+            "x-auth-token=abc",
+            "api_password=pw",
+            "secret=hidden",
+            "passwd=x",
+            "token:abc123",
+            "pwd:secret",
+            // 空格分隔的裸 key 无法判定后续词是否为其值，保持原样（不误判）。
+            // 真实命令行里凭据都是赋值形态。
+        ] {
+            assert_eq!(
+                sanitize_operation_detail(credential),
+                "[已隐藏]",
+                "凭据字段必须被隐藏：{credential}"
+            );
+        }
+
+        // 诊断价值必须保留：不能把普通 `=` / `:` 也一并抹掉。
+        for kept in [
+            "exit=0",
+            "error: no devices",
+            "OKAY",
+            "Finished. Total time: 1.0s",
+        ] {
+            assert_eq!(
+                sanitize_operation_detail(kept),
+                kept,
+                "诊断片段不得被误隐藏：{kept}"
+            );
         }
     }
 
