@@ -21,20 +21,38 @@ const tauriHostSourcePath = resolve(tauriRoot, 'crates', 'nwflash-tauri', 'src',
 const fileCommandSourcePath = resolve(tauriRoot, 'crates', 'nwflash-tauri', 'src', 'commands', 'files.rs');
 const cargoTreeTimeoutMs = 45_000;
 const cargoGraphTestTimeoutMs = (cargoTreeTimeoutMs * 2) + 10_000;
+/// 生产能力清单，必须与 `src-tauri/capabilities/default.json` 逐项一致。
+///
+/// `core:window:allow-center` 与 `core:webview:allow-set-webview-zoom` 是
+/// 「界面缩放与窗口尺寸过渡」实际用到的权限（`window-transition.ts` 调
+/// `appWindow.center()`、`ui-scale.ts` 调 `webview.setZoom()`），当初加配置时漏了
+/// 同步这里，于是本文件一直红着、被当成"既有失败"忽略。
 const normalPermissions = [
   'core:default',
   'dialog:default',
   'core:window:default',
+  'core:window:allow-center',
   'core:window:allow-close',
   'core:window:allow-minimize',
   'core:window:allow-set-resizable',
   'core:window:allow-set-size',
   'core:window:allow-start-dragging',
   'core:window:allow-toggle-maximize',
+  'core:webview:allow-set-webview-zoom',
 ];
 
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf8')) as T;
+}
+
+/// 读取源码并**统一换行符**后再断言。
+///
+/// 本仓 .rs 文件的换行并不一致：`commands/files.rs` 是 CRLF，而 `lib.rs` 是 LF。
+/// 直接对 `readFileSync(...)` 的原文做多行 `toContain`，会让断言结果取决于
+/// 「这个文件恰好是什么换行」——同一段代码在两种换行下断言一真一假，
+/// 正是本文件长期报红的原因。先归一化，断言只关心代码内容。
+function readSource(path: string): string {
+  return readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
 }
 
 function mergePatch(base: unknown, patch: unknown): unknown {
@@ -148,8 +166,8 @@ describe('desktop window capabilities', () => {
   });
 
   test('file transaction harness is feature-gated and restricted to the dedicated target', () => {
-    const hostSource = readFileSync(tauriHostSourcePath, 'utf8');
-    const fileSource = readFileSync(fileCommandSourcePath, 'utf8');
+    const hostSource = readSource(tauriHostSourcePath);
+    const fileSource = readSource(fileCommandSourcePath);
     const buildScript = readFileSync(nativeE2eBuildScriptPath, 'utf8');
 
     expect(fileSource).toContain('#[cfg(feature = "e2e")]\npub(crate) mod e2e;');
