@@ -797,6 +797,17 @@ impl SafeFlashExecutionService {
                     if is_flash {
                         flashed_partition_count += 1;
                     }
+                    // 命令已返回 = 这个分区确实写完了：补最后一格到 100%。
+                    //
+                    // 真实分区的写入量是**估算**的（fastboot 写入期间不输出可用
+                    // 进度），在上限处锁在 95%，把余量留给这一刻；假刷写本身就
+                    // tick 到满，这里再补一次是幂等的。少了这一步，「当前分区」
+                    // 进度条会在最后一格永远停住、看不到完成。
+                    if is_partition_flash {
+                        if let Some(total_bytes) = partition_bytes {
+                            report_partition_tick(total_bytes);
+                        }
+                    }
                 }
                 Err(error) => {
                     // 主动停止/会话取消不是分区刷写失败：直接透传取消，

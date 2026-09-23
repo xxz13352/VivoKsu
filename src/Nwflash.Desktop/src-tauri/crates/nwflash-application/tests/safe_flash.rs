@@ -2840,6 +2840,90 @@ fn partition_stage_can_be_routed_to_a_no_log_channel_for_line_flash() {
 }
 
 #[test]
+fn a_finished_partition_reports_full_scale_so_the_bar_can_complete() {
+    // 回归：真实分区的写入量是估算的，在上限处锁在 95%，注释说「命令返回后
+    // 由调用方补满」——但调用方从没补过。于是「当前分区」进度条在最后一格
+    // 永远停住，用户看不到这个分区写完。
+    let image = std::env::temp_dir().join(format!(
+        "nwflash-partition-complete-{}.img",
+        std::process::id()
+    ));
+    std::fs::write(&image, vec![0u8; 4096]).expect("image fixture should be written");
+    let image_bytes = std::fs::metadata(&image).expect("metadata").len();
+
+    let executor = Arc::new(SlowFlashExecutor {
+        commands: Arc::new(Mutex::new(Vec::new())),
+        flash_duration: std::time::Duration::from_millis(120),
+        poll_interval: std::time::Duration::from_millis(10),
+    });
+    let service = SafeFlashExecutionService::new(executor.clone())
+        .with_fastbootd_wait(1, std::time::Duration::ZERO);
+    let source = SafeFlashPreparedSource {
+        staging_root: None,
+        partitions: vec![SafeFlashPartitionSource {
+            partition_name: "boot".to_string(),
+            image_path: image.to_string_lossy().into_owned(),
+            has_slot: false,
+            simulated_flash_bytes: None,
+        }],
+        has_block_based_content: false,
+    };
+    let options = SafeFlashBuildOptions {
+        serial: "FASTBOOT-001".to_string(),
+        is_safe_flash: false,
+        is_keep_root: false,
+        wipe_data: false,
+        slot_mode: SafeFlashSlotMode::CurrentSlot,
+        current_slot: None,
+    };
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_for_sink = progress.clone();
+    let partition_progress = Arc::new(move |update: SafeFlashPartitionProgress| {
+        progress_for_sink
+            .lock()
+            .expect("progress lock should not be poisoned")
+            .push(update);
+    });
+
+    service
+        .execute_with_partition_progress(
+            SafeFlashExecutionRequest {
+                source: &source,
+                options: &options,
+                serial: options.serial.as_str(),
+                transition_to_fastbootd: false,
+            },
+            || false,
+            |_| {},
+            |_| {},
+            Option::<
+                fn(
+                    SafeFlashPartitionFailure,
+                ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
+            >::None,
+            || false,
+            Some(&(partition_progress as Arc<SafeFlashPartitionProgressSink>)),
+            None,
+            None,
+        )
+        .expect("real flash should complete");
+
+    let updates = progress.lock().expect("progress lock").clone();
+    assert!(!updates.is_empty(), "必须上报进度");
+    assert!(
+        updates.iter().all(|update| update.written_bytes <= image_bytes),
+        "任何一次上报都不得超过镜像大小：{updates:?}"
+    );
+    // 命令返回那一刻必须补满，否则进度条停在 95% 永不完成。
+    assert_eq!(
+        updates.last().map(|update| update.written_bytes),
+        Some(image_bytes),
+        "分区写完必须上报满刻度：{updates:?}"
+    );
+    let _ = std::fs::remove_file(&image);
+}
+
+#[test]
 fn simulated_flash_reports_byte_progress_while_it_waits() {
     // 假刷写必须**在等待过程中**持续上报字节进度，而不是只在分区边界跳一次；
     // 否则大分区（system 动辄数百 MB）在界面上整段静止，用户以为卡死了。
