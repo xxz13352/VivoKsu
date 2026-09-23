@@ -467,6 +467,19 @@ fn platform_tools_integrity_error() -> DomainError {
 mod tests {
     use super::*;
 
+    /// 并行测试里唯一、且不含 cmd 元字符的临时名后缀（本 crate 的 process.rs
+    /// 测试模块有一份等价实现，二者各属不同模块）。
+    fn unique_test_nonce() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be available")
+            .as_nanos();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{nanos}-{seq}")
+    }
+
     #[test]
     fn bundled_resource_root_points_at_the_tauri_resources_folder() {
         // tauri.conf.json bundles `resources/platform-tools/*`, so the resolved
@@ -480,8 +493,9 @@ mod tests {
 
     #[test]
     fn resource_root_searches_parent_of_a_test_executable_directory() {
+        // 同上：`process::id()` 在同一测试进程中不区分线程，需换成唯一后缀。
         let root =
-            std::env::temp_dir().join(format!("nwflash-resource-root-{}", std::process::id()));
+            std::env::temp_dir().join(format!("nwflash-resource-root-{}", unique_test_nonce()));
         let tools_root = root
             .join("target")
             .join("debug")

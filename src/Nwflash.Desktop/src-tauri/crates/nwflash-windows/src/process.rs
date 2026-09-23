@@ -2197,7 +2197,11 @@ mod tests {
 
     #[test]
     fn file_stdout_is_never_emitted_as_text_observation() {
-        let output_path = std::env::temp_dir().join("nwflash-observer-binary-output.bin");
+        // 同上：并行测试下固定名会互相覆盖。
+        let output_path = std::env::temp_dir().join(format!(
+            "nwflash-observer-binary-output-{}.bin",
+            unique_test_nonce()
+        ));
         let observer = RecordingObserver::default();
         let outcome = run_command_with_file_stdout_and_cancel_observed(
             ProcessCommand::new(
@@ -2691,8 +2695,9 @@ mod tests {
 
     #[test]
     fn output_limit_stops_a_chatty_process_with_bounded_observation() {
+        // 并行测试下 `process::id()` 在同一测试二进制里是同一个值，固定名仍会互踩。
         let path =
-            std::env::temp_dir().join(format!("nwflash-output-limit-{}.txt", std::process::id()));
+            std::env::temp_dir().join(format!("nwflash-output-limit-{}.txt", unique_test_nonce()));
         let script = path.with_extension("cmd");
         std::fs::write(
             &script,
