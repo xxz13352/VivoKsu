@@ -130,9 +130,12 @@ fn validate_local_config_path(path: &Path) -> Result<(), String> {
         return Err(format!("配置体积 {} 字节超出上限", metadata.len()));
     }
 
-    // 目录约束只在**生产路径**启用：`local_config_directory_override()` 为
-    // `None` 时要求配置位于工具私有目录内；测试可显式覆盖预期目录，
-    // 从而既能验证约束本身、又能让往返类测试在临时目录里工作。
+    // 目录约束对 `load` 恒定生效（`with_path` 也会调 `load`，所以它绕不过去）：
+    // 要求配置位于工具私有目录内。`expected_config_directory()` 跟着
+    // `LOCALAPPDATA` / `APPDATA` 走，因此测试要么把文件放进私有目录
+    // （`tests/paths.rs::private_settings_directory`，往返类用例就是这么做的），
+    // 要么特意放到目录之外来验证约束本身
+    // （`config_outside_the_private_directory_is_rejected`）。
     if let Some(expected_dir) = expected_config_directory() {
         let actual_dir = path.parent().unwrap_or_else(|| Path::new(""));
         if !is_within(actual_dir, &expected_dir) {
