@@ -15,14 +15,6 @@ pub const MIRRORS: [&str; 3] = [
     "https://ghproxy.net/",
 ];
 
-/// payload_dumper 发布资产名与入口 exe 名称。
-pub const PAYLOAD_DUMPER_ASSET_NAME: &str = "payload_dumper-win-x64.zip";
-pub const PAYLOAD_DUMPER_EXECUTABLE_NAME: &str = "payload_dumper.exe";
-
-/// payload_dumper 期望 SHA-256（与发布资源绑定，单位：小写十六进制）。
-pub const PAYLOAD_DUMPER_SHA256: &str =
-    "031b404609e804cd620fb10efdfce577b633f8b0ad8029fbd7170be3bc4cbe82";
-
 /// ROOT 管理器 APK 文件名（与随包一致，避免命名漂移）。
 pub const ROOT_MANAGER_APK_KSU: &str = "KSU.APK";
 pub const ROOT_MANAGER_APK_OFFICIAL: &str = "KernelSU.apk";

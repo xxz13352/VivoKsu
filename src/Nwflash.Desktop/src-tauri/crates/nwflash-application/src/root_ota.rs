@@ -33,8 +33,6 @@ pub struct RootOtaExtractedImages {
 
 pub struct RootOtaExtractOptions<'a> {
     pub url: &'a str,
-    /// payload_dumper 可执行文件；仅 payload OTA 分支需要。
-    pub payload_dumper: Option<&'a Path>,
     /// 提取输出的 staging 根目录。
     pub staging_root: &'a Path,
     /// 服务器对整个固件包的完整性承诺（`/api/rom` 的 sha256/sizeBytes）。
@@ -110,11 +108,8 @@ impl RootOtaService {
         match kind {
             RemoteFirmwareKind::PayloadRaw | RemoteFirmwareKind::PayloadZip => {
                 report_stage("正在读取 payload 分区信息".to_string());
-                let executable = options.payload_dumper.ok_or_else(|| {
-                    DomainError::ExternalTool("payload 提取工具未就绪。".to_string())
-                })?;
+                // payload 由进程内的解析器处理，不再需要外部可执行文件。
                 self.extract_from_payload(
-                    executable,
                     options.url,
                     options.staging_root,
                     &mut is_canceled,
@@ -149,7 +144,6 @@ impl RootOtaService {
 
     fn extract_from_payload<F, P>(
         &self,
-        executable: &Path,
         url: &str,
         staging_root: &Path,
         is_canceled: &mut F,
@@ -161,7 +155,7 @@ impl RootOtaService {
     {
         let metadata_directory = staging_root.join("metadata");
         let inspection = FirmwareExtractService::inspect_payload(
-            executable,
+            Path::new(""),
             url,
             &metadata_directory,
             &mut *is_canceled,
@@ -195,7 +189,7 @@ impl RootOtaService {
 
         let image_directory = staging_root.join("images");
         let images = FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
-            executable,
+            Path::new(""),
             url,
             &selected,
             &image_directory,

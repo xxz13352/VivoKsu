@@ -10,8 +10,7 @@ use nwflash_application::{
     SafeFlashBuildOptions, SafeFlashExecutionRequest, SafeFlashExecutionService,
     SafeFlashPartitionFailure, SafeFlashPartitionFailureDecision, SafeFlashPartitionProgress,
     SafeFlashPartitionProgressSink, SafeFlashPartitionSource, SafeFlashPreparationPhase,
-    SafeFlashPreparedSource, SafeFlashService, SafeFlashSource,
-    SAFE_FLASH_WIPE_DATA_MANUAL_STEPS,
+    SafeFlashPreparedSource, SafeFlashService, SafeFlashSource, SAFE_FLASH_WIPE_DATA_MANUAL_STEPS,
 };
 use nwflash_domain::{DomainError, SafeFlashSlotMode};
 use nwflash_windows::process::{CancellableProcessExecutor, ProcessCommand, ProcessOutput};
@@ -60,8 +59,11 @@ fn write_signature_for(package: &Path) {
 
     let mut sig_path = package.as_os_str().to_os_string();
     sig_path.push(".sig");
-    fs::write(std::path::PathBuf::from(sig_path), URL_SAFE_NO_PAD.encode(signature.to_bytes()))
-        .expect("signature file should be written");
+    fs::write(
+        std::path::PathBuf::from(sig_path),
+        URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+    )
+    .expect("signature file should be written");
 }
 
 #[derive(Clone)]
@@ -2052,8 +2054,9 @@ async fn online_source_prepares_equal_length_content_without_a_catalog_hash_gate
         .await;
     // 签名 mock 必须**先于**通用 GET 挂载：wiremock 按挂载顺序匹配，
     // 若通用 GET 在前，`.sig` 请求会拿到固件包内容，验签必然失败。
-    let signature_body = fs::read_to_string(PathBuf::from(format!("{}.sig", archive_path.display())))
-        .expect("fixture signature should be readable");
+    let signature_body =
+        fs::read_to_string(PathBuf::from(format!("{}.sig", archive_path.display())))
+            .expect("fixture signature should be readable");
     let signature_length = signature_body.len().to_string();
     // HEAD 与 GET 都要按 `.sig` 的**真实字节数**应答：下载器会先用 HEAD 拿
     // content-length 再用它校验完整性，长度不符会直接判定下载失败。
@@ -2322,7 +2325,10 @@ fn payload_extracts_protected_partitions_and_marks_only_them_as_simulated() {
         .iter()
         .find(|source| source.partition_name == "boot")
         .expect("boot partition expected");
-    assert_eq!(fs::read(&boot.image_path).expect("普通分区照旧落盘"), b"boot\r\n");
+    assert_eq!(
+        fs::read(&boot.image_path).expect("普通分区照旧落盘"),
+        b"boot\r\n"
+    );
     assert_eq!(boot.simulated_flash_bytes, None);
 
     let staging = prepared
@@ -2911,7 +2917,9 @@ fn a_finished_partition_reports_full_scale_so_the_bar_can_complete() {
     let updates = progress.lock().expect("progress lock").clone();
     assert!(!updates.is_empty(), "必须上报进度");
     assert!(
-        updates.iter().all(|update| update.written_bytes <= image_bytes),
+        updates
+            .iter()
+            .all(|update| update.written_bytes <= image_bytes),
         "任何一次上报都不得超过镜像大小：{updates:?}"
     );
     // 命令返回那一刻必须补满，否则进度条停在 95% 永不完成。

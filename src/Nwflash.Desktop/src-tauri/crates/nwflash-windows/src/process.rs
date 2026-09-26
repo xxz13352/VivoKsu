@@ -1748,7 +1748,6 @@ fn collect_unobserved_process_callers(
 #[cfg(test)]
 fn unobserved_process_caller_allowlist() -> std::collections::BTreeMap<String, usize> {
     [
-        ("nwflash-application/src/firmware_extract.rs".to_string(), 2),
         (
             "nwflash-tauri/src/commands/device_identity.rs".to_string(),
             1,

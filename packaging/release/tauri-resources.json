@@ -47,11 +47,6 @@
       "sha256": "dca1cf72a6f6cff4a116242fbe940a161099bafbd9d74ca4518756eaad5c8c03"
     },
     {
-      "source": "src/Nwflash.Desktop/src-tauri/resources/payload-tools/payload_dumper.exe",
-      "destination": "payload-tools/payload_dumper.exe",
-      "sha256": "031b404609e804cd620fb10efdfce577b633f8b0ad8029fbd7170be3bc4cbe82"
-    },
-    {
       "source": "src/Nwflash.Desktop/src-tauri/resources/scrcpy/adb.exe",
       "destination": "scrcpy/adb.exe",
       "sha256": "957e46b8615f7af5b7292a2ddabe98d2e61940c3fb2b0545756507f080613e71"

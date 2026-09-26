@@ -697,19 +697,6 @@ pub async fn safe_flash_prepare_online(
                 if cancellation.is_cancelled() {
                     return Err(DomainError::UserCancelled("线刷预检已取消。".to_string()));
                 }
-                context.report_stage("正在准备 payload 提取工具");
-                let provisioner = nwflash_infrastructure::PayloadDumperProvisioner::bundled(
-                    nwflash_windows::bundled_resource_root(),
-                );
-                let payload_dumper = provisioner
-                    .ensure_installed(&cancellation, None)
-                    .await
-                    .map_err(|error| {
-                        DomainError::ExternalTool(format!("payload 提取工具未就绪：{error}"))
-                    })?;
-                if cancellation.is_cancelled() {
-                    return Err(DomainError::UserCancelled("线刷预检已取消。".to_string()));
-                }
                 context.report_stage("正在下载固件包");
                 let progress_context = context.clone();
                 let download_progress = Arc::new(
@@ -728,7 +715,6 @@ pub async fn safe_flash_prepare_online(
                             url: rom.url,
                             pd,
                             version,
-                            payload_dumper: Some(payload_dumper),
                         },
                         &build_options,
                         &cancellation,
@@ -820,16 +806,6 @@ async fn prepare_local_safe_flash_from_path(
                     DomainError::Internal(format!("本地固件格式检测调度失败：{error}"))
                 })??;
                 let prepared_source = if payload_source {
-                    context.report_stage("正在准备 payload 提取工具");
-                    let provisioner = nwflash_infrastructure::PayloadDumperProvisioner::bundled(
-                        nwflash_windows::bundled_resource_root(),
-                    );
-                    let executable = provisioner
-                        .ensure_installed(&cancellation, None)
-                        .await
-                        .map_err(|error| {
-                            DomainError::ExternalTool(format!("payload 提取工具未就绪：{error}"))
-                        })?;
                     if cancellation.is_cancelled() {
                         return Err(DomainError::UserCancelled("线刷预检已取消。".to_string()));
                     }
@@ -841,7 +817,6 @@ async fn prepare_local_safe_flash_from_path(
                     task::spawn_blocking(move || {
                         SafeFlashService::new()
                             .resolve_payload_source_with_cancellation_and_progress(
-                                &executable,
                                 &source_path,
                                 &payload_options,
                                 &payload_cancellation,

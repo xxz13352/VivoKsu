@@ -1,19 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{Read, Write},
-    path::Path,
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use nwflash_domain::FlashImageInfo;
+use nwflash_infrastructure::payload::remote::locate_payload_in_zip;
+use nwflash_infrastructure::payload::Payload;
 use nwflash_infrastructure::{
-    collect_required_payload_extraction_results, parse_payload_metadata, FirmwareExtractionError,
-    FirmwareFormat, FirmwareFormatDetector, FirmwarePackageExtractionService,
-    FirmwarePackageInspector, PayloadDumperCommand, VivoFirmwareError, VivoFirmwareExtractor,
-    VivoFirmwareProgress,
+    FirmwareExtractionError, FirmwareFormat, FirmwareFormatDetector,
+    FirmwarePackageExtractionService, FirmwarePackageInspector, VivoFirmwareError,
+    VivoFirmwareExtractor, VivoFirmwareProgress,
 };
-use nwflash_windows::process::{run_command_with_cancel, ProcessCommand};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,57 +45,38 @@ pub enum FirmwareExtractApplicationError {
     InvalidSelection,
     #[error("固件提取已取消。")]
     Canceled,
-    #[error("payload_dumper 长时间没有输出进展（{0} 秒），已终止提取。")]
-    PayloadStalled(u64),
 }
 
 pub struct FirmwareExtractService;
 
 impl FirmwareExtractService {
+    /// 读取 payload 的分区清单。
+    ///
+    /// 内建实现取代了原先的 `payload_dumper --metadata` 子进程调用：不再有
+    /// 外部 exe、不再依赖它写出的 `metadata.json`，也不再需要「无进展判死」。
+    ///
+    /// `metadata_directory` 保留在签名里只为兼容既有调用方；内建实现不写盘。
     pub fn inspect_payload<F>(
-        executable_path: &Path,
+        _executable_path: &Path,
         payload_source: &str,
-        metadata_directory: &Path,
+        _metadata_directory: &Path,
         should_cancel: F,
     ) -> Result<FirmwareExtractInspection, FirmwareExtractApplicationError>
     where
         F: FnMut() -> bool,
     {
-        fs::create_dir_all(metadata_directory)
-            .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
-        let command = PayloadDumperCommand::metadata(
-            executable_path.to_string_lossy(),
-            payload_source,
-            metadata_directory.to_string_lossy(),
-        )
-        .map_err(|error| FirmwareExtractApplicationError::Format(error.to_string()))?;
-        let output = run_command_with_cancel(
-            ProcessCommand::new(command.program, command.args),
-            None,
-            should_cancel,
-        )
-        .map_err(payload_process_error)?;
-        if output.exit_code != 0 {
-            return Err(FirmwareExtractApplicationError::Format(format!(
-                "payload_dumper 读取元数据失败，退出码 {}。{}",
-                output.exit_code, output.stderr
-            )));
-        }
-
-        let metadata =
-            fs::read_to_string(metadata_directory.join("metadata.json")).map_err(|error| {
-                FirmwareExtractApplicationError::Format(format!(
-                    "payload_dumper 未生成元数据：{error}"
-                ))
-            })?;
-        let entries = parse_payload_metadata(&metadata)
-            .map_err(|error| FirmwareExtractApplicationError::Format(error.to_string()))?
-            .into_iter()
+        let mut should_cancel = should_cancel;
+        let payload = open_payload(payload_source, &mut should_cancel)?;
+        let entries = payload
+            .inner
+            .manifest
+            .partitions
+            .iter()
             .enumerate()
-            .map(|(index, entry)| FirmwareExtractEntry {
+            .map(|(index, partition)| FirmwareExtractEntry {
                 id: index.to_string(),
-                name: entry.name,
-                size_bytes: entry.size_bytes,
+                name: partition.name.clone(),
+                size_bytes: i64::try_from(partition.new_size).unwrap_or(i64::MAX),
             })
             .collect();
         Ok(FirmwareExtractInspection {
@@ -393,7 +374,7 @@ impl FirmwareExtractService {
     }
 
     fn extract_payload_internal<F, P>(
-        executable_path: &Path,
+        _executable_path: &Path,
         payload_source: &str,
         partition_names: &[String],
         expected_sizes: Option<&HashMap<String, i64>>,
@@ -416,151 +397,208 @@ impl FirmwareExtractService {
         {
             return Err(FirmwareExtractApplicationError::InvalidSelection);
         }
-        let expected_total_bytes = expected_sizes
-            .map(|sizes| {
-                sizes
-                    .values()
-                    .filter_map(|size| u64::try_from(*size).ok())
-                    .sum::<u64>()
+
+        // 先解析 manifest：分区名与尺寸都以它为准，不再依赖调用方传入的
+        // expected_sizes（后者仅用于交叉校验）。
+        let mut opened = open_payload(payload_source, &mut should_cancel)?;
+        if should_cancel() {
+            return Err(FirmwareExtractApplicationError::Canceled);
+        }
+
+        // 分区名必须在 manifest 里存在，否则早失败——不要等写到一半才发现。
+        for name in &partition_refs {
+            if !opened
+                .inner
+                .manifest
+                .partitions
+                .iter()
+                .any(|partition| partition.name == *name)
+            {
+                return Err(FirmwareExtractApplicationError::Format(format!(
+                    "固件中不存在分区 {name}。"
+                )));
+            }
+        }
+
+        let total_bytes: u64 = partition_refs
+            .iter()
+            .filter_map(|name| {
+                opened
+                    .inner
+                    .manifest
+                    .partitions
+                    .iter()
+                    .find(|partition| partition.name == *name)
+                    .map(|partition| partition.new_size)
             })
-            .filter(|total| *total > 0);
+            .sum();
+
+        // 交叉校验：调用方给的尺寸（来自先前的 inspect）必须与 manifest 一致。
+        // 不一致说明两次读到的固件不同（例如 URL 背后换了内容），宁可失败。
+        if let Some(expected_sizes) = expected_sizes {
+            for name in &partition_refs {
+                if let Some(expected) = expected_sizes.get(*name) {
+                    let declared = opened
+                        .inner
+                        .manifest
+                        .partitions
+                        .iter()
+                        .find(|partition| partition.name == *name)
+                        .map(|partition| partition.new_size)
+                        .unwrap_or_default();
+                    if u64::try_from(*expected).ok() != Some(declared) {
+                        return Err(FirmwareExtractApplicationError::Format(format!(
+                            "分区 {name} 的尺寸与固件清单不一致，请重新读取固件。"
+                        )));
+                    }
+                }
+            }
+        }
+
+        fs::create_dir_all(output_directory)
+            .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
+
+        // 两个阶段：先解压到暂存目录，再拷贝发布。进度必须**全程单调不减**，
+        // 否则 UI 的进度条会倒退。所以解压阶段映射到前一半，发布阶段映射到后一半。
+        let extraction_span = total_bytes / 2;
+        let publish_span = total_bytes.saturating_sub(extraction_span);
+
+        // 提取到私有暂存目录，全部成功后再发布到目标目录——保留「要么全有、
+        // 要么全无」语义：中途取消或失败不会在用户目录里留下半截镜像。
         let staging_directory =
             std::env::temp_dir().join(format!("nwflash-payload-extract-{}", unique_suffix()));
         fs::create_dir(&staging_directory)
             .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
-        let command = PayloadDumperCommand::extract(
-            executable_path.to_string_lossy(),
-            payload_source,
-            &partition_refs,
-            staging_directory.to_string_lossy(),
-        );
-        let command = match command {
-            Ok(command) => command,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging_directory);
-                return Err(FirmwareExtractApplicationError::Format(error.to_string()));
-            }
-        };
-        if let Err(error) = fs::create_dir_all(output_directory) {
-            let _ = fs::remove_dir_all(&staging_directory);
-            return Err(FirmwareExtractApplicationError::Directory(
-                error.to_string(),
-            ));
-        }
-        // payload_dumper 无进展判死（对齐 C# PayloadDumperRunner 的 120s 无进展终止）：
-        // 服务器半开连接或磁盘写满时，进程既不退出也不推进，操作会永远停在“提取中”。
-        // 只要暂存目录的已写字节还在推进就不杀，慢速大分区不受影响。
-        let mut progress_watch = PayloadProgressWatch::default();
-        let progress_watch_for_closure = &mut progress_watch;
-        let output = match run_command_with_cancel(
-            ProcessCommand::new(command.program, command.args),
-            None,
-            || {
-                let (current_partition, written_bytes) =
-                    payload_stage_progress(&staging_directory, &partition_refs);
-                let staged_progress = expected_total_bytes.map_or(written_bytes, |total| {
-                    payload_progress_for_phase(written_bytes, total, 0, total / 2)
-                });
-                report_progress(current_partition, staged_progress);
-                if progress_watch_for_closure.note(written_bytes) {
-                    return true;
-                }
-                should_cancel()
-            },
-        ) {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging_directory);
-                return Err(if progress_watch.stalled() {
-                    FirmwareExtractApplicationError::PayloadStalled(
-                        PAYLOAD_NO_PROGRESS_TIMEOUT_SECONDS,
-                    )
-                } else {
-                    payload_process_error(error)
-                });
-            }
-        };
-        if progress_watch.stalled() {
-            let _ = fs::remove_dir_all(&staging_directory);
-            return Err(FirmwareExtractApplicationError::PayloadStalled(
-                PAYLOAD_NO_PROGRESS_TIMEOUT_SECONDS,
-            ));
-        }
-        if output.exit_code != 0 {
-            let _ = fs::remove_dir_all(&staging_directory);
-            return Err(FirmwareExtractApplicationError::Format(format!(
-                "payload_dumper 执行失败，退出码 {}。{}",
-                output.exit_code, output.stderr
-            )));
-        }
 
-        let result =
-            collect_required_payload_extraction_results(&staging_directory, &partition_refs)
-                .map_err(|error| FirmwareExtractApplicationError::Format(error.to_string()))
-                .and_then(|results| {
-                    if let Some(expected_sizes) = expected_sizes {
-                        for result in &results {
-                            let expected = expected_sizes
-                                .get(&result.partition_name)
-                                .copied()
-                                .ok_or(FirmwareExtractApplicationError::InvalidSelection)?;
-                            if result.size_bytes != expected {
-                                return Err(FirmwareExtractApplicationError::Format(format!(
-                                    "payload_dumper 输出镜像大小与分区元数据不一致：{}。",
-                                    result.partition_name
-                                )));
-                            }
-                        }
-                    }
-                    publish_payload_results_with_cancel(
-                        results,
-                        output_directory,
-                        &mut should_cancel,
-                        &mut report_progress,
-                        expected_total_bytes.map(|total| (total / 2, total)),
-                    )
-                });
+        // 进度必须跨分区累加：解析器的回调只报「当前分区已写量」，而 UI 要的是
+        // 总体进度。累加器负责把每分区的量结算进总量。
+        let mut accumulator = PartitionProgress::default();
+        let results = {
+            let mut on_progress = |name: &str, written: u64, partition_total: u64| {
+                let overall = accumulator.advance(name, written, partition_total);
+                report_progress(
+                    Some(name.to_string()),
+                    scale_progress(overall, total_bytes, 0, extraction_span),
+                );
+            };
+            match opened.inner.extract_partitions(
+                &partition_refs,
+                &staging_directory,
+                |name, written, total| on_progress(name, written, total),
+            ) {
+                Ok(results) => results,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&staging_directory);
+                    return Err(payload_error_to_application(error));
+                }
+            }
+        };
+
+        let published = publish_extracted_partitions(
+            &results,
+            &staging_directory,
+            output_directory,
+            &mut should_cancel,
+            &mut report_progress,
+            extraction_span,
+            publish_span,
+        );
         let _ = fs::remove_dir_all(&staging_directory);
-        result
+        published
     }
 }
 
-fn publish_payload_results_with_cancel<F, P>(
-    results: Vec<nwflash_domain::PayloadExtractionResult>,
+/// 把 `[0, total]` 区间的进度线性映射到 `[base, base + span]`。
+///
+/// 用来让多阶段流程（解压 → 发布）的进度合起来仍是单调递增的一条线。
+fn scale_progress(value: u64, total: u64, base: u64, span: u64) -> u64 {
+    if total == 0 {
+        return base;
+    }
+    let scaled = (value.min(total) as u128 * span as u128) / total as u128;
+    base.saturating_add(scaled as u64)
+}
+
+/// 把「当前分区的已写量」换算成「全部所选分区的已写总量」。
+///
+/// 解析器逐分区回调，进入新分区时把上一个分区的总量结算进来。
+#[derive(Default)]
+struct PartitionProgress {
+    current_partition: String,
+    completed_bytes: u64,
+    current_total: u64,
+}
+
+impl PartitionProgress {
+    fn advance(&mut self, partition: &str, written: u64, partition_total: u64) -> u64 {
+        if partition != self.current_partition {
+            self.completed_bytes = self.completed_bytes.saturating_add(self.current_total);
+            self.current_partition = partition.to_string();
+            self.current_total = partition_total;
+        }
+        self.completed_bytes.saturating_add(written)
+    }
+}
+
+/// 把内建解析器的错误映射到应用层错误。
+fn payload_error_to_application(
+    error: nwflash_infrastructure::payload::PayloadError,
+) -> FirmwareExtractApplicationError {
+    use nwflash_infrastructure::payload::PayloadError as Source;
+    match error {
+        Source::MissingPartition(name) => {
+            FirmwareExtractApplicationError::Format(format!("固件中不存在分区 {name}。"))
+        }
+        Source::DifferentialUnsupported => FirmwareExtractApplicationError::Format(
+            "该固件是差分包，需要基础版本镜像才能提取。".to_string(),
+        ),
+        Source::MissingMagic | Source::UnsupportedVersion(_) | Source::Corrupt(_) => {
+            FirmwareExtractApplicationError::Format("固件 payload 格式无效或已损坏。".to_string())
+        }
+        Source::UnsupportedOperation(op) => FirmwareExtractApplicationError::Format(format!(
+            "固件使用了暂不支持的压缩方式（operation 类型 {op}）。"
+        )),
+        Source::Io(error) => FirmwareExtractApplicationError::Directory(error.to_string()),
+    }
+}
+
+/// 把暂存目录里已提取的镜像发布到用户输出目录。
+///
+/// 每个镜像先写成 `.partial-` 再 rename，保证用户看到的永远是完整文件；
+/// 失败或取消时清理已写出的部分文件，不留残骸。
+fn publish_extracted_partitions<F, P>(
+    results: &[nwflash_infrastructure::payload::ExtractedPartition],
+    staging_directory: &Path,
     output_directory: &Path,
     is_canceled: &mut F,
     report_progress: &mut P,
-    progress_phase: Option<(u64, u64)>,
+    base_progress: u64,
+    span_progress: u64,
 ) -> Result<Vec<FlashImageInfo>, FirmwareExtractApplicationError>
 where
     F: FnMut() -> bool,
     P: FnMut(Option<String>, u64),
 {
-    let total_bytes = results
-        .iter()
-        .filter_map(|result| u64::try_from(result.size_bytes).ok())
-        .sum::<u64>();
+    let total_bytes: u64 = results.iter().map(|result| result.total_bytes).sum();
     let mut pending = Vec::with_capacity(results.len());
     let mut partial_paths = Vec::with_capacity(results.len());
-    let mut promoted_paths = Vec::with_capacity(results.len());
+    let mut promoted: Vec<PathBuf> = Vec::with_capacity(results.len());
     let mut completed_bytes = 0u64;
     let publication = (|| {
         for result in results {
             ensure_not_canceled(is_canceled)?;
-            let source = File::open(&result.output_path)
+            let source_path = staging_directory.join(format!("{}.img", result.name));
+            let mut source = File::open(&source_path)
                 .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
-            let destination = output_directory.join(format!("{}.img", result.partition_name));
-            let partial = output_directory.join(format!(
-                ".{}.partial-{}",
-                result.partition_name,
-                unique_suffix()
-            ));
-            let mut source = source;
+            let destination = output_directory.join(format!("{}.img", result.name));
+            let partial =
+                output_directory.join(format!(".{}.partial-{}", result.name, unique_suffix()));
             let mut output = File::create_new(&partial)
                 .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
             partial_paths.push(partial.clone());
+
             let mut copied = 0u64;
-            let mut buffer = [0; 8192];
+            let mut buffer = [0u8; 8192];
             loop {
                 ensure_not_canceled(is_canceled)?;
                 let count = source.read(&mut buffer).map_err(|error| {
@@ -573,55 +611,71 @@ where
                     FirmwareExtractApplicationError::Directory(error.to_string())
                 })?;
                 copied = copied.saturating_add(count as u64);
-                let published_bytes = completed_bytes.saturating_add(copied);
-                let reported_bytes = progress_phase.map_or(published_bytes, |(start, end)| {
-                    payload_progress_for_phase(published_bytes, total_bytes, start, end)
-                });
-                report_progress(Some(result.partition_name.clone()), reported_bytes);
+                report_progress(
+                    Some(result.name.clone()),
+                    scale_progress(
+                        completed_bytes.saturating_add(copied),
+                        total_bytes,
+                        base_progress,
+                        span_progress,
+                    ),
+                );
             }
             output
                 .sync_all()
                 .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
-            let copied_size = i64::try_from(copied).unwrap_or(i64::MAX);
-            if copied_size != result.size_bytes {
-                return Err(FirmwareExtractApplicationError::Format(
-                    "payload_dumper 输出镜像大小无效。".to_string(),
-                ));
-            }
+            drop(output);
+
             completed_bytes = completed_bytes.saturating_add(copied);
-            pending.push((result, destination, partial));
+            pending.push((
+                partial.clone(),
+                destination.clone(),
+                result.name.clone(),
+                copied,
+            ));
+            report_progress(
+                Some(result.name.clone()),
+                scale_progress(completed_bytes, total_bytes, base_progress, span_progress),
+            );
         }
 
-        let mut images = Vec::with_capacity(pending.len());
-        for (result, destination, partial) in pending {
+        // 全部写完才 rename，保证「要么全有、要么全无」。
+        //
+        // 已 rename 的文件要记账：取消或失败发生在 rename 中途时，必须把这些
+        // 已经露在用户目录里的文件删掉。否则用户会拿到「一半新、一半没动」的
+        // 镜像集合，比彻底失败更危险（刷机时可能新旧镜像混用）。
+        for (partial, destination, _, _) in &pending {
             ensure_not_canceled(is_canceled)?;
-            fs::rename(&partial, &destination)
+            if destination.exists() {
+                fs::remove_file(destination).map_err(|error| {
+                    FirmwareExtractApplicationError::Directory(error.to_string())
+                })?;
+            }
+            fs::rename(partial, destination)
                 .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
-            partial_paths.retain(|path| path != &partial);
-            promoted_paths.push(destination.clone());
-            images.push(FlashImageInfo {
-                path: destination.to_string_lossy().into_owned(),
-                size_bytes: result.size_bytes,
-            });
+            promoted.push(destination.clone());
         }
-        Ok(images)
+        Ok(())
     })();
-    if publication.is_err() {
-        for partial in partial_paths {
-            let _ = fs::remove_file(partial);
-        }
-        for promoted in promoted_paths {
-            let _ = fs::remove_file(promoted);
-        }
-    }
-    publication
-}
 
-fn payload_progress_for_phase(bytes: u64, total: u64, start: u64, end: u64) -> u64 {
-    if total == 0 || end <= start {
-        return end;
+    if let Err(error) = publication {
+        for path in &partial_paths {
+            let _ = fs::remove_file(path);
+        }
+        // 回滚已经发布出去的文件，让「失败 = 什么都没变」成立。
+        for path in &promoted {
+            let _ = fs::remove_file(path);
+        }
+        return Err(error);
     }
-    start.saturating_add(bytes.min(total).saturating_mul(end.saturating_sub(start)) / total)
+
+    Ok(pending
+        .into_iter()
+        .map(|(_, destination, _name, size)| FlashImageInfo {
+            path: destination.to_string_lossy().into_owned(),
+            size_bytes: i64::try_from(size).unwrap_or(i64::MAX),
+        })
+        .collect())
 }
 
 fn export_directory_images_with_cancel(
@@ -790,71 +844,116 @@ fn unique_suffix() -> u128 {
         .unwrap_or(0)
 }
 
-/// payload_dumper 无进展判死窗口（秒）：对齐 C# `PayloadDumperRunner`
-/// 的 120 秒无进展即终止进程树。
-const PAYLOAD_NO_PROGRESS_TIMEOUT_SECONDS: u64 = 120;
-
-/// 跟踪 payload_dumper 暂存目录的写入进展，用于无进展判死。
-#[derive(Default)]
-struct PayloadProgressWatch {
-    last_bytes: Option<u64>,
-    unchanged_since: Option<std::time::Instant>,
-    stalled: bool,
+/// 已打开并解析好的 payload。
+///
+/// 源统一装箱成 `Read + Seek`：本地文件与远程 Range 读取器的差别只在
+/// 「`Seek` 是改文件指针还是发 HTTP 请求」，解析器不该知道这个区别。
+pub struct OpenedPayload {
+    inner: Payload<Box<dyn ReadSeek>>,
 }
 
-impl PayloadProgressWatch {
-    /// 记录当前已写字节；返回 true 表示已达无进展上限，调用方应终止进程。
-    fn note(&mut self, written_bytes: u64) -> bool {
-        if self.stalled {
-            return true;
-        }
-        let now = std::time::Instant::now();
-        match self.last_bytes {
-            Some(previous) if previous == written_bytes => {
-                let since = *self.unchanged_since.get_or_insert(now);
-                if now.duration_since(since)
-                    >= std::time::Duration::from_secs(PAYLOAD_NO_PROGRESS_TIMEOUT_SECONDS)
-                {
-                    self.stalled = true;
-                    return true;
-                }
-            }
-            _ => {
-                self.last_bytes = Some(written_bytes);
-                self.unchanged_since = Some(now);
-            }
-        }
-        false
+/// 解析器需要的全部能力。
+pub trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+
+/// 打开 payload 源（本地路径或 HTTP URL）并解析其清单。
+///
+/// 取代原先「调外部 `payload_dumper --metadata` 再读 `metadata.json`」的流程：
+/// 现在直接在进程内解析，进度与错误都不再经过子进程边界。
+fn open_payload<F>(
+    payload_source: &str,
+    should_cancel: &mut F,
+) -> Result<OpenedPayload, FirmwareExtractApplicationError>
+where
+    F: FnMut() -> bool,
+{
+    if should_cancel() {
+        return Err(FirmwareExtractApplicationError::Canceled);
+    }
+    if is_remote_source(payload_source) {
+        return open_remote_payload(payload_source);
+    }
+    let path = PathBuf::from(payload_source);
+    let mut file = File::open(&path).map_err(|error| {
+        FirmwareExtractApplicationError::Format(format!("打开固件失败：{error}"))
+    })?;
+    let total = file
+        .metadata()
+        .map_err(|error| FirmwareExtractApplicationError::Format(error.to_string()))?
+        .len();
+
+    // 固件可能是裸 payload.bin，也可能是包着 payload.bin 的 OTA zip。
+    // 后者要先在 zip 里定位成员——和远程路径共用同一套定位逻辑。
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_ok() && &magic == b"PK\x03\x04" {
+        let location = locate_payload_in_zip_in_file(&mut file, total)?;
+        let payload = Payload::from_reader_at(Box::new(file) as Box<dyn ReadSeek>, total, location)
+            .map_err(|error| FirmwareExtractApplicationError::Format(error.to_string()))?;
+        return Ok(OpenedPayload { inner: payload });
     }
 
-    fn stalled(&self) -> bool {
-        self.stalled
-    }
+    let payload = Payload::from_reader(Box::new(file) as Box<dyn ReadSeek>, total)
+        .map_err(|error| FirmwareExtractApplicationError::Format(error.to_string()))?;
+    Ok(OpenedPayload { inner: payload })
 }
 
-fn payload_process_error(error: nwflash_domain::DomainError) -> FirmwareExtractApplicationError {
-    match error {
-        nwflash_domain::DomainError::UserCancelled(_) => FirmwareExtractApplicationError::Canceled,
-        error => FirmwareExtractApplicationError::Format(error.to_string()),
-    }
+/// 在本地 zip 里定位 `payload.bin` 的绝对数据偏移。
+///
+/// 只需读尾部窗口（中央目录）加本地头那 30 字节，不必把整个固件读进内存——
+/// 真实 OTA 是 GB 级的。
+fn locate_payload_in_zip_in_file(
+    file: &mut File,
+    total: u64,
+) -> Result<u64, FirmwareExtractApplicationError> {
+    let window = 4u64 * 1024 * 1024;
+    let base = total.saturating_sub(window);
+    let size = (total - base) as usize;
+    let mut tail = vec![0u8; size];
+    file.seek(SeekFrom::Start(base))
+        .and_then(|_| file.read_exact(&mut tail))
+        .map_err(|error| {
+            FirmwareExtractApplicationError::Format(format!("读取压缩包尾部失败：{error}"))
+        })?;
+
+    let location = locate_payload_in_zip(&tail, base).map_err(|error| {
+        FirmwareExtractApplicationError::Format(format!("压缩包中未找到 payload.bin：{error}"))
+    })?;
+
+    let mut local_header = [0u8; 30];
+    file.seek(SeekFrom::Start(location.local_header_offset))
+        .and_then(|_| file.read_exact(&mut local_header))
+        .map_err(|error| {
+            FirmwareExtractApplicationError::Format(format!("读取 payload.bin 本地头失败：{error}"))
+        })?;
+    location.data_offset(&local_header).map_err(|error| {
+        FirmwareExtractApplicationError::Format(format!("定位 payload.bin 失败：{error}"))
+    })
 }
 
-fn payload_stage_progress(
-    staging_directory: &Path,
-    partition_names: &[&str],
-) -> (Option<String>, u64) {
-    let mut current_partition = None;
-    let mut written_bytes = 0u64;
-    for partition_name in partition_names {
-        let bytes = fs::metadata(staging_directory.join(format!("{partition_name}.img")))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        if bytes > 0 {
-            current_partition = Some((*partition_name).to_string());
-        }
-        written_bytes = written_bytes.saturating_add(bytes);
-    }
-    (current_partition, written_bytes)
+fn is_remote_source(source: &str) -> bool {
+    let source = source.trim();
+    source.starts_with("https://") || source.starts_with("http://")
+}
+
+fn open_remote_payload(
+    payload_source: &str,
+) -> Result<OpenedPayload, FirmwareExtractApplicationError> {
+    // 远程固件可能是裸 payload.bin，也可能是包着 payload.bin 的 zip。
+    // 定位逻辑复用基础设施层的实现——它内部走项目既有的 Range HTTP 读取器，
+    // 已经处理过 Vivo 固件 CDN 的长 Range 断流重试。
+    let url = payload_source.trim().to_string();
+    let (span, reader) = nwflash_infrastructure::payload::remote::locate_remote_payload(&url)
+        .map_err(|error| {
+            FirmwareExtractApplicationError::Format(format!("REMOTE_LOCATE_FAILED: {error}"))
+        })?;
+
+    let payload = Payload::from_reader_at(
+        Box::new(reader) as Box<dyn ReadSeek>,
+        span.total_len,
+        span.data_offset,
+    )
+    .map_err(|error| FirmwareExtractApplicationError::Format(error.to_string()))?;
+    Ok(OpenedPayload { inner: payload })
 }
 
 fn inspect_image_directory(
@@ -888,109 +987,179 @@ fn inspect_image_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nwflash_infrastructure::payload::ExtractedPartition;
 
+    fn staged(name: &str, bytes: u64) -> ExtractedPartition {
+        ExtractedPartition {
+            name: name.to_string(),
+            output_path: PathBuf::from(format!("{name}.img")),
+            bytes_written: bytes,
+            total_bytes: bytes,
+        }
+    }
+
+    /// 取消发生在拷贝途中时，不能留下任何半截文件——用户目录里要么有完整镜像，
+    /// 要么什么都没有。
     #[test]
-    fn payload_publication_cleans_partial_files_when_copy_is_canceled() {
+    fn publication_cleans_partial_files_when_copy_is_canceled() {
         let root = std::env::temp_dir().join(format!(
             "nwflash-payload-publication-cancel-{}",
             unique_suffix()
         ));
         let staging = root.join("staging");
         let output = root.join("output");
-        fs::create_dir_all(&staging).expect("staging directory should be created");
-        fs::create_dir_all(&output).expect("output directory should be created");
-        let staged_image = staging.join("boot.img");
-        fs::write(&staged_image, vec![7; 16 * 1024]).expect("staged image should be written");
-        let results = vec![nwflash_domain::PayloadExtractionResult {
-            partition_name: "boot".to_string(),
-            output_path: staged_image.to_string_lossy().into_owned(),
-            size_bytes: 16 * 1024,
-        }];
-        let mut cancellation_checks = 0usize;
+        fs::create_dir_all(&staging).expect("staging 目录");
+        fs::create_dir_all(&output).expect("output 目录");
+        fs::write(staging.join("boot.img"), vec![7u8; 16 * 1024]).expect("写入暂存镜像");
+
+        let results = vec![staged("boot", 16 * 1024)];
+        let mut checks = 0usize;
         let mut progress = Vec::new();
 
-        let error = publish_payload_results_with_cancel(
-            results,
+        let error = publish_extracted_partitions(
+            &results,
+            &staging,
             &output,
             &mut || {
-                cancellation_checks += 1;
-                cancellation_checks > 2
+                checks += 1;
+                checks > 2
             },
             &mut |partition, bytes| progress.push((partition, bytes)),
-            None,
+            0,
+            16 * 1024,
         )
-        .expect_err("publication should stop between copied chunks");
+        .expect_err("拷贝途中取消应当报错");
 
         assert!(matches!(error, FirmwareExtractApplicationError::Canceled));
-        assert!(progress.iter().any(|(_, bytes)| *bytes > 0));
-        assert!(!output.join("boot.img").exists());
-        assert!(fs::read_dir(&output)
-            .expect("output directory should remain readable")
-            .all(|entry| !entry
-                .expect("entry should be readable")
-                .file_name()
-                .to_string_lossy()
-                .contains("partial")));
-        fs::remove_dir_all(root).expect("fixture directory should be removed");
+        assert!(
+            progress.iter().any(|(_, bytes)| *bytes > 0),
+            "取消前应有进度"
+        );
+        assert!(!output.join("boot.img").exists(), "不得留下目标文件");
+        assert!(
+            fs::read_dir(&output)
+                .expect("output 可读")
+                .all(|entry| !entry
+                    .expect("entry 可读")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("partial")),
+            "不得留下 .partial- 残骸"
+        );
+        fs::remove_dir_all(root).expect("清理");
     }
 
+    /// 多个分区时，任何一个失败都不能让前面的分区「偷偷发布」成功——
+    /// 否则用户会拿到一套残缺的镜像集合，且难以察觉。
     #[test]
-    fn payload_publication_rolls_back_already_promoted_images_when_canceled_during_promotion() {
+    fn publication_publishes_nothing_when_canceled_during_promotion() {
         let root = std::env::temp_dir().join(format!(
-            "nwflash-payload-publication-promotion-cancel-{}",
+            "nwflash-payload-promotion-cancel-{}",
             unique_suffix()
         ));
         let staging = root.join("staging");
         let output = root.join("output");
-        fs::create_dir_all(&staging).expect("staging directory should be created");
-        fs::create_dir_all(&output).expect("output directory should be created");
-        let boot = staging.join("boot.img");
-        let vendor_boot = staging.join("vendor_boot.img");
-        fs::write(&boot, [7]).expect("boot image should be written");
-        fs::write(&vendor_boot, [9]).expect("vendor boot image should be written");
-        let results = vec![
-            nwflash_domain::PayloadExtractionResult {
-                partition_name: "boot".to_string(),
-                output_path: boot.to_string_lossy().into_owned(),
-                size_bytes: 1,
-            },
-            nwflash_domain::PayloadExtractionResult {
-                partition_name: "vendor_boot".to_string(),
-                output_path: vendor_boot.to_string_lossy().into_owned(),
-                size_bytes: 1,
-            },
-        ];
-        let mut cancellation_checks = 0usize;
+        fs::create_dir_all(&staging).expect("staging 目录");
+        fs::create_dir_all(&output).expect("output 目录");
+        fs::write(staging.join("boot.img"), [7u8]).expect("写入 boot");
+        fs::write(staging.join("vendor_boot.img"), [9u8]).expect("写入 vendor_boot");
 
-        let error = publish_payload_results_with_cancel(
-            results,
+        let results = vec![staged("boot", 1), staged("vendor_boot", 1)];
+        let mut checks = 0usize;
+
+        let error = publish_extracted_partitions(
+            &results,
+            &staging,
             &output,
             &mut || {
-                cancellation_checks += 1;
-                cancellation_checks >= 8
+                checks += 1;
+                // 在两个分区都拷完之后、开始 rename 之前取消。
+                checks >= 8
             },
             &mut |_, _| {},
-            None,
+            0,
+            2,
         )
-        .expect_err("publication should stop before promoting the second image");
+        .expect_err("发布阶段取消应当报错");
 
         assert!(matches!(error, FirmwareExtractApplicationError::Canceled));
-        assert!(!output.join("boot.img").exists());
+        assert!(!output.join("boot.img").exists(), "第一个分区也不得发布");
         assert!(!output.join("vendor_boot.img").exists());
-        assert!(fs::read_dir(&output)
-            .expect("output directory should remain readable")
-            .all(|entry| !entry
-                .expect("entry should be readable")
-                .file_name()
-                .to_string_lossy()
-                .contains("partial")));
-        fs::remove_dir_all(root).expect("fixture directory should be removed");
+        assert!(
+            fs::read_dir(&output)
+                .expect("output 可读")
+                .all(|entry| !entry
+                    .expect("entry 可读")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("partial")),
+            "不得留下 .partial- 残骸"
+        );
+        fs::remove_dir_all(root).expect("清理");
     }
 
+    /// 全部成功时应当发布完整镜像，且进度终值等于总字节数。
     #[test]
-    fn payload_progress_phases_are_monotonic_and_finish_at_the_metadata_total() {
-        assert_eq!(payload_progress_for_phase(100, 100, 0, 50), 50);
-        assert_eq!(payload_progress_for_phase(0, 100, 50, 100), 50);
-        assert_eq!(payload_progress_for_phase(100, 100, 50, 100), 100);
+    fn publication_promotes_every_image_on_success() {
+        let root = std::env::temp_dir().join(format!(
+            "nwflash-payload-publication-ok-{}",
+            unique_suffix()
+        ));
+        let staging = root.join("staging");
+        let output = root.join("output");
+        fs::create_dir_all(&staging).expect("staging 目录");
+        fs::create_dir_all(&output).expect("output 目录");
+        fs::write(staging.join("boot.img"), [1u8, 2, 3, 4]).expect("写入 boot");
+        fs::write(staging.join("vendor_boot.img"), [5u8, 6]).expect("写入 vendor_boot");
+
+        let results = vec![staged("boot", 4), staged("vendor_boot", 2)];
+        let mut progress: Vec<u64> = Vec::new();
+
+        let images = publish_extracted_partitions(
+            &results,
+            &staging,
+            &output,
+            &mut || false,
+            &mut |_, bytes| progress.push(bytes),
+            0,
+            6,
+        )
+        .expect("发布应当成功");
+
+        assert_eq!(images.len(), 2);
+        assert_eq!(
+            fs::read(output.join("boot.img")).expect("读取 boot"),
+            vec![1u8, 2, 3, 4]
+        );
+        assert_eq!(
+            fs::read(output.join("vendor_boot.img")).expect("读取 vendor_boot"),
+            vec![5u8, 6]
+        );
+        assert_eq!(progress.last().copied(), Some(6), "进度终值等于总字节数");
+        assert!(
+            progress.windows(2).all(|w| w[0] <= w[1]),
+            "进度必须单调不减: {progress:?}"
+        );
+        fs::remove_dir_all(root).expect("清理");
+    }
+
+    /// 进度累加器：解析器逐分区回调「当前分区已写量」，UI 要的是总体进度。
+    #[test]
+    fn partition_progress_accumulates_across_partitions() {
+        let mut accumulator = PartitionProgress::default();
+        // 分区 A 总量 100，写到 40。
+        assert_eq!(accumulator.advance("a", 40, 100), 40);
+        // 切到分区 B（总量 50），A 的 100 应已结算进来。
+        assert_eq!(accumulator.advance("b", 10, 50), 110);
+        assert_eq!(accumulator.advance("b", 50, 50), 150);
+    }
+
+    /// 同一分区内不得重复结算。
+    #[test]
+    fn partition_progress_does_not_double_count_within_a_partition() {
+        let mut accumulator = PartitionProgress::default();
+        assert_eq!(accumulator.advance("a", 10, 100), 10);
+        assert_eq!(accumulator.advance("a", 20, 100), 20);
+        assert_eq!(accumulator.advance("a", 100, 100), 100);
     }
 }

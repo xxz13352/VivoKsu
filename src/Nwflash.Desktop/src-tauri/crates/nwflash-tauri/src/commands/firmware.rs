@@ -872,11 +872,6 @@ fn remote_payload_application_error_to_domain(
         FirmwareExtractApplicationError::Canceled => {
             nwflash_domain::DomainError::UserCancelled("远程 payload 操作已取消。".to_string())
         }
-        FirmwareExtractApplicationError::PayloadStalled(seconds) => {
-            nwflash_domain::DomainError::ExternalTool(format!(
-                "payload_dumper 长时间没有输出进展（{seconds} 秒），已终止提取。"
-            ))
-        }
         FirmwareExtractApplicationError::InvalidSelection => {
             nwflash_domain::DomainError::InvalidInput(
                 "所选远程 payload 分区无效，请重新读取。".to_string(),
@@ -897,7 +892,6 @@ fn remote_payload_application_error_to_domain(
 async fn inspect_local_or_payload(
     coordinator: nwflash_application::OperationCoordinator,
     payload_runtime: PayloadInspectionRuntime,
-    provisioner: nwflash_infrastructure::PayloadDumperProvisioner,
     source_path: PathBuf,
 ) -> Result<FirmwareInspectionDto, String> {
     payload_runtime.clear();
@@ -922,10 +916,9 @@ async fn inspect_local_or_payload(
         false
     };
     if format == nwflash_infrastructure::FirmwareFormat::Payload || payload_zip {
-        return inspect_payload_with_provisioner_operation(
+        return inspect_payload_operation(
             coordinator,
             payload_runtime,
-            provisioner,
             source_path.to_string_lossy().into_owned(),
         )
         .await;
@@ -1026,7 +1019,6 @@ fn remote_inspection_dto(
 async fn inspect_remote_firmware_operation(
     coordinator: nwflash_application::OperationCoordinator,
     remote_runtime: RemoteFirmwareInspectionRuntime,
-    provisioner: nwflash_infrastructure::PayloadDumperProvisioner,
     source: String,
     progress: FirmwareProgressReporter,
 ) -> Result<FirmwareInspectionDto, String> {
@@ -1079,14 +1071,6 @@ async fn inspect_remote_firmware_operation(
                     }
                     RemoteFirmwareKind::PayloadZip | RemoteFirmwareKind::PayloadRaw => {
                         context.report_stage("正在准备 payload 提取工具");
-                        let executable = provisioner
-                            .ensure_installed(&cancellation, None)
-                            .await
-                            .map_err(|error| {
-                                nwflash_domain::DomainError::ExternalTool(format!(
-                                    "payload 提取工具未就绪：{error}"
-                                ))
-                            })?;
                         context.report_stage("正在读取 payload 分区列表");
                         let source_path = source.clone();
                         let inspect_cancellation = cancellation.clone();
@@ -1094,7 +1078,7 @@ async fn inspect_remote_firmware_operation(
                             let metadata_root = create_unique_firmware_root("firmware-metadata")
                                 .map_err(FirmwareExtractApplicationError::Format)?;
                             let result = FirmwareExtractService::inspect_payload(
-                                &executable,
+                                std::path::Path::new(""),
                                 &source_path,
                                 metadata_root.as_path(),
                                 || inspect_cancellation.is_cancelled(),
@@ -1148,7 +1132,6 @@ async fn extract_remote_firmware_operation(
     coordinator: nwflash_application::OperationCoordinator,
     extraction_runtime: FirmwareExtractionRuntime,
     remote_runtime: RemoteFirmwareInspectionRuntime,
-    provisioner: nwflash_infrastructure::PayloadDumperProvisioner,
     request: RemoteFirmwareExtractionRequest,
     progress: FirmwareProgressReporter,
 ) -> Result<FirmwareExtractionDto, String> {
@@ -1222,14 +1205,6 @@ async fn extract_remote_firmware_operation(
                     }
                     RemoteFirmwareKind::PayloadZip | RemoteFirmwareKind::PayloadRaw => {
                         context.report_stage("正在准备 payload 提取工具");
-                        let executable = provisioner
-                            .ensure_installed(&cancellation, None)
-                            .await
-                            .map_err(|error| {
-                                nwflash_domain::DomainError::ExternalTool(format!(
-                                    "payload 提取工具未就绪：{error}"
-                                ))
-                            })?;
                         context.report_stage("正在按需提取远程 payload 分区");
                         let source_path = selection.source.clone();
                         let entries = selection.entries.clone();
@@ -1240,7 +1215,7 @@ async fn extract_remote_firmware_operation(
                         let extraction_cancellation = cancellation.clone();
                         let result = task::spawn_blocking(move || {
                             FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
-                                &executable,
+                                std::path::Path::new(""),
                                 &source_path,
                                 &entries,
                                 &output_directory,
@@ -1345,7 +1320,6 @@ pub async fn firmware_inspect_remote(
     inspect_remote_firmware_operation(
         state.operation_coordinator.clone(),
         state.remote_firmware_inspection.clone(),
-        default_payload_provisioner(),
         source,
         state.firmware_progress.start(),
     )
@@ -1374,7 +1348,6 @@ pub async fn firmware_extract_remote(
         state.operation_coordinator.clone(),
         state.firmware_extraction.clone(),
         state.remote_firmware_inspection.clone(),
-        default_payload_provisioner(),
         request,
         state.firmware_progress.start(),
     )
@@ -1391,7 +1364,6 @@ pub async fn firmware_inspect_local(
     inspect_local_or_payload(
         state.operation_coordinator.clone(),
         state.payload_inspection.clone(),
-        default_payload_provisioner(),
         PathBuf::from(source_path),
     )
     .await
@@ -1532,10 +1504,9 @@ pub async fn firmware_extract_vivo_local(
     Ok(firmware_extraction_dto(images, result_ids))
 }
 
-async fn inspect_payload_with_provisioner_operation(
+async fn inspect_payload_operation(
     coordinator: nwflash_application::OperationCoordinator,
     payload_runtime: PayloadInspectionRuntime,
-    provisioner: nwflash_infrastructure::PayloadDumperProvisioner,
     source: String,
 ) -> Result<FirmwareInspectionDto, String> {
     payload_runtime.clear();
@@ -1548,15 +1519,6 @@ async fn inspect_payload_with_provisioner_operation(
             "读取 payload 分区",
             move |context, cancellation| async move {
                 let source_for_inspection = source.clone();
-                context.report_stage("正在准备 payload 提取工具");
-                let executable = provisioner
-                    .ensure_installed(&cancellation, None)
-                    .await
-                    .map_err(|error| {
-                        nwflash_domain::DomainError::ExternalTool(format!(
-                            "payload_dumper 未就绪：{error}"
-                        ))
-                    })?;
                 if cancellation.is_cancelled() {
                     return Err(nwflash_domain::DomainError::UserCancelled(
                         "读取 payload 分区已取消。".to_string(),
@@ -1567,7 +1529,7 @@ async fn inspect_payload_with_provisioner_operation(
                     let metadata_root = create_unique_firmware_root("firmware-metadata")
                         .map_err(FirmwareExtractApplicationError::Format)?;
                     let result = FirmwareExtractService::inspect_payload(
-                        &executable,
+                        std::path::Path::new(""),
                         &source_for_inspection,
                         metadata_root.as_path(),
                         || cancellation.is_cancelled(),
@@ -1610,20 +1572,18 @@ pub async fn firmware_inspect_payload_local(
     state.firmware_extraction.clear();
     state.payload_inspection.clear();
     state.remote_firmware_inspection.clear();
-    inspect_payload_with_provisioner_operation(
+    inspect_payload_operation(
         state.operation_coordinator.clone(),
         state.payload_inspection.clone(),
-        default_payload_provisioner(),
         source_path,
     )
     .await
 }
 
-async fn extract_payload_with_provisioner_operation(
+async fn extract_payload_operation(
     coordinator: nwflash_application::OperationCoordinator,
     extraction_runtime: FirmwareExtractionRuntime,
     payload_runtime: PayloadInspectionRuntime,
-    provisioner: nwflash_infrastructure::PayloadDumperProvisioner,
     selected_ids: Vec<String>,
     output_directory: PathBuf,
     progress: Option<FirmwareProgressReporter>,
@@ -1641,15 +1601,6 @@ async fn extract_payload_with_provisioner_operation(
                 if let Some(progress) = &progress {
                     progress.set_total_partitions(total_partitions);
                 }
-                context.report_stage("正在准备 payload 提取工具");
-                let executable = provisioner
-                    .ensure_installed(&cancellation, None)
-                    .await
-                    .map_err(|error| {
-                        nwflash_domain::DomainError::ExternalTool(format!(
-                            "payload_dumper 未就绪：{error}"
-                        ))
-                    })?;
                 if cancellation.is_cancelled() {
                     return Err(nwflash_domain::DomainError::UserCancelled(
                         "提取 payload 分区已取消。".to_string(),
@@ -1660,7 +1611,7 @@ async fn extract_payload_with_provisioner_operation(
                 let progress_for_extraction = progress.clone();
                 let extraction = task::spawn_blocking(move || {
                     FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
-                        &executable,
+                        std::path::Path::new(""),
                         &selection.source,
                         &selection.entries,
                         &output_directory,
@@ -1719,11 +1670,10 @@ pub async fn firmware_extract_payload_local(
         .firmware_output_directories
         .resolve(&output_directory_id)?;
     state.firmware_extraction.clear();
-    extract_payload_with_provisioner_operation(
+    extract_payload_operation(
         state.operation_coordinator.clone(),
         state.firmware_extraction.clone(),
         state.payload_inspection.clone(),
-        default_payload_provisioner(),
         selected_ids,
         output_directory,
         Some(state.firmware_progress.start()),
@@ -2183,13 +2133,6 @@ fn unique_firmware_suffix() -> u128 {
         .unwrap_or(0)
 }
 
-fn default_payload_provisioner() -> nwflash_infrastructure::PayloadDumperProvisioner {
-    // 内置 payload-tools 优先；缺失/哈希不符时经 failover 下载器按需补齐
-    // （恢复 C# 发布瘦身供给链，不再把“缺工具”直接抛给用户）。
-    crate::commands::resources::payload_provisioner_with_downloader(
-        nwflash_windows::bundled_resource_root(),
-    )
-}
 
 fn application_error_to_domain(
     error: FirmwareExtractApplicationError,
@@ -2242,6 +2185,95 @@ mod tests {
         root
     }
 
+    /// 构造真实 CrAU payload：内建解析器取代外部工具后，测试必须喂真字节。
+    fn write_crau_payload(path: &Path, partitions: &[(&str, usize)]) {
+        fn varint(mut value: u64, out: &mut Vec<u8>) {
+            loop {
+                let mut byte = (value & 0x7f) as u8;
+                value >>= 7;
+                if value != 0 {
+                    byte |= 0x80;
+                }
+                out.push(byte);
+                if value == 0 {
+                    break;
+                }
+            }
+        }
+        fn tag(field: u32, wire: u32, out: &mut Vec<u8>) {
+            varint(u64::from((field << 3) | wire), out);
+        }
+        fn ld(field: u32, body: &[u8], out: &mut Vec<u8>) {
+            tag(field, 2, out);
+            varint(body.len() as u64, out);
+            out.extend_from_slice(body);
+        }
+
+        let block_size: u32 = 4096;
+        let mut data = Vec::new();
+        let mut partitions_blob = Vec::new();
+        for (name, size) in partitions {
+            let content = vec![0x42u8; *size];
+            let data_offset = data.len() as u64;
+            data.extend_from_slice(&content);
+
+            let mut op = Vec::new();
+            tag(1, 0, &mut op);
+            varint(0, &mut op);
+            tag(2, 0, &mut op);
+            varint(data_offset, &mut op);
+            tag(3, 0, &mut op);
+            varint(content.len() as u64, &mut op);
+            let mut extent = Vec::new();
+            tag(1, 0, &mut extent);
+            varint(0, &mut extent);
+            tag(2, 0, &mut extent);
+            varint(
+                (content.len() as u64).div_ceil(u64::from(block_size)),
+                &mut extent,
+            );
+            ld(6, &extent, &mut op);
+
+            let mut info = Vec::new();
+            tag(1, 0, &mut info);
+            varint(content.len() as u64, &mut info);
+
+            let mut partition = Vec::new();
+            ld(1, name.as_bytes(), &mut partition);
+            ld(7, &info, &mut partition);
+            ld(8, &op, &mut partition);
+            ld(13, &partition, &mut partitions_blob);
+        }
+
+        let mut manifest = Vec::new();
+        tag(3, 0, &mut manifest);
+        varint(u64::from(block_size), &mut manifest);
+        manifest.extend_from_slice(&partitions_blob);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"CrAU");
+        payload.extend_from_slice(&2u64.to_be_bytes());
+        payload.extend_from_slice(&(manifest.len() as u64).to_be_bytes());
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend_from_slice(&manifest);
+        payload.extend_from_slice(&data);
+        fs::write(path, payload).expect("CrAU payload fixture should be written");
+    }
+
+    /// 写一个 `payload.bin` 以 **store（不压缩）** 方式存放的 zip。
+    fn write_stored_payload_zip(path: &Path, payload: &[u8]) {
+        let file = File::create(path).expect("zip fixture should be created");
+        let mut archive = ZipWriter::new(file);
+        archive
+            .start_file(
+                "payload.bin",
+                SimpleFileOptions::default().compression_method(zip4::CompressionMethod::Stored),
+            )
+            .expect("payload.bin should be added");
+        archive.write_all(payload).expect("payload should be written");
+        archive.finish().expect("zip fixture should be finalized");
+    }
+
     fn write_image_zip(path: &Path, entries: &[(&str, &[u8])]) {
         let file = File::create(path).expect("zip fixture should be created");
         let mut archive = ZipWriter::new(file);
@@ -2262,22 +2294,6 @@ mod tests {
         )
         .expect("payload tool script should be written");
         executable
-    }
-
-    fn test_provisioner(
-        root: &Path,
-        executable: PathBuf,
-    ) -> nwflash_infrastructure::PayloadDumperProvisioner {
-        let executable_hash = format!(
-            "{:x}",
-            Sha256::digest(fs::read(&executable).expect("test executable should be readable"),)
-        );
-        nwflash_infrastructure::PayloadDumperProvisioner::with_expected_sha256(
-            nwflash_infrastructure::RemoteAssetDownloader::default(),
-            Some(root.join("cache")),
-            Some(executable),
-            executable_hash,
-        )
     }
 
     fn spawn_remote_payload_server(body: Vec<u8>) -> String {
@@ -3042,25 +3058,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_inspection_operation_uses_a_provisioned_tool_and_path_safe_metadata() {
+    async fn payload_inspection_operation_uses_builtin_parsing_and_path_safe_metadata() {
         let root = temp_root("payload-operation");
-        let executable = write_metadata_tool(&root);
+        let source = root.join("source.payload");
+        write_crau_payload(&source, &[("boot", 4096)]);
         let payload_runtime = PayloadInspectionRuntime::new();
 
-        let inspection = inspect_payload_with_provisioner_operation(
+        let inspection = inspect_payload_operation(
             nwflash_application::OperationCoordinator::default(),
             payload_runtime.clone(),
-            test_provisioner(&root, executable),
-            root.join("source.payload").to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
         )
         .await
-        .expect("provisioned payload tool should inspect metadata");
+        .expect("内建解析器应当读出分区清单");
 
         assert_eq!(inspection.format, "payload");
         assert_eq!(inspection.entries.len(), 1);
         assert_eq!(inspection.entries[0].id, "0");
         assert_eq!(inspection.entries[0].name, "boot");
-        assert_eq!(inspection.entries[0].size_bytes, 4);
+        assert_eq!(inspection.entries[0].size_bytes, 4096);
         assert_eq!(
             payload_runtime
                 .resolve_selected(&["0".to_string()])
@@ -3069,64 +3085,53 @@ mod tests {
                 .iter()
                 .map(|entry| (entry.name.as_str(), entry.size_bytes))
                 .collect::<Vec<_>>(),
-            vec![("boot", 4)]
+            vec![("boot", 4096)]
         );
         fs::remove_dir_all(root).expect("fixture directory should be removed");
     }
 
     #[tokio::test]
-    async fn remote_payload_inspection_passes_the_original_url_to_payload_dumper() {
+    async fn remote_payload_inspection_reads_the_original_url_in_process() {
         let root = temp_root("remote-payload-inspect-url");
-        let record = root.join("source.txt");
-        let executable = write_recording_metadata_tool(&root, &record);
-        let url = spawn_remote_payload_server(b"CrAU\x01remote-payload".to_vec());
+        let payload_path = root.join("remote.bin");
+        write_crau_payload(&payload_path, &[("boot", 4096)]);
+        let url = spawn_remote_payload_server(fs::read(&payload_path).expect("读取 payload"));
 
         let inspection = inspect_remote_firmware_operation(
             nwflash_application::OperationCoordinator::default(),
             RemoteFirmwareInspectionRuntime::new(),
-            test_provisioner(&root, executable),
             url.clone(),
             FirmwareProgressRuntime::new().start(),
         )
         .await
-        .expect("remote payload should be inspected");
+        .expect("远程 payload 应当在进程内被解析");
 
+        assert_eq!(inspection.entries.len(), 1);
         assert_eq!(inspection.entries[0].name, "boot");
-        assert_eq!(
-            fs::read_to_string(&record)
-                .expect("source argument should be recorded")
-                .trim(),
-            url
-        );
         fs::remove_dir_all(root).expect("fixture directory should be removed");
     }
 
     #[tokio::test]
     async fn payload_extraction_operation_resolves_runtime_ids_and_hides_output_paths() {
         let root = temp_root("payload-extract-operation");
-        let executable = root.join("payload_dumper.cmd");
-        fs::write(
-            &executable,
-            "@echo off\r\nset output=\r\nset partitions=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-i\" set partitions=%~2\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\nfor %%p in (%partitions:,= %) do >\"%output%\\%%p.img\" echo payload\r\nexit /b 0\r\n",
-        )
-        .expect("payload tool script should be written");
+        let source = root.join("source.payload");
+        write_crau_payload(&source, &[("boot", 4096)]);
         let payload_runtime = PayloadInspectionRuntime::new();
         payload_runtime.replace(
-            root.join("source.payload").to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
             vec![FirmwareExtractEntry {
                 id: "0".to_string(),
                 name: "boot".to_string(),
-                size_bytes: 9,
+                size_bytes: 4096,
             }],
         );
         let extraction_runtime = FirmwareExtractionRuntime::new();
         let output_directory = root.join("output");
 
-        let extraction = extract_payload_with_provisioner_operation(
+        let extraction = extract_payload_operation(
             nwflash_application::OperationCoordinator::default(),
             extraction_runtime.clone(),
             payload_runtime,
-            test_provisioner(&root, executable),
             vec!["0".to_string()],
             output_directory.clone(),
             None,
@@ -3136,7 +3141,7 @@ mod tests {
 
         assert_eq!(extraction.images.len(), 1);
         assert_eq!(extraction.images[0].name, "boot.img");
-        assert_eq!(extraction.images[0].size_bytes, 9);
+        assert_eq!(extraction.images[0].size_bytes, 4096);
         assert!(extraction.images[0].result_id.is_some());
         assert!(output_directory.join("boot.img").is_file());
         extraction_runtime.clear();
@@ -3146,9 +3151,9 @@ mod tests {
     #[tokio::test]
     async fn remote_payload_extraction_passes_the_original_url_and_selected_partition() {
         let root = temp_root("remote-payload-extract-url");
-        let record = root.join("source.txt");
-        let executable = write_recording_extraction_tool(&root, &record);
-        let url = spawn_remote_payload_server(b"CrAU\x01remote-payload".to_vec());
+        let payload_path = root.join("remote.bin");
+        write_crau_payload(&payload_path, &[("boot", 4096)]);
+        let url = spawn_remote_payload_server(fs::read(&payload_path).expect("读取 payload"));
         let remote_runtime = RemoteFirmwareInspectionRuntime::new();
         remote_runtime.replace(
             url.clone(),
@@ -3156,7 +3161,7 @@ mod tests {
             vec![FirmwareExtractEntry {
                 id: "0".to_string(),
                 name: "boot".to_string(),
-                size_bytes: 9,
+                size_bytes: 4096,
             }],
         );
         let output_directory = root.join("output");
@@ -3165,7 +3170,6 @@ mod tests {
             nwflash_application::OperationCoordinator::default(),
             FirmwareExtractionRuntime::new(),
             remote_runtime,
-            test_provisioner(&root, executable),
             RemoteFirmwareExtractionRequest {
                 source: url.clone(),
                 selected_ids: vec!["0".to_string()],
@@ -3174,34 +3178,27 @@ mod tests {
             FirmwareProgressRuntime::new().start(),
         )
         .await
-        .expect("remote payload should be extracted");
+        .expect("远程 payload 应当在进程内被提取");
 
         assert_eq!(extraction.images.len(), 1);
-        assert_eq!(
-            fs::read_to_string(&record)
-                .expect("source argument should be recorded")
-                .trim(),
-            url
-        );
+        assert_eq!(extraction.images[0].name, "boot.img");
         assert!(output_directory.join("boot.img").is_file());
         fs::remove_dir_all(root).expect("fixture directory should be removed");
     }
 
     #[tokio::test]
-    async fn local_firmware_router_uses_the_provisioned_payload_path_for_crau_sources() {
+    async fn local_firmware_router_routes_crau_sources_to_the_payload_inspector() {
         let root = temp_root("payload-router");
         let source = root.join("payload.bin");
-        fs::write(&source, b"CrAU").expect("payload fixture should be written");
-        let executable = write_metadata_tool(&root);
+        write_crau_payload(&source, &[("boot", 4096)]);
 
         let inspection = inspect_local_or_payload(
             nwflash_application::OperationCoordinator::default(),
             PayloadInspectionRuntime::new(),
-            test_provisioner(&root, executable),
             source,
         )
         .await
-        .expect("CrAU source should be inspected through payload_dumper");
+        .expect("CrAU 源应当走 payload 检查分支");
 
         assert_eq!(inspection.format, "payload");
         assert_eq!(inspection.entries[0].name, "boot");
@@ -3209,20 +3206,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_firmware_router_uses_the_provisioned_payload_path_for_payload_zip_sources() {
+    async fn local_firmware_router_routes_payload_zips_to_the_payload_inspector() {
         let root = temp_root("payload-zip-router");
         let source = root.join("ota.zip");
-        write_image_zip(&source, &[("payload.bin", b"payload")]);
-        let executable = write_metadata_tool(&root);
+        let payload = root.join("payload.bin");
+        write_crau_payload(&payload, &[("boot", 4096)]);
+        write_stored_payload_zip(&source, &fs::read(&payload).expect("读取 payload"));
 
         let inspection = inspect_local_or_payload(
             nwflash_application::OperationCoordinator::default(),
             PayloadInspectionRuntime::new(),
-            test_provisioner(&root, executable),
             source,
         )
         .await
-        .expect("payload ZIP should be inspected through payload_dumper");
+        .expect("含 payload.bin 的 ZIP 应当走 payload 检查分支");
 
         assert_eq!(inspection.format, "payload");
         assert_eq!(inspection.entries[0].name, "boot");
@@ -3270,7 +3267,6 @@ mod tests {
         let inspection = inspect_local_or_payload(
             coordinator,
             PayloadInspectionRuntime::new(),
-            test_provisioner(&root, write_metadata_tool(&root)),
             source,
         )
         .await

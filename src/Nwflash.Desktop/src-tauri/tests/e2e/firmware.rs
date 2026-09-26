@@ -17,43 +17,38 @@ fn temporary_directory(label: &str) -> PathBuf {
 }
 
 #[test]
-fn payload_dumper_process_failure_propagates_and_removes_private_staging() {
+fn corrupt_payload_fails_without_publishing_partial_images() {
+    // 内建解析器取代了外部 payload_dumper；仍然要保证：提取失败绝不在用户
+    // 输出目录里留下半截镜像。这里用一个截断的 CrAU 头触发解码失败。
     let root = temporary_directory("payload-failure");
     fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
-    let staging_record = root.join("staging-path.txt");
+    let payload = root.join("broken.bin");
+    // 头声明有 manifest，但后面什么都没有。
+    let mut broken = Vec::new();
+    broken.extend_from_slice(b"CrAU");
+    broken.extend_from_slice(&2u64.to_be_bytes());
+    broken.extend_from_slice(&4096u64.to_be_bytes());
+    broken.extend_from_slice(&0u32.to_be_bytes());
+    fs::write(&payload, &broken).expect("broken payload should be written");
     let output = root.join("output");
-    let script = format!(
-        "@echo off\r\nset output=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\n>\"%output%\\partial.img\" echo partial\r\n>\"{}\" echo %output%\r\nexit /b 9\r\n",
-        staging_record.display()
-    );
-    fs::write(&executable, script).expect("rejecting payload tool should be written");
 
     let error = FirmwareExtractService::extract_payload(
-        &executable,
-        "source.payload",
-        &["boot".to_string(), "init_boot".to_string()],
+        std::path::Path::new(""),
+        payload.to_string_lossy().as_ref(),
+        &["boot".to_string()],
         &output,
         || false,
     )
-    .expect_err("nonzero payload_dumper exit must propagate through the extraction service");
+    .expect_err("损坏的 payload 必须失败");
 
     assert!(
-        matches!(error, FirmwareExtractApplicationError::Format(message) if message.contains("9"))
+        matches!(error, FirmwareExtractApplicationError::Format(_)),
+        "实际: {error:?}"
     );
-    let private_staging = PathBuf::from(
-        fs::read_to_string(&staging_record)
-            .expect("payload tool should record its staging path")
-            .trim(),
-    );
-    assert!(!private_staging.exists());
-    assert_eq!(
-        fs::read_dir(&output)
-            .expect("user output directory should be readable")
-            .count(),
-        0,
-        "failed payload extraction must not publish partial images"
-    );
+    let published = fs::read_dir(&output)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(published, 0, "失败时不得发布任何镜像");
     fs::remove_dir_all(root).expect("fixture directory should be removed");
 }
 

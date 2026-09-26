@@ -84,285 +84,311 @@ fn extract_local_vivo_archive_propagates_cancellation() {
     fs::remove_dir_all(root).expect("fixture directory should be removed");
 }
 
-#[test]
-fn extract_payload_runs_the_controlled_tool_and_returns_verified_images() {
+// ---------- payload（CrAU）测试 ----------
+//
+// 这些测试构造**真实的合成 payload**，不再模拟外部工具：内建实现直接在进程内
+// 解析，所以测试也应当喂给它真正的 CrAU 字节，而不是一个假装会写文件的 .cmd。
+
+fn varint(mut value: u64, out: &mut Vec<u8>) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn tag(field: u32, wire: u32, out: &mut Vec<u8>) {
+    varint(u64::from((field << 3) | wire), out);
+}
+
+fn length_delimited(field: u32, body: &[u8], out: &mut Vec<u8>) {
+    tag(field, 2, out);
+    varint(body.len() as u64, out);
+    out.extend_from_slice(body);
+}
+
+/// 构造一个含指定分区的 CrAU payload（全部用 raw operation，单 extent）。
+fn build_payload(block_size: u32, partitions: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut partitions_blob = Vec::new();
+
+    for (name, content) in partitions {
+        let data_offset = data.len() as u64;
+        data.extend_from_slice(content);
+
+        let mut op = Vec::new();
+        tag(1, 0, &mut op);
+        varint(0, &mut op); // 0 = REPLACE
+        tag(2, 0, &mut op);
+        varint(data_offset, &mut op);
+        tag(3, 0, &mut op);
+        varint(content.len() as u64, &mut op);
+        let mut extent = Vec::new();
+        tag(1, 0, &mut extent);
+        varint(0, &mut extent);
+        tag(2, 0, &mut extent);
+        varint(
+            (content.len() as u64).div_ceil(u64::from(block_size)),
+            &mut extent,
+        );
+        length_delimited(6, &extent, &mut op);
+
+        let mut info = Vec::new();
+        tag(1, 0, &mut info);
+        varint(content.len() as u64, &mut info);
+
+        let mut partition = Vec::new();
+        length_delimited(1, name.as_bytes(), &mut partition);
+        length_delimited(7, &info, &mut partition);
+        length_delimited(8, &op, &mut partition);
+        length_delimited(13, &partition, &mut partitions_blob);
+    }
+
+    let mut manifest = Vec::new();
+    tag(3, 0, &mut manifest);
+    varint(u64::from(block_size), &mut manifest);
+    manifest.extend_from_slice(&partitions_blob);
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"CrAU");
+    payload.extend_from_slice(&2u64.to_be_bytes());
+    payload.extend_from_slice(&(manifest.len() as u64).to_be_bytes());
+    payload.extend_from_slice(&0u32.to_be_bytes());
+    payload.extend_from_slice(&manifest);
+    payload.extend_from_slice(&data);
+    payload
+}
+
+fn temp_root(label: &str) -> std::path::PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be available")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-extract-{nonce}"));
+    let root = std::env::temp_dir().join(format!("nwflash-{label}-{nonce}"));
     fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
-    let output = root.join("output");
+    root
+}
+
+#[test]
+fn extract_payload_writes_the_selected_partition_from_a_real_payload() {
+    let root = temp_root("payload-extract");
+    let payload = root.join("ota.bin");
     fs::write(
-        &executable,
-        "@echo off\r\nset output=\r\nset partitions=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-i\" set partitions=%~2\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\nfor %%p in (%partitions:,= %) do >\"%output%\\%%p.img\" echo payload\r\nexit /b 0\r\n",
+        &payload,
+        build_payload(4096, &[("boot", b"boot-image".to_vec())]),
     )
-    .expect("payload tool script should be written");
+    .expect("写入合成 payload");
+    let output = root.join("output");
 
     let images = FirmwareExtractService::extract_payload(
-        &executable,
-        "source.payload",
+        &root.join("unused.exe"),
+        payload.to_string_lossy().as_ref(),
         &["boot".to_string()],
         &output,
         || false,
     )
-    .expect("controlled payload tool should write a selected image");
+    .expect("内建解析器应当提取出镜像");
 
     assert_eq!(images.len(), 1);
-    assert_eq!(images[0].size_bytes, 9);
-    assert!(output.join("boot.img").exists());
-
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    assert_eq!(images[0].size_bytes, 10);
+    assert_eq!(
+        fs::read(output.join("boot.img")).expect("读取产物"),
+        b"boot-image"
+    );
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]
 fn extract_payload_rejects_duplicate_output_names_before_creating_the_user_output_directory() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-duplicates-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
+    let root = temp_root("payload-duplicates");
     let output = root.join("output");
 
     let error = FirmwareExtractService::extract_payload(
-        &root.join("unused-payload_dumper.cmd"),
+        &root.join("unused.exe"),
         "source.payload",
         &["boot".to_string(), "BOOT".to_string()],
         &output,
         || false,
     )
-    .expect_err("case-insensitive duplicate payload names must be rejected before any write");
+    .expect_err("重复分区名必须被拒绝");
 
     assert!(matches!(
         error,
         nwflash_application::FirmwareExtractApplicationError::InvalidSelection
     ));
-    assert!(!output.exists());
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    assert!(!output.exists(), "拒绝时不应创建输出目录");
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]
-fn extract_payload_reports_bytes_written_to_its_private_staging_directory() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-progress-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
-    let output = root.join("output");
+fn extract_payload_reports_monotonic_progress_across_partitions() {
+    let root = temp_root("payload-progress");
+    let payload = root.join("ota.bin");
+    // 单次读缓冲是 256 KiB，用 1 MiB 的分区才能观察到多次回调。
+    let big = vec![0x5Au8; 1024 * 1024];
     fs::write(
-        &executable,
-        "@echo off\r\nset output=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\n>\"%output%\\boot.img\" echo payload\r\nping -n 3 127.0.0.1 >nul\r\nexit /b 0\r\n",
+        &payload,
+        build_payload(4096, &[("system", big), ("boot", b"boot".to_vec())]),
     )
-    .expect("payload tool script should be written");
-    let mut updates = Vec::new();
+    .expect("写入合成 payload");
+    let output = root.join("output");
 
-    FirmwareExtractService::extract_payload_with_progress(
-        &executable,
-        "source.payload",
-        &["boot".to_string()],
+    let mut samples: Vec<u64> = Vec::new();
+    let images = FirmwareExtractService::extract_payload_with_progress(
+        &root.join("unused.exe"),
+        payload.to_string_lossy().as_ref(),
+        &["system".to_string(), "boot".to_string()],
         &output,
         || false,
-        |current_partition, written_bytes| updates.push((current_partition, written_bytes)),
+        |_, bytes| samples.push(bytes),
     )
-    .expect("controlled payload tool should report its staged output");
+    .expect("提取应当成功");
 
-    assert!(updates
-        .iter()
-        .any(|(partition, bytes)| partition.as_deref() == Some("boot") && *bytes > 0));
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    assert_eq!(images.len(), 2);
+    assert!(
+        samples.windows(2).all(|w| w[0] <= w[1]),
+        "进度必须单调不减: {samples:?}"
+    );
+    let total: u64 = images.iter().map(|i| i.size_bytes as u64).sum();
+    assert_eq!(samples.last().copied(), Some(total), "终值等于总字节数");
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]
-fn extract_payload_with_metadata_reports_monotonic_progress_across_publication() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-phase-progress-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
+fn extract_payload_does_not_publish_anything_when_a_partition_is_missing() {
+    let root = temp_root("payload-missing");
+    let payload = root.join("ota.bin");
+    fs::write(&payload, build_payload(4096, &[("boot", b"boot".to_vec())]))
+        .expect("写入合成 payload");
     let output = root.join("output");
-    fs::write(
-        &executable,
-        "@echo off\r\nset output=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\n>\"%output%\\boot.img\" echo payload\r\nping -n 3 127.0.0.1 >nul\r\nexit /b 0\r\n",
-    )
-    .expect("payload tool script should be written");
-    let selected = [FirmwareExtractEntry {
-        id: "0".to_string(),
-        name: "boot".to_string(),
-        size_bytes: 9,
-    }];
-    let mut updates = Vec::new();
-
-    FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
-        &executable,
-        "source.payload",
-        &selected,
-        &output,
-        || false,
-        |_, bytes| updates.push(bytes),
-    )
-    .expect("metadata-verified payload should be published");
-
-    assert!(updates.windows(2).all(|pair| pair[0] <= pair[1]));
-    assert_eq!(updates.last(), Some(&9));
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
-}
-
-#[test]
-fn extract_payload_does_not_accept_stale_user_output_when_the_tool_omits_a_selected_image() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-stale-output-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
-    let output = root.join("output");
-    fs::create_dir_all(&output).expect("user output directory should be created");
-    fs::write(output.join("boot.img"), b"stale").expect("stale output should be written");
-    fs::write(&executable, "@echo off\r\nexit /b 0\r\n")
-        .expect("payload tool script should be written");
 
     let error = FirmwareExtractService::extract_payload(
-        &executable,
-        "source.payload",
-        &["boot".to_string()],
+        &root.join("unused.exe"),
+        payload.to_string_lossy().as_ref(),
+        &["boot".to_string(), "nosuch".to_string()],
         &output,
         || false,
     )
-    .expect_err("a successful tool exit without a new staged image must fail");
+    .expect_err("不存在的分区必须失败");
 
-    assert!(error.to_string().contains("未生成所选分区镜像"));
-    assert_eq!(
-        fs::read(output.join("boot.img")).expect("stale user output should remain untouched"),
-        b"stale"
+    assert!(error.to_string().contains("nosuch"));
+    assert!(
+        !output.join("boot.img").exists(),
+        "失败时不得留下任何已发布的镜像"
     );
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]
-fn extract_payload_rejects_a_staged_partition_that_is_smaller_than_its_metadata_size() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-truncated-output-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
+fn extract_payload_reports_a_stale_size_mismatch_between_inspect_and_extract() {
+    let root = temp_root("payload-stale-size");
+    let payload = root.join("ota.bin");
+    fs::write(&payload, build_payload(4096, &[("boot", b"boot".to_vec())]))
+        .expect("写入合成 payload");
     let output = root.join("output");
-    fs::write(
-        &executable,
-        "@echo off\r\nset output=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\n>\"%output%\\boot.img\" echo bad\r\nexit /b 0\r\n",
-    )
-    .expect("payload tool script should be written");
-    let selected = [FirmwareExtractEntry {
+
+    // 调用方持有的尺寸来自先前的 inspect；若与 manifest 不一致，说明两次读到的
+    // 固件不是同一份（例如 URL 背后换了内容），必须失败而不是继续。
+    let stale = vec![FirmwareExtractEntry {
         id: "0".to_string(),
         name: "boot".to_string(),
-        size_bytes: 9,
+        size_bytes: 999,
     }];
-
     let error = FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
-        &executable,
-        "source.payload",
-        &selected,
+        &root.join("unused.exe"),
+        payload.to_string_lossy().as_ref(),
+        &stale,
         &output,
         || false,
         |_, _| {},
     )
-    .expect_err("truncated staged output must not be published");
+    .expect_err("尺寸不一致必须失败");
 
-    assert!(error.to_string().contains("大小"));
-    assert!(!output.join("boot.img").exists());
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    assert!(error.to_string().contains("尺寸"), "实际: {error}");
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]
-fn inspect_payload_runs_the_controlled_tool_and_projects_metadata_without_paths() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-inspect-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
-    let metadata = root.join("metadata");
+fn inspect_payload_projects_partition_metadata_without_file_paths() {
+    let root = temp_root("payload-inspect");
+    let payload = root.join("ota.bin");
     fs::write(
-        &executable,
-        "@echo off\r\nset output=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\n>\"%output%\\metadata.json\" echo {\"partitions\":[{\"partition_name\":\"boot\",\"size_in_bytes\":4,\"compression_type\":\"none\"}]}\r\nexit /b 0\r\n",
+        &payload,
+        build_payload(
+            4096,
+            &[("system", vec![7u8; 8192]), ("boot", vec![1u8; 4096])],
+        ),
     )
-    .expect("payload tool script should be written");
+    .expect("写入合成 payload");
 
-    let inspection =
-        FirmwareExtractService::inspect_payload(&executable, "source.payload", &metadata, || false)
-            .expect("controlled payload tool should produce parseable metadata");
+    let inspection = FirmwareExtractService::inspect_payload(
+        &root.join("unused.exe"),
+        payload.to_string_lossy().as_ref(),
+        &root.join("metadata"),
+        || false,
+    )
+    .expect("应当读出分区清单");
 
     assert_eq!(inspection.format, FirmwareFormat::Payload);
-    assert_eq!(inspection.entries.len(), 1);
-    assert_eq!(inspection.entries[0].id, "0");
-    assert_eq!(inspection.entries[0].name, "boot");
-    assert_eq!(inspection.entries[0].size_bytes, 4);
-
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    assert_eq!(
+        inspection
+            .entries
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.name.as_str(), entry.size_bytes))
+            .collect::<Vec<_>>(),
+        vec![("0", "system", 8192), ("1", "boot", 4096)]
+    );
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]
-fn inspect_payload_propagates_process_cancellation() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-cancel-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
-    fs::write(&executable, "@echo off\r\nexit /b 0\r\n")
-        .expect("payload tool script should be written");
+fn inspect_payload_propagates_cancellation() {
+    let root = temp_root("payload-inspect-cancel");
+    let payload = root.join("ota.bin");
+    fs::write(&payload, build_payload(4096, &[("boot", vec![1u8; 4096])]))
+        .expect("写入合成 payload");
 
     let error = FirmwareExtractService::inspect_payload(
-        &executable,
-        "source.payload",
+        &root.join("unused.exe"),
+        payload.to_string_lossy().as_ref(),
         &root.join("metadata"),
         || true,
     )
-    .expect_err("canceled payload metadata inspection must fail");
+    .expect_err("取消必须失败");
 
     assert!(matches!(
         error,
         nwflash_application::FirmwareExtractApplicationError::Canceled
     ));
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]
-fn extract_payload_propagates_process_cancellation() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock should be available")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("nwflash-payload-extract-cancel-{nonce}"));
-    fs::create_dir_all(&root).expect("fixture directory should be created");
-    let executable = root.join("payload_dumper.cmd");
-    fs::write(&executable, "@echo off\r\nexit /b 0\r\n")
-        .expect("payload tool script should be written");
+fn extract_payload_propagates_cancellation() {
+    let root = temp_root("payload-extract-cancel");
+    let payload = root.join("ota.bin");
+    fs::write(&payload, build_payload(4096, &[("boot", vec![1u8; 4096])]))
+        .expect("写入合成 payload");
+    let output = root.join("output");
 
     let error = FirmwareExtractService::extract_payload(
-        &executable,
-        "source.payload",
+        &root.join("unused.exe"),
+        payload.to_string_lossy().as_ref(),
         &["boot".to_string()],
-        &root.join("output"),
+        &output,
         || true,
     )
-    .expect_err("canceled payload extraction must fail");
+    .expect_err("取消必须失败");
 
-    assert!(matches!(
-        error,
-        nwflash_application::FirmwareExtractApplicationError::Canceled
-    ));
-    fs::remove_dir_all(root).expect("fixture directory should be removed");
+    assert!(error.to_string().contains("取消"));
+    assert!(!output.join("boot.img").exists());
+    fs::remove_dir_all(root).expect("清理");
 }
 
 #[test]

@@ -110,7 +110,10 @@ fn is_protected_system_partition(base: &str) -> bool {
     ];
     let bytes = base.as_bytes();
     table.iter().any(|entry| {
-        let end = entry.iter().position(|byte| *byte == 0).unwrap_or(entry.len());
+        let end = entry
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(entry.len());
         &entry[..end] == bytes
     })
 }
@@ -129,7 +132,10 @@ pub fn should_simulate_keep_root_partition(partition_name: &str) -> bool {
     let vendor_boot = obfstr::obfbytes!(b"vendor_boot\0\0\0\0\0");
     let table: [&[u8]; 3] = [boot, init_boot, vendor_boot];
     table.iter().any(|entry| {
-        let end = entry.iter().position(|byte| *byte == 0).unwrap_or(entry.len());
+        let end = entry
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(entry.len());
         &entry[..end] == base.as_bytes()
     })
 }

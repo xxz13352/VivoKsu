@@ -125,26 +125,109 @@ fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     writer.finish().expect("finish").into_inner()
 }
 
+/// 构造一个含指定分区的真实 CrAU payload，供远程 mock server 使用。
+///
+/// 内建解析器取代了外部 `payload_dumper`，所以这些测试必须喂真正的 payload 字节，
+/// 而不是一个假装产出文件的 .cmd。
+fn build_crau_payload(block_size: u32, partitions: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+    fn tag(field: u32, wire: u32, out: &mut Vec<u8>) {
+        varint(u64::from((field << 3) | wire), out);
+    }
+    fn ld(field: u32, body: &[u8], out: &mut Vec<u8>) {
+        tag(field, 2, out);
+        varint(body.len() as u64, out);
+        out.extend_from_slice(body);
+    }
+
+    let mut data = Vec::new();
+    let mut partitions_blob = Vec::new();
+    for (name, content) in partitions {
+        let data_offset = data.len() as u64;
+        data.extend_from_slice(content);
+
+        let mut op = Vec::new();
+        tag(1, 0, &mut op);
+        varint(0, &mut op);
+        tag(2, 0, &mut op);
+        varint(data_offset, &mut op);
+        tag(3, 0, &mut op);
+        varint(content.len() as u64, &mut op);
+        let mut extent = Vec::new();
+        tag(1, 0, &mut extent);
+        varint(0, &mut extent);
+        tag(2, 0, &mut extent);
+        varint(
+            (content.len() as u64).div_ceil(u64::from(block_size)),
+            &mut extent,
+        );
+        ld(6, &extent, &mut op);
+
+        let mut info = Vec::new();
+        tag(1, 0, &mut info);
+        varint(content.len() as u64, &mut info);
+
+        let mut partition = Vec::new();
+        ld(1, name.as_bytes(), &mut partition);
+        ld(7, &info, &mut partition);
+        ld(8, &op, &mut partition);
+        ld(13, &partition, &mut partitions_blob);
+    }
+
+    let mut manifest = Vec::new();
+    tag(3, 0, &mut manifest);
+    varint(u64::from(block_size), &mut manifest);
+    manifest.extend_from_slice(&partitions_blob);
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"CrAU");
+    payload.extend_from_slice(&2u64.to_be_bytes());
+    payload.extend_from_slice(&(manifest.len() as u64).to_be_bytes());
+    payload.extend_from_slice(&0u32.to_be_bytes());
+    payload.extend_from_slice(&manifest);
+    payload.extend_from_slice(&data);
+    payload
+}
+
+/// 把一个 CrAU payload 包进 zip，模拟真实 OTA 的分发形态。
+fn zip_with_payload(payload: &[u8]) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    {
+        let mut zip = ZipWriter::new(std::io::Cursor::new(&mut buffer));
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file("payload.bin", options)
+            .expect("start payload.bin");
+        zip.write_all(payload).expect("write payload.bin");
+        zip.finish().expect("finish zip");
+    }
+    buffer
+}
+
 fn staging() -> PathBuf {
     RootOtaService::create_staging_root().expect("staging root")
 }
 
-fn write_recording_payload_dumper(root: &std::path::Path, record: &std::path::Path) -> PathBuf {
-    let executable = root.join("payload_dumper.cmd");
-    fs::write(
-        &executable,
-        format!(
-            "@echo off\r\n>\"{}\" echo %~1\r\nif \"%~2\"==\"--metadata\" goto metadata\r\nset output=\r\nset partitions=\r\n:next\r\nif \"%~1\"==\"\" goto extract\r\nif \"%~1\"==\"-i\" set partitions=%~2\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:extract\r\nfor %%p in (%partitions:,= %) do >\"%output%\\%%p.img\" echo payload\r\nexit /b 0\r\n:metadata\r\n>\"%~4\\metadata.json\" echo {{\"partitions\":[{{\"partition_name\":\"boot\",\"size_in_bytes\":9,\"compression_type\":\"none\"}},{{\"partition_name\":\"vendor_boot\",\"size_in_bytes\":9,\"compression_type\":\"none\"}}]}}\r\nexit /b 0\r\n",
-            record.display()
-        ),
-    )
-    .expect("recording payload tool should be written");
-    executable
-}
 
 #[test]
-fn payload_kind_requires_payload_dumper() {
-    let zip = build_zip(&[("payload.bin", b"CrAU\x01"), ("care_map.pb", b"map")]);
+fn payload_kind_no_longer_requires_an_external_tool() {
+    // 内建实现取代了外部 payload_dumper：不再有「工具未就绪」这个失败模式。
+    // 这里给一个损坏的 payload.bin，期望得到的是**格式错误**而不是「工具缺失」。
+    let zip = build_zip(&[
+        ("payload.bin", b"not-a-crau-payload"),
+        ("care_map.pb", b"map"),
+    ]);
     let url = range_server(zip);
     let root = staging();
     let canceled = false;
@@ -152,7 +235,6 @@ fn payload_kind_requires_payload_dumper() {
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -160,24 +242,32 @@ fn payload_kind_requires_payload_dumper() {
             |_| {},
             |_| {},
         )
-        .expect_err("payload kind without payload_dumper must error");
-    assert!(err.to_string().contains("payload"));
+        .expect_err("损坏的 payload 必须失败");
+    let message = err.to_string();
+    assert!(
+        !message.contains("未就绪"),
+        "不应再出现「工具未就绪」：{message}"
+    );
     fs::remove_dir_all(&root).ok();
 }
 
 #[test]
-fn payload_root_extraction_passes_the_remote_url_directly_to_payload_dumper() {
-    let url = range_server(b"CrAU\x01remote-payload".to_vec());
+fn payload_root_extraction_reads_a_remote_payload_in_process() {
+    // 远程 zip 内含 payload.bin。内建解析器按 Range 直读，不下载整包。
+    let boot = vec![0x42u8; 64 * 1024];
+    let vendor_boot = vec![0x77u8; 32 * 1024];
+    let payload = build_crau_payload(
+        4096,
+        &[("boot", boot.clone()), ("vendor_boot", vendor_boot.clone())],
+    );
+    let url = range_server(zip_with_payload(&payload));
     let root = staging();
-    let record = root.join("payload-source.txt");
-    let executable = write_recording_payload_dumper(&root, &record);
     let canceled = false;
 
     let images = RootOtaService::new()
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: Some(&executable),
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -185,17 +275,16 @@ fn payload_root_extraction_passes_the_remote_url_directly_to_payload_dumper() {
             |_| {},
             |_| {},
         )
-        .expect("payload root extraction should use the remote URL directly");
+        .expect("远程 payload 应当在进程内被解析与提取");
 
-    assert_eq!(
-        fs::read_to_string(&record)
-            .expect("payload source should be recorded")
-            .trim(),
-        url
-    );
     assert_eq!(images.boot_partition_name, "boot");
-    assert!(images.boot_image.is_some());
-    assert!(images.vendor_boot.is_some());
+    let boot_image = images.boot_image.expect("boot 镜像");
+    assert_eq!(
+        fs::read(&boot_image.path).expect("读取 boot"),
+        boot,
+        "远程提取的镜像必须与 payload 内的字节完全一致"
+    );
+    assert!(images.vendor_boot.is_some(), "vendor_boot 也应被提取");
     fs::remove_dir_all(&root).ok();
 }
 
@@ -212,9 +301,8 @@ fn direct_zip_extracts_boot_and_vendor_boot() {
             .extract(
                 RootOtaExtractOptions {
                     url: &url,
-                    payload_dumper: None,
                     staging_root: &root,
-                integrity: RemoteFirmwareIntegrity::default(),
+                    integrity: RemoteFirmwareIntegrity::default(),
                 },
                 || canceled,
                 |_| {},
@@ -244,7 +332,6 @@ fn direct_zip_rejects_insufficient_extraction_capacity_before_creating_images() 
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -275,7 +362,6 @@ fn direct_zip_cancellation_after_member_listing_precedes_capacity_preflight() {
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -309,7 +395,6 @@ fn direct_zip_prefers_init_boot_over_boot() {
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -340,7 +425,6 @@ fn direct_zip_reports_monotonic_fractional_progress_until_completion() {
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -369,7 +453,6 @@ fn unsupported_kind_errors() {
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -392,7 +475,6 @@ fn missing_boot_partition_errors() {
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },
@@ -415,7 +497,6 @@ fn cancellation_aborts_before_extraction() {
         .extract(
             RootOtaExtractOptions {
                 url: &url,
-                payload_dumper: None,
                 staging_root: &root,
                 integrity: RemoteFirmwareIntegrity::default(),
             },

@@ -31,8 +31,8 @@ use nwflash_windows::{
     device_transport::DeviceTransport,
     platform_tools::PlatformTools,
     process::{
-        CancellableProcessExecutor, ProcessCommand, ProcessOutput, ProcessOutputObserver,
-        ProcessObservation, ProcessObserverError, SystemCancellableProcessExecutor,
+        CancellableProcessExecutor, ProcessCommand, ProcessObservation, ProcessObserverError,
+        ProcessOutput, ProcessOutputObserver, SystemCancellableProcessExecutor,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -63,8 +63,7 @@ pub struct SafeFlashPartitionProgress {
     pub partition_total: usize,
 }
 
-pub type SafeFlashPartitionProgressSink =
-    dyn Fn(SafeFlashPartitionProgress) + Send + Sync;
+pub type SafeFlashPartitionProgressSink = dyn Fn(SafeFlashPartitionProgress) + Send + Sync;
 
 #[derive(Debug, Clone)]
 pub struct SafeFlashPartitionSource {
@@ -109,7 +108,6 @@ pub enum SafeFlashSource {
         url: String,
         pd: String,
         version: String,
-        payload_dumper: Option<PathBuf>,
     },
 }
 
@@ -562,7 +560,6 @@ impl SafeFlashExecutionService {
         ) -> Result<SafeFlashPartitionFailureDecision, DomainError>,
         G: FnMut() -> bool,
     {
-
         // 每个分区镜像的落盘大小：真刷写时用来估算写入百分比。按分区基名
         // 建表（`system_a` / `system_b` 共用 `system` 的镜像），查不到就退化为
         // 「大小未知」，只报进行中而不猜百分比。
@@ -590,9 +587,7 @@ impl SafeFlashExecutionService {
             report_stage("正在重启设备".to_string());
             let command = transport
                 .build_adb_reboot_fastboot_command(&serial)
-                .map_err(|error| {
-                    DomainError::InvalidOperation(format!("重启设备失败：{error}"))
-                })?;
+                .map_err(|error| DomainError::InvalidOperation(format!("重启设备失败：{error}")))?;
             self.run_required(command, &mut is_canceled, "重启设备")?;
             executed_command_count += 1;
         }
@@ -697,9 +692,11 @@ impl SafeFlashExecutionService {
             ));
         } else {
             commands.push(SafeFlashStep::control(
-                transport.build_fastboot_reboot_command(&serial).map_err(|error| {
-                    DomainError::InvalidOperation(format!("重启设备失败：{error}"))
-                })?,
+                transport
+                    .build_fastboot_reboot_command(&serial)
+                    .map_err(|error| {
+                        DomainError::InvalidOperation(format!("重启设备失败：{error}"))
+                    })?,
             ));
         }
 
@@ -966,7 +963,11 @@ impl SafeFlashExecutionService {
         };
         let output = self
             .executor
-            .run_with_timeout(command, Some(command_budget::FLASH), &mut is_canceled_with_tick)
+            .run_with_timeout(
+                command,
+                Some(command_budget::FLASH),
+                &mut is_canceled_with_tick,
+            )
             .map_err(|error| match error {
                 DomainError::UserCancelled(_) => {
                     DomainError::UserCancelled("运行被用户取消".to_string())
@@ -978,8 +979,7 @@ impl SafeFlashExecutionService {
             // 常以退出码 0 出现。不扫描就继续刷下一分区＝半刷状态机。
             if let Some(failure) = fastboot_output_reports_failure(&output) {
                 return Err(DomainError::ExternalTool(fastboot_failure_summary_with(
-                    &output,
-                    &failure,
+                    &output, &failure,
                 )));
             }
             Ok(output)
@@ -1018,19 +1018,16 @@ impl SafeFlashExecutionService {
             if attempt > 0 && std::time::Instant::now() >= deadline {
                 break;
             }
-            let probe = self
-                .tools
-                .fastboot_devices_command()
-                .map_err(|error| {
-                    DomainError::InvalidOperation(format!("检测 fastbootd 失败：{error}"))
-                });
+            let probe = self.tools.fastboot_devices_command().map_err(|error| {
+                DomainError::InvalidOperation(format!("检测 fastbootd 失败：{error}"))
+            });
             let output = match probe
                 .and_then(|command| self.run_required(command, is_canceled, "检测 fastbootd"))
             {
                 Ok(output) => output,
-                Err(DomainError::UserCancelled(_)) => return Err(DomainError::UserCancelled(
-                    "运行被用户取消".to_string(),
-                )),
+                Err(DomainError::UserCancelled(_)) => {
+                    return Err(DomainError::UserCancelled("运行被用户取消".to_string()))
+                }
                 // 瞬态探测失败：本轮作废，继续等待窗口。
                 Err(_) => {
                     if attempt + 1 < self.fastbootd_attempts {
@@ -1052,9 +1049,7 @@ impl SafeFlashExecutionService {
                     match self.read_fastboot_var(transport, &serial, "is-userspace", is_canceled) {
                         Ok(userspace) => userspace,
                         Err(DomainError::UserCancelled(_)) => {
-                            return Err(DomainError::UserCancelled(
-                                "运行被用户取消".to_string(),
-                            ));
+                            return Err(DomainError::UserCancelled("运行被用户取消".to_string()));
                         }
                         // getvar 瞬态失败按「还没进入 fastbootd」继续等。
                         Err(_) => {
@@ -1082,8 +1077,8 @@ impl SafeFlashExecutionService {
 
     /// fastbootd 等待窗口总时长：attempts × poll_interval。
     fn fastbootd_window(&self) -> Duration {
-        let total_millis =
-            (self.fastbootd_attempts as u64).saturating_mul(self.fastbootd_poll_interval.as_millis() as u64);
+        let total_millis = (self.fastbootd_attempts as u64)
+            .saturating_mul(self.fastbootd_poll_interval.as_millis() as u64);
         Duration::from_millis(total_millis)
     }
 
@@ -1505,8 +1500,7 @@ fn parse_progress_bytes(line: &str) -> Option<u64> {
 /// 解析 `393216 KB` / `12.5 MB` / `1024 B` 这类「数值 + 单位」片段。
 fn parse_size_token(token: &str) -> Option<u64> {
     let token = token.trim();
-    let split = token
-        .find(|character: char| !(character.is_ascii_digit() || character == '.'))?;
+    let split = token.find(|character: char| !(character.is_ascii_digit() || character == '.'))?;
     let (number, unit) = token.split_at(split);
     let value = number.parse::<f64>().ok()?;
     if !value.is_finite() || value < 0.0 {
@@ -1824,12 +1818,7 @@ impl SafeFlashService {
                 )
                 .await
             }
-            SafeFlashSource::Online {
-                url,
-                pd,
-                version,
-                payload_dumper,
-            } => {
+            SafeFlashSource::Online { url, pd, version } => {
                 self.resolve_online_source(
                     &url,
                     &pd,
@@ -1837,7 +1826,6 @@ impl SafeFlashService {
                     options,
                     cancellation,
                     download_progress,
-                    payload_dumper.as_deref(),
                     preparation_progress.as_ref(),
                 )
                 .await
@@ -1847,12 +1835,10 @@ impl SafeFlashService {
 
     pub fn resolve_payload_source(
         &self,
-        executable_path: &Path,
         payload_source: &Path,
         options: &SafeFlashBuildOptions,
     ) -> Result<SafeFlashPreparedSource, DomainError> {
         self.resolve_payload_source_with_cancellation(
-            executable_path,
             payload_source,
             options,
             &CancellationToken::new(),
@@ -1861,13 +1847,11 @@ impl SafeFlashService {
 
     pub fn resolve_payload_source_with_cancellation(
         &self,
-        executable_path: &Path,
         payload_source: &Path,
         options: &SafeFlashBuildOptions,
         cancellation: &CancellationToken,
     ) -> Result<SafeFlashPreparedSource, DomainError> {
         self.resolve_payload_source_with_cancellation_and_progress(
-            executable_path,
             payload_source,
             options,
             cancellation,
@@ -1877,7 +1861,6 @@ impl SafeFlashService {
 
     pub fn resolve_payload_source_with_cancellation_and_progress(
         &self,
-        executable_path: &Path,
         payload_source: &Path,
         options: &SafeFlashBuildOptions,
         cancellation: &CancellationToken,
@@ -1899,7 +1882,7 @@ impl SafeFlashService {
             })?;
             let metadata_directory = staging_root.join("metadata");
             let inspection = FirmwareExtractService::inspect_payload(
-                executable_path,
+                Path::new(""),
                 payload_source,
                 &metadata_directory,
                 || cancellation.is_cancelled(),
@@ -1938,7 +1921,7 @@ impl SafeFlashService {
             // `payload_output_bytes` 会被生命周期挡住。
             let preparation_progress_for_extraction = preparation_progress.cloned();
             let images = FirmwareExtractService::extract_payload_with_expected_sizes_and_progress(
-                executable_path,
+                Path::new(""),
                 payload_source,
                 &selected,
                 &image_directory,
@@ -2183,7 +2166,6 @@ impl SafeFlashService {
         options: &SafeFlashBuildOptions,
         cancellation: &CancellationToken,
         download_progress: Option<Arc<OtaDownloadProgressSink>>,
-        payload_dumper: Option<&Path>,
         preparation_progress: Option<&Arc<SafeFlashPreparationProgressSink>>,
     ) -> Result<SafeFlashPreparedSource, DomainError> {
         self.ensure_preparation_not_canceled(cancellation)?;
@@ -2222,11 +2204,8 @@ impl SafeFlashService {
             let has_payload = has_payload_bin(&mut archive, cancellation)?;
             drop(archive);
             if has_payload {
-                let executable = payload_dumper.ok_or_else(|| {
-                    DomainError::ExternalTool("payload 提取工具未就绪。".to_string())
-                })?;
+                // payload 由进程内解析器处理，不再需要外部可执行文件。
                 let prepared = self.resolve_payload_source_with_cancellation_and_progress(
-                    executable,
                     &download_target,
                     options,
                     cancellation,
@@ -2248,7 +2227,6 @@ impl SafeFlashService {
             let has_block_based_content = self
                 .has_block_based_content_with_cancellation(&download_target, cancellation)
                 .map_err(map_preparation_io_error)?;
-
 
             Ok(SafeFlashPreparedSource {
                 staging_root: Some(staging_root.clone()),
@@ -2293,12 +2271,9 @@ impl SafeFlashService {
 
         // 单独选中的镜像若正好只做假刷写（例如只挑了 system.img，或勾选了
         // 保留 ROOT 却挑了 boot.img）：文件本来就在本地，用它的真实大小计时。
-        let simulated_flash_bytes = should_simulate_partition_flash(
-            name,
-            options.is_safe_flash,
-            options.is_keep_root,
-        )
-        .then(|| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0));
+        let simulated_flash_bytes =
+            should_simulate_partition_flash(name, options.is_safe_flash, options.is_keep_root)
+                .then(|| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0));
 
         Ok(vec![SafeFlashPartitionSource {
             partition_name: name.to_string(),
@@ -2366,7 +2341,7 @@ impl SafeFlashService {
         Ok(partitions)
     }
 
-async fn list_zip_images(
+    async fn list_zip_images(
         &self,
         source: &Path,
         options: &SafeFlashBuildOptions,
@@ -3075,8 +3050,12 @@ mod fastboot_progress_tests {
         let mut parser = FastbootProgressParser::new(8 * MIB);
         // 真实顺序：先 Sending 报块大小，再逐行报块内进度。
         assert_eq!(parser.observe_line("Sending 'boot' (8192 KB)..."), None);
-        let first = parser.observe_line("boot: 2048 KB/8192 KB").expect("progress expected");
-        let second = parser.observe_line("boot: 4096 KB/8192 KB").expect("progress expected");
+        let first = parser
+            .observe_line("boot: 2048 KB/8192 KB")
+            .expect("progress expected");
+        let second = parser
+            .observe_line("boot: 4096 KB/8192 KB")
+            .expect("progress expected");
         assert!(second > first, "进度必须单调推进：{first} -> {second}");
         // 块内计数回退时按「本块从头」重算，但累计量绝不倒退。
         let after_regress = parser
@@ -3136,7 +3115,9 @@ mod fastboot_progress_tests {
         let mut parser = FastbootProgressParser::new(4 * MIB);
         parser.observe_line("Sending 'boot' (4096 KB)...");
         parser.observe_line("boot: 1024 KB/4096 KB");
-        let filled = parser.observe_line("Writing 'boot'...").expect("remainder must be filled");
+        let filled = parser
+            .observe_line("Writing 'boot'...")
+            .expect("remainder must be filled");
         assert_eq!(filled, 4 * MIB);
     }
 

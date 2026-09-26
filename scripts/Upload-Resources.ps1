@@ -6,7 +6,7 @@ param(
 )
 
 # Uploads the externalized release assets to a GitHub PUBLIC repository:
-#   KSU.APK, KernelSU.apk, payload_dumper-win-x64.zip
+#   KSU.APK, KernelSU.apk
 # Target: xxz13352/NWFlash (see RemoteAssetCatalog for the constants the client reads).
 # Prereq: gh CLI (https://cli.github.com) installed and authenticated (gh auth login).
 # Creates the release if it does not exist, then uploads each asset. Idempotent re-runs
@@ -21,7 +21,6 @@ param(
 #   3. Compute SHA256 (certutil -hashfile <file> SHA256) and paste into code.
 #
 # After upload, keep the active Rust/Tauri resource verification constants in sync.
-# The client verifies the extracted payload_dumper.exe; the transport ZIP only needs
 # to contain the verified executable at its root.
 
 $ErrorActionPreference = "Stop"
@@ -34,47 +33,30 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $appSource = Join-Path $repositoryRoot "src\Nwflash.Desktop\src-tauri\resources"
 $apkKsu = Join-Path $appSource "apk\KSU.APK"
 $apkKernelSu = Join-Path $appSource "apk\KernelSU.apk"
-$payloadExe = Join-Path $appSource "payload-tools\payload_dumper.exe"
-$payloadZip = Join-Path $repositoryRoot "artifacts\resources\payload_dumper-win-x64.zip"
 
-foreach ($file in @($apkKsu, $apkKernelSu, $payloadExe)) {
+foreach ($file in @($apkKsu, $apkKernelSu)) {
     if (-not (Test-Path -LiteralPath $file)) {
         throw "Missing source asset: $file"
     }
 }
 
-Write-Host "Packaging payload_dumper-win-x64.zip..."
-$payloadZipDir = Split-Path -Parent $payloadZip
-if (-not (Test-Path -LiteralPath $payloadZipDir)) {
-    New-Item -ItemType Directory -Path $payloadZipDir -Force | Out-Null
-}
-# payload_dumper.exe must sit at the zip ROOT so the client extracts it as payload_dumper.exe.
-$tempZipDir = Join-Path $payloadZipDir ".staging"
-if (Test-Path -LiteralPath $tempZipDir) { Remove-Item -LiteralPath $tempZipDir -Recurse -Force }
-New-Item -ItemType Directory -Path $tempZipDir -Force | Out-Null
-Copy-Item -LiteralPath $payloadExe -Destination $tempZipDir
-if (Test-Path -LiteralPath $payloadZip) { Remove-Item -LiteralPath $payloadZip -Force }
-Compress-Archive -Path (Join-Path $tempZipDir "*") -DestinationPath $payloadZip -Force
-Remove-Item -LiteralPath $tempZipDir -Recurse -Force
-
 Write-Host "Checking release $ReleaseTag on $Owner/$Repository..."
 if (-not (gh release view $ReleaseTag --repo "$Owner/$Repository" --json tagName --jq .tagName 2>$null)) {
     Write-Host "Creating release $ReleaseTag..."
-    gh release create $ReleaseTag --repo "$Owner/$Repository" --title $ReleaseTag --notes "Externalized runtime assets for Nwflash (ROOT manager APKs + payload_dumper)." --latest
+    gh release create $ReleaseTag --repo "$Owner/$Repository" --title $ReleaseTag --notes "Externalized runtime assets for Nwflash (ROOT manager APKs)." --latest
 }
 
 Write-Host "Uploading assets..."
 gh release upload $ReleaseTag --repo "$Owner/$Repository" --clobber `
     "$apkKsu" `
-    "$apkKernelSu" `
-    "$payloadZip"
+    "$apkKernelSu"
 
 Write-Host ""
 Write-Host "=== SHA256SUMS (keep in sync with code) ==="
-foreach ($file in @($apkKsu, $apkKernelSu, $payloadZip)) {
+foreach ($file in @($apkKsu, $apkKernelSu)) {
     $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
     $name = Split-Path -Leaf $file
     Write-Host "$hash  $name"
 }
 Write-Host ""
-Write-Host "KSU.APK / KernelSU.apk and payload_dumper checks are owned by the Rust/Tauri client."
+Write-Host "KSU.APK / KernelSU.apk checks are owned by the Rust/Tauri client."

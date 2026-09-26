@@ -69,7 +69,6 @@ fn tauri_bundle_declares_every_runtime_tool_resource() {
         "resources/scrcpy",
         "resources/apk/KSU.APK",
         "resources/apk/KernelSU.apk",
-        "resources/payload-tools/payload_dumper.exe",
     ];
 
     for resource in required_resources {

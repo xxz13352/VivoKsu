@@ -1,6 +1,6 @@
 use nwflash_application::result_to_domain_error;
 use nwflash_domain::{DomainError, OperationKind};
-use nwflash_infrastructure::{PayloadDumperProvisioner, ScrcpyProvisioner, VivoRootResourceService};
+use nwflash_infrastructure::{ScrcpyProvisioner, VivoRootResourceService};
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::State;
@@ -11,11 +11,6 @@ pub(crate) fn scrcpy_provisioner_with_downloader(app_root: PathBuf) -> ScrcpyPro
     ScrcpyProvisioner::bundled(app_root)
 }
 
-/// payload_dumper 只使用安装包中的可执行文件。
-pub(crate) fn payload_provisioner_with_downloader(app_root: PathBuf) -> PayloadDumperProvisioner {
-    PayloadDumperProvisioner::bundled(app_root)
-}
-
 /// 管理器 APK 只使用安装包中的文件。
 pub(crate) fn root_resource_service_with_downloader(app_root: PathBuf) -> VivoRootResourceService {
     VivoRootResourceService::new(app_root, None)
@@ -24,7 +19,6 @@ pub(crate) fn root_resource_service_with_downloader(app_root: PathBuf) -> VivoRo
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResourceKey {
     Scrcpy,
-    Payload,
     KsuManager,
     OfficialKsuManager,
 }
@@ -33,7 +27,6 @@ impl ResourceKey {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "scrcpy" => Ok(Self::Scrcpy),
-            "payload" => Ok(Self::Payload),
             "manager-KSU" => Ok(Self::KsuManager),
             "manager-OfficialKsu" => Ok(Self::OfficialKsuManager),
             _ => Err(format!("不支持的资源项: {value}")),
@@ -74,7 +67,6 @@ pub async fn resource_install(
             "校验内置组件",
             move |context, cancellation| async move {
                 let scrcpy = scrcpy_provisioner_with_downloader(app_root.clone());
-                let payload = payload_provisioner_with_downloader(app_root.clone());
                 let managers = root_resource_service_with_downloader(app_root);
                 let total = selected.len();
 
@@ -96,18 +88,6 @@ pub async fn resource_install(
                                 },
                             )?;
                             "scrcpy"
-                        }
-                        ResourceKey::Payload => {
-                            context.report_stage("校验内置 payload_dumper");
-                            payload
-                                .ensure_installed(&cancellation, None)
-                                .await
-                                .map_err(|error| {
-                                    DomainError::ExternalTool(format!(
-                                        "内置 payload_dumper 校验失败：{error}"
-                                    ))
-                                })?;
-                            "payload"
                         }
                         ResourceKey::KsuManager => {
                             context.report_stage("校验内置 KSU 管理器");
@@ -157,7 +137,6 @@ pub async fn resource_install(
 fn resource_key_name(key: ResourceKey) -> String {
     match key {
         ResourceKey::Scrcpy => "scrcpy",
-        ResourceKey::Payload => "payload",
         ResourceKey::KsuManager => "manager-KSU",
         ResourceKey::OfficialKsuManager => "manager-OfficialKsu",
     }
@@ -176,12 +155,10 @@ pub struct ResourceInventoryItemDto {
 pub fn resource_inventory() -> Vec<ResourceInventoryItemDto> {
     let app_root = nwflash_windows::bundled_resource_root();
     let managers = VivoRootResourceService::new(app_root.clone(), None);
-    let scrcpy_ready = ScrcpyProvisioner::bundled(app_root.clone()).is_installed();
-    let payload_ready = PayloadDumperProvisioner::bundled(app_root).is_available();
+    let scrcpy_ready = ScrcpyProvisioner::bundled(app_root).is_installed();
 
     build_resource_inventory(
         scrcpy_ready,
-        payload_ready,
         managers.is_manager_apk_installed("KSU"),
         managers.is_manager_apk_installed("OfficialKsu"),
     )
@@ -189,13 +166,11 @@ pub fn resource_inventory() -> Vec<ResourceInventoryItemDto> {
 
 fn build_resource_inventory(
     scrcpy_ready: bool,
-    payload_ready: bool,
     ksu_ready: bool,
     official_ksu_ready: bool,
 ) -> Vec<ResourceInventoryItemDto> {
     [
         ("scrcpy", "scrcpy 投屏", scrcpy_ready),
-        ("payload", "payload_dumper", payload_ready),
         ("manager-KSU", "KSU 管理器", ksu_ready),
         ("manager-OfficialKsu", "KernelSU 管理器", official_ksu_ready),
     ]
@@ -214,27 +189,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resource_inventory_lists_the_four_wpf_resources_and_selects_only_missing_items() {
-        let items = build_resource_inventory(true, false, false, true);
+    fn resource_inventory_lists_the_packaged_resources_and_selects_only_missing_items() {
+        // payload 提取已内建进主程序，不再是需要校验的外部资源项。
+        let items = build_resource_inventory(true, false, true);
 
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].key, "scrcpy");
         assert!(items[0].is_ready);
         assert!(!items[0].default_selected);
-        assert_eq!(items[1].key, "payload");
+        assert_eq!(items[1].key, "manager-KSU");
         assert!(items[1].default_selected);
-        assert_eq!(items[2].key, "manager-KSU");
-        assert!(items[2].default_selected);
-        assert_eq!(items[3].key, "manager-OfficialKsu");
-        assert!(!items[3].default_selected);
+        assert_eq!(items[2].key, "manager-OfficialKsu");
+        assert!(!items[2].default_selected);
     }
 
     #[test]
     fn resource_install_selection_rejects_unknown_or_empty_resource_keys() {
         assert_eq!(
-            validate_resource_selection(vec!["scrcpy".to_string(), "payload".to_string()])
+            validate_resource_selection(vec!["scrcpy".to_string(), "manager-KSU".to_string()])
                 .expect("known resources should be accepted"),
-            vec![ResourceKey::Scrcpy, ResourceKey::Payload]
+            vec![ResourceKey::Scrcpy, ResourceKey::KsuManager]
         );
         assert!(validate_resource_selection(Vec::new())
             .expect_err("empty selection must be rejected")

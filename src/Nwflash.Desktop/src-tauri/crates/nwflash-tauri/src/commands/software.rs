@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use nwflash_infrastructure::{PayloadDumperProvisioner, ScrcpyProvisioner, DEFAULT_APP_VERSION};
+use nwflash_infrastructure::{ScrcpyProvisioner, DEFAULT_APP_VERSION};
 use nwflash_windows::{detect_drivers, DriverDetectionPaths, DriverStatus};
 use serde::Serialize;
 
@@ -24,16 +24,15 @@ pub fn software_status() -> SoftwareStatusDto {
     let app_root = nwflash_windows::bundled_resource_root();
     let drivers = detect_drivers(&DriverDetectionPaths::default_windows());
     let scrcpy_ready = ScrcpyProvisioner::bundled(app_root.clone()).is_installed();
-    let payload_dumper_ready = PayloadDumperProvisioner::bundled(app_root.clone()).is_available();
+    // payload 提取已内建进主程序，不存在「工具未就绪」这种状态。
 
-    software_status_from_app_root(&app_root, drivers, scrcpy_ready, payload_dumper_ready)
+    software_status_from_app_root(&app_root, drivers, scrcpy_ready)
 }
 
 fn software_status_from_app_root(
     app_root: &Path,
     drivers: DriverStatus,
     scrcpy_ready: bool,
-    payload_dumper_ready: bool,
 ) -> SoftwareStatusDto {
     let platform_tools = app_root.join("platform-tools");
     SoftwareStatusDto {
@@ -41,7 +40,8 @@ fn software_status_from_app_root(
         adb_ready: is_non_empty_file(&platform_tools.join("adb.exe")),
         fastboot_ready: is_non_empty_file(&platform_tools.join("fastboot.exe")),
         scrcpy_ready,
-        payload_dumper_ready,
+        // payload 提取已内建进主程序，恒为就绪。
+        payload_dumper_ready: true,
         adb_driver_installed: drivers.adb_installed,
         fastboot_driver_installed: drivers.fastboot_installed,
         mediatek_driver_installed: drivers.mediatek_installed,
@@ -91,13 +91,13 @@ mod tests {
                 mediatek_installed: true,
             },
             true,
-            false,
         );
 
         assert!(status.adb_ready);
         assert!(status.fastboot_ready);
         assert!(status.scrcpy_ready);
-        assert!(!status.payload_dumper_ready);
+        // payload 提取已内建，恒为就绪。
+        assert!(status.payload_dumper_ready);
         assert!(status.adb_driver_installed);
         assert!(!status.fastboot_driver_installed);
         assert!(status.mediatek_driver_installed);

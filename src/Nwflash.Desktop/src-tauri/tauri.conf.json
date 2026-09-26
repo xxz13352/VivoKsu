@@ -42,8 +42,7 @@
       "resources/root-tools/magiskboot.so",
       "resources/scrcpy",
       "resources/apk/KSU.APK",
-      "resources/apk/KernelSU.apk",
-      "resources/payload-tools/payload_dumper.exe"
+      "resources/apk/KernelSU.apk"
     ],
     "windows": {
       "webviewInstallMode": {

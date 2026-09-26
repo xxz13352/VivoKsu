@@ -7,8 +7,7 @@ pub mod firmware_package;
 pub mod operation_log;
 pub mod ota_download;
 pub mod paths;
-pub mod payload_dumper;
-pub mod payload_provisioner;
+pub mod payload;
 mod pinned_tls;
 pub mod preferences;
 pub mod remote_assets;
@@ -49,22 +48,23 @@ pub use ota_download::{
     OTA_DOWNLOAD_PROGRESS_INTERVAL, OTA_DOWNLOAD_STALL_TIMEOUT, OTA_RANGE_SUBREQUEST_BYTES,
 };
 pub use paths::{resource_root, try_make_writable};
-pub use payload_dumper::{
-    collect_payload_extraction_results, collect_required_payload_extraction_results,
-    parse_payload_metadata, validate_partition_name, PayloadDumperCommand, PayloadDumperError,
+pub use payload::remote::{
+    locate_payload_in_zip, locate_remote_payload, PayloadLocation, RemotePayloadReader,
+    RemotePayloadSpan, RemoteRead, RemoteReader,
 };
-pub use payload_provisioner::{PayloadDumperProvisioner, PayloadProvisionError};
+pub use payload::{
+    Extent, ExtractedPartition, Manifest, Operation, Partition, Payload, PayloadError,
+};
+pub use pinned_tls::{compiled_session_verifying_key, IntegrityFailure, PinsetClaims};
 #[cfg(debug_assertions)]
 pub use pinned_tls::{
     ApiTlsPolicy, PinnedApiClient, SignedPinsetEnvelope, API_HOST, BUILTIN_LEAF_SPKI_PIN,
     BUILTIN_WE1_SPKI_PIN, EMBEDDED_PINSET_VERSION_FLOOR,
 };
-pub use pinned_tls::{compiled_session_verifying_key, IntegrityFailure, PinsetClaims};
 pub use preferences::{ToolPathPreferences, ToolPathSettings};
 pub use remote_assets::{
     github_download_url, is_known_manager_key, manager_apk_filename, manager_apk_sha256,
-    RemoteAssetSpec, MANAGER_KEY_KSU, MANAGER_KEY_OFFICIAL, PAYLOAD_DUMPER_ASSET_NAME,
-    PAYLOAD_DUMPER_EXECUTABLE_NAME, PAYLOAD_DUMPER_SHA256, ROOT_MANAGER_APK_KSU,
+    RemoteAssetSpec, MANAGER_KEY_KSU, MANAGER_KEY_OFFICIAL, ROOT_MANAGER_APK_KSU,
     ROOT_MANAGER_APK_OFFICIAL, ROOT_MANAGER_SHA256_KSU, ROOT_MANAGER_SHA256_OFFICIAL,
     SUPPORTED_KERNEL_RELEASE_FAMILIES,
 };

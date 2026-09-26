@@ -11,12 +11,7 @@ use nwflash_application::{
     RootOtaService,
 };
 use nwflash_domain::{DomainError, FlashImageInfo, OperationKind, OperationLogLevel};
-use nwflash_infrastructure::{
-    remote_firmware::{
-        probe_remote_kind, RemoteFirmwareError, RemoteFirmwareIntegrity, RemoteFirmwareKind,
-    },
-    PayloadDumperProvisioner, SecretToken,
-};
+use nwflash_infrastructure::{remote_firmware::RemoteFirmwareIntegrity, SecretToken};
 use serde::Serialize;
 use tauri::State;
 use tokio::task;
@@ -195,13 +190,6 @@ async fn read_online_ota_identity(
     crate::commands::device_identity::read_identity_if_admitted(serial, coordinator).await
 }
 
-fn needs_payload_dumper(kind: RemoteFirmwareKind) -> bool {
-    matches!(
-        kind,
-        RemoteFirmwareKind::PayloadZip | RemoteFirmwareKind::PayloadRaw
-    )
-}
-
 #[cfg(test)]
 pub(crate) fn root_ota_check_is_blocked(
     admission: OperationAdmissionState,
@@ -221,27 +209,6 @@ pub(crate) fn root_ota_check_block_reason(
             Some("denied:flashing")
         }
         OperationAdmissionState::Running => None,
-    }
-}
-
-fn map_probe_error(error: RemoteFirmwareError) -> DomainError {
-    match error {
-        RemoteFirmwareError::Cancelled => {
-            DomainError::UserCancelled("ROOT 云提取已取消。".to_string())
-        }
-        RemoteFirmwareError::RangeUnsupported => {
-            DomainError::InvalidOperation("服务器固件不支持 Range 请求。".to_string())
-        }
-        RemoteFirmwareError::UnsupportedFormat => {
-            DomainError::InvalidFormat("不支持的固件格式，无法云提取 ROOT 分区。".to_string())
-        }
-        RemoteFirmwareError::InvalidUrl(_)
-        | RemoteFirmwareError::Transport(_)
-        | RemoteFirmwareError::Archive(_)
-        | RemoteFirmwareError::MissingPartition(_)
-        | RemoteFirmwareError::Integrity(_) => {
-            DomainError::InvalidOperation("无法读取服务器固件，请重新检测后再试。".to_string())
-        }
     }
 }
 
@@ -455,37 +422,6 @@ pub async fn root_ota_extract_images(
                 let image_runtime = image_runtime.clone();
                 let result_for_operation = result_for_operation.clone();
                 async move {
-                    context.report_stage("正在探测固件格式");
-                    let probe_url = resolved.url.clone();
-                    let probe_cancellation = cancellation.clone();
-                    let remote_kind = task::spawn_blocking(move || {
-                        let mut is_canceled = || probe_cancellation.is_cancelled();
-                        probe_remote_kind(&probe_url, None, &mut is_canceled)
-                            .map_err(map_probe_error)
-                    })
-                    .await
-                    .map_err(|error| {
-                        DomainError::Internal(format!("ROOT 固件格式探测调度失败：{error}"))
-                    })??;
-
-                    let payload_dumper = if needs_payload_dumper(remote_kind) {
-                        context.report_stage("正在准备 payload 提取工具");
-                        let provisioner = PayloadDumperProvisioner::bundled(
-                            nwflash_windows::bundled_resource_root(),
-                        );
-                        Some(
-                            provisioner
-                                .ensure_installed(&cancellation, None)
-                                .await
-                                .map_err(|error| {
-                                    DomainError::ExternalTool(format!(
-                                        "payload 提取工具未就绪：{error}"
-                                    ))
-                                })?,
-                        )
-                    } else {
-                        None
-                    };
                     if cancellation.is_cancelled() {
                         return Err(DomainError::UserCancelled(
                             "ROOT 云提取已取消。".to_string(),
@@ -495,14 +431,12 @@ pub async fn root_ota_extract_images(
                     let service = RootOtaService::new();
                     let resolved_url = resolved.url.clone();
                     let resolved_integrity = resolved.integrity.clone();
-                    let payload_dumper_path = payload_dumper.clone();
                     // 进度/stage 从阻塞线程透传给 OperationCoordinator（单调进度，防回退）。
                     let context_for_blocking = context.clone();
                     let images = task::spawn_blocking(move || {
                         service.extract(
                             RootOtaExtractOptions {
                                 url: &resolved_url,
-                                payload_dumper: payload_dumper_path.as_deref(),
                                 staging_root: &staging,
                                 integrity: resolved_integrity,
                             },
@@ -761,22 +695,6 @@ mod tests {
         assert!(external_file_preserved);
         assert!(new_boot_valid_after_swap);
         assert!(new_vendor_absent);
-    }
-
-    #[test]
-    fn payload_dumper_is_required_only_for_payload_ota_kinds() {
-        assert!(needs_payload_dumper(
-            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::PayloadZip
-        ));
-        assert!(needs_payload_dumper(
-            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::PayloadRaw
-        ));
-        assert!(!needs_payload_dumper(
-            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::DirectImageZip
-        ));
-        assert!(!needs_payload_dumper(
-            nwflash_infrastructure::remote_firmware::RemoteFirmwareKind::Unsupported
-        ));
     }
 
     #[test]
