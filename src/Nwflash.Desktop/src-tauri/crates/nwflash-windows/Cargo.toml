@@ -5,6 +5,7 @@ edition = "2021"
 description = "Windows process and device integration adapters"
 
 [dependencies]
+encoding_rs = "0.8.35"
 nwflash-domain = { path = "../nwflash-domain" }
 nwflash-protection = { path = "../nwflash-protection" }
 sevenz-rust = { version = "0.6.1", default-features = false }

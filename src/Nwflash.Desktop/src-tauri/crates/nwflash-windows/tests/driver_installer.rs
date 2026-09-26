@@ -356,8 +356,7 @@ fn driver_installer_runs_elevated_pnputil_then_writes_adb_ids_and_cleans_staging
         .expect("pnputil command should be captured");
     assert!(command.program.ends_with("pnputil.exe"));
     assert_eq!(command.args[0], "/add-driver");
-    // 单条 pnputil 安装全部 INF(只提权一次);每个 INF 都是
-    // 绝对路径、以 .inf 结尾,最后固定 /install。
+    // 每个 INF 都是绝对路径、以 .inf 结尾,最后固定 /install。
     assert!(command.args[1..command.args.len() - 1]
         .iter()
         .all(|argument| argument.ends_with(".inf")));
@@ -571,4 +570,99 @@ impl ElevatedProcessExecutor for RecordingElevatedExecutor {
             stderr: String::new(),
         })
     }
+}
+
+/// 记录**每一批**命令，用于校验提权批次的形状。
+#[derive(Clone, Default)]
+struct BatchRecordingExecutor {
+    batches: Arc<Mutex<Vec<Vec<ProcessCommand>>>>,
+}
+
+impl BatchRecordingExecutor {
+    fn batches(&self) -> Vec<Vec<ProcessCommand>> {
+        self.batches
+            .lock()
+            .expect("batch lock should not be poisoned")
+            .clone()
+    }
+}
+
+impl ElevatedProcessExecutor for BatchRecordingExecutor {
+    fn run_elevated(
+        &self,
+        command: ProcessCommand,
+    ) -> Result<ProcessOutput, nwflash_domain::DomainError> {
+        self.batches
+            .lock()
+            .expect("batch lock should not be poisoned")
+            .push(vec![command]);
+        Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
+    fn run_elevated_batch(
+        &self,
+        commands: &[ProcessCommand],
+    ) -> Result<Vec<ProcessOutput>, nwflash_domain::DomainError> {
+        self.batches
+            .lock()
+            .expect("batch lock should not be poisoned")
+            .push(commands.to_vec());
+        Ok(commands
+            .iter()
+            .map(|_| ProcessOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+            .collect())
+    }
+}
+
+/// `pnputil /add-driver` 只接受**一个** INF：传两个及以上会打印用法并以退出码 1
+/// 结束（实测）。这条约束曾导致安装必然失败——驱动包有 8 个 INF，旧实现把它们
+/// 塞进同一条命令，pnputil 整体拒绝。这里把「一条命令一个 INF」「全部命令在
+/// 同一次提权里」钉死，避免回归。
+#[test]
+fn pnputil_gets_exactly_one_inf_per_command_in_a_single_elevation() {
+    let root = temporary_directory("driver-one-inf-per-command");
+    let executor = BatchRecordingExecutor::default();
+    let installer = DriverInstaller::with_dependencies(
+        fixture_archive(&root),
+        root.join("staging"),
+        root.join(".android").join("adb_usb.ini"),
+        executor.clone(),
+    );
+
+    assert_eq!(
+        installer.install().expect("driver install should succeed"),
+        0
+    );
+
+    let batches = executor.batches();
+    assert_eq!(batches.len(), 1, "全部 INF 必须在同一次提权里完成");
+    let commands = &batches[0];
+    assert!(
+        commands.len() > 1,
+        "驱动包含多个 INF，应该产生多条命令，而不是压成一条"
+    );
+    for command in commands {
+        assert!(command.program.ends_with("pnputil.exe"));
+        assert_eq!(command.args[0], "/add-driver");
+        assert_eq!(command.args.last(), Some(&"/install".to_string()));
+        let infs = &command.args[1..command.args.len() - 1];
+        assert_eq!(infs.len(), 1, "每条命令只能带一个 INF：{infs:?}");
+        assert!(infs[0].ends_with(".inf"));
+        assert!(!infs[0].contains('*'));
+        // `\\?\` verbatim 前缀会被 pnputil 拒绝（报「系统找不到指定的路径」）。
+        assert!(
+            !infs[0].starts_with("\\\\?\\"),
+            "不许把 canonicalize 的 verbatim 前缀交给 pnputil：{}",
+            infs[0]
+        );
+    }
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
 }

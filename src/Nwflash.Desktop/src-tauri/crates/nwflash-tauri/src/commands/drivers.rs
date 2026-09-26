@@ -6,7 +6,8 @@ use std::{
 use nwflash_application::result_to_domain_error;
 use nwflash_domain::DomainError;
 use nwflash_windows::{
-    detect_drivers, locate_bundled_driver_archive, DriverDetectionPaths, DriverInstaller,
+    detect_drivers, driver_install_failure_detail, locate_bundled_driver_archive,
+    DriverDetectionPaths, DriverInstaller,
 };
 use serde::Serialize;
 use tauri::State;
@@ -39,22 +40,25 @@ pub async fn driver_reinstall(
             "安装 USB 驱动",
             move |context, cancellation| async move {
                 context.report_stage("解压 USB 驱动包");
-                let exit_code = tauri::async_runtime::spawn_blocking(move || {
+                let outcome = tauri::async_runtime::spawn_blocking(move || {
                     DriverInstaller::new(archive, adb_usb_ini)
-                        .install_with_cancel(|| cancellation.is_cancelled())
+                        .install_with_cancel_detailed(|| cancellation.is_cancelled())
                 })
                 .await
                 .map_err(|error| DomainError::Internal(format!("驱动安装任务异常：{error}")))??;
 
-                if exit_code != 0 {
-                    return Err(DomainError::ExternalTool(format!(
-                        "pnputil 安装驱动失败，退出码 {exit_code}。"
+                if outcome.exit_code != 0 {
+                    // 保留 pnputil 的原始输出：退出码 1 可能是用法错误、签名失败
+                    // 或某个 INF 被拒，只说“退出码 1”用户和我们都无法定位。
+                    return Err(DomainError::ExternalTool(driver_install_failure_detail(
+                        &outcome,
                     )));
                 }
 
                 *exit_code_for_operation
                     .lock()
-                    .expect("driver install result lock should not be poisoned") = Some(exit_code);
+                    .expect("driver install result lock should not be poisoned") =
+                    Some(outcome.exit_code);
                 context.report_stage("USB 驱动安装完成");
                 context.report_progress(1.0);
                 Ok(())

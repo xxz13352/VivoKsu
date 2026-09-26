@@ -38,14 +38,100 @@ struct LockedStagingDirectory {
 
 pub trait ElevatedProcessExecutor: Send + Sync {
     fn run_elevated(&self, command: ProcessCommand) -> Result<ProcessOutput, DomainError>;
+
+    /// 在一次提权会话内顺序执行多条命令，返回每条命令的结果。
+    ///
+    /// 默认实现逐条调用 [`Self::run_elevated`]，语义正确但对用户意味着多次 UAC。
+    /// 系统实现覆盖它，把全部命令交给同一个已提权进程执行，用户只授权一次。
+    fn run_elevated_batch(
+        &self,
+        commands: &[ProcessCommand],
+    ) -> Result<Vec<ProcessOutput>, DomainError> {
+        commands
+            .iter()
+            .map(|command| self.run_elevated(command.clone()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemElevatedProcessExecutor;
 
+/// 一次驱动安装的结果，连同 pnputil 的原始输出。
+#[derive(Debug, Clone)]
+pub struct InstallOutcome {
+    /// 全部 INF 都成功时为 0；否则是**第一条失败命令**的退出码。
+    pub exit_code: i32,
+    /// 各条 pnputil 输出的合并文本（已从本地代码页解码）。
+    /// 提权路径下为空表示未能回收输出，不代表 pnputil 没打印东西。
+    pub output: String,
+}
+
+/// pnputil 的退出码语义（实测）：
+/// * `0`  有驱动包被新增；
+/// * `5`  命令**成功**处理了 INF，但没有任何包是新增的（例如全部已存在）；
+/// * `2`  目标 INF 缺失或非法；
+/// * `1`  用法错误——最常见的原因是 `/add-driver` 收到了不止一个 INF。
+///
+/// 只按 `!= 0` 判定会把退出码 5（驱动早就装好了）误报成安装失败。
+pub fn driver_install_succeeded(outcome: &InstallOutcome) -> bool {
+    outcome.exit_code == 0
+}
+
+/// 从一次安装结果中提取可用于展示给用户的失败原因。
+pub fn driver_install_failure_detail(outcome: &InstallOutcome) -> String {
+    let text = outcome.output.trim();
+    if text.is_empty() {
+        format!("pnputil 退出码 {}。", outcome.exit_code)
+    } else {
+        format!("pnputil 退出码 {}：{text}", outcome.exit_code)
+    }
+}
+
+/// 把多条命令的结果合成一个结论。
+///
+/// 退出码取第一条失败命令的；只要有一条失败，整体就是失败。输出全部保留，
+/// 便于定位到底是哪个 INF 出的问题。
+fn merge_install_outcomes(outputs: &[ProcessOutput]) -> InstallOutcome {
+    let mut exit_code = 0;
+    let mut sections = Vec::new();
+    for output in outputs {
+        if output.exit_code != 0 && exit_code == 0 {
+            exit_code = output.exit_code;
+        }
+        let text = driver_tool_output(output);
+        if !text.is_empty() {
+            sections.push(text);
+        }
+    }
+    InstallOutcome {
+        exit_code,
+        output: sections.join("\n"),
+    }
+}
+
+/// 合并 stdout/stderr 为一段文本，过滤空串并保持原有顺序。
+fn driver_tool_output(output: &ProcessOutput) -> String {
+    let mut parts = Vec::new();
+    for stream in [&output.stdout, &output.stderr] {
+        let trimmed = stream.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+    parts.join("\n")
+}
+
 impl ElevatedProcessExecutor for SystemElevatedProcessExecutor {
     fn run_elevated(&self, command: ProcessCommand) -> Result<ProcessOutput, DomainError> {
         run_elevated_process(command)
+    }
+
+    fn run_elevated_batch(
+        &self,
+        commands: &[ProcessCommand],
+    ) -> Result<Vec<ProcessOutput>, DomainError> {
+        run_elevated_processes(commands)
     }
 }
 
@@ -100,6 +186,22 @@ where
     where
         F: FnMut() -> bool,
     {
+        self.install_with_cancel_detailed(&mut should_cancel)
+            .map(|outcome| outcome.exit_code)
+    }
+
+    /// 与 [`Self::install_with_cancel`] 相同，但保留 pnputil 的原始输出。
+    ///
+    /// 提权路径下输出只能经日志文件回收（`ShellExecuteExW` 不给管道），失败时
+    /// 若不转述，用户和日志里就只剩一个光秃秃的退出码，无法区分「用法错误」
+    /// 「INF 被拒」「签名失败」。
+    pub fn install_with_cancel_detailed<F>(
+        &self,
+        mut should_cancel: F,
+    ) -> Result<InstallOutcome, DomainError>
+    where
+        F: FnMut() -> bool,
+    {
         let staging = self.create_staging_directory()?;
         let staging_path = staging.path.clone();
         let result = (|| {
@@ -120,21 +222,21 @@ where
                 return Err(DomainError::UserCancelled("用户取消驱动安装。".to_string()));
             }
 
-            // 单条 pnputil 命令安装全部 INF（对应 C# 一条 `/add-driver …
-            // /subdirs /install` 只提权一次）：逐 INF 多次 run_elevated 会让
-            // 用户为 3+ 个 INF 连续弹 3+ 次 UAC。仍是绝对路径、无通配符，
-            // 冻结校验一次性覆盖全部目标。
+            // pnputil 的 `/add-driver` **只接受一个** INF：传两个及以上会直接打印
+            // 用法并以退出码 1 结束（整体拒绝，不是逐个安装）。驱动包里有 8 个 INF，
+            // 所以必须逐条调用；但 8 次独立提权会连弹 8 次 UAC，因此这里把全部
+            // 命令交给 batch 接口，由同一次提权会话顺序执行。
             frozen.revalidate()?;
-            let output = self
-                .executor
-                .run_elevated(build_pnputil_install_command(&frozen.inf_paths)?)?;
-            if output.exit_code != 0 {
-                return Ok(output.exit_code);
+            let commands = build_pnputil_install_commands(&frozen.inf_paths)?;
+            let outputs = self.executor.run_elevated_batch(&commands)?;
+            let outcome = merge_install_outcomes(&outputs);
+            if !driver_install_succeeded(&outcome) {
+                return Ok(outcome);
             }
             // Modern adb has these VIDs built in, so preserving the successful driver
             // installation result is more important than this compatibility supplement.
             let _ = write_vivo_adb_usb_ids(&self.adb_usb_ini_path);
-            Ok(0)
+            Ok(outcome)
         })();
         drop(staging);
         let cleanup = fs::remove_dir_all(&staging_path);
@@ -810,10 +912,15 @@ fn legacy_driver_uninstall_registry_key_exists() -> bool {
     false
 }
 
-/// 构造安装全部 INF 的单条 pnputil 命令：`/add-driver a.inf b.inf … /install`。
-/// 单命令单次 UAC（对应 C# 一条 `*.inf /subdirs /install`），但仍拒绝
-/// 通配符/相对路径并逐个做读取守卫，安装目标全部显式枚举。
-fn build_pnputil_install_command(infs: &[PathBuf]) -> Result<ProcessCommand, DomainError> {
+/// 为每个 INF 各构造一条 pnputil 命令：`/add-driver <一个 INF> /install`。
+///
+/// **不能**把多个 INF 塞进同一条命令：实测 `pnputil /add-driver a.inf b.inf /install`
+/// 会整体被拒，打印用法并以退出码 1 结束。调用方负责把这些命令放在同一次提权
+/// 会话里执行，用户仍只授权一次。
+///
+/// 每个目标都要求绝对路径、拒绝通配符、只接受 `.inf`，并逐个做读取守卫，
+/// 全部显式枚举，不依赖 pnputil 自己去展开任何东西。
+fn build_pnputil_install_commands(infs: &[PathBuf]) -> Result<Vec<ProcessCommand>, DomainError> {
     if infs.is_empty() {
         return Err(DomainError::InvalidInput(
             "驱动安装缺少 INF 目标。".to_string(),
@@ -839,7 +946,7 @@ fn build_pnputil_install_command(infs: &[PathBuf]) -> Result<ProcessCommand, Dom
         let inf = inf
             .canonicalize()
             .map_err(|_| driver_archive_integrity_error())?;
-        canonical_infs.push(inf.to_string_lossy().into_owned());
+        canonical_infs.push(display_path_for_external_tool(&inf));
     }
 
     let system_directory = system_directory_path()?;
@@ -860,10 +967,35 @@ fn build_pnputil_install_command(infs: &[PathBuf]) -> Result<ProcessCommand, Dom
             return Err(driver_archive_integrity_error());
         }
     }
-    let mut arguments = vec!["/add-driver".to_string()];
-    arguments.extend(canonical_infs);
-    arguments.push("/install".to_string());
-    Ok(ProcessCommand::new(pnputil.to_string_lossy(), arguments))
+    let program = display_path_for_external_tool(&pnputil);
+    Ok(canonical_infs
+        .into_iter()
+        .map(|inf| {
+            ProcessCommand::new(
+                program.clone(),
+                vec!["/add-driver".to_string(), inf, "/install".to_string()],
+            )
+        })
+        .collect())
+}
+
+/// 把路径转成可以交给外部工具（pnputil / cmd）的文本形态。
+///
+/// `std::fs::canonicalize` 在 Windows 上返回 `\\?\C:\…` 这种 verbatim 前缀路径。
+/// 本进程内用它做文件操作没问题，但**传给 pnputil 会被拒**：实测 pnputil 收到带
+/// 前缀的 INF 路径时报「系统找不到指定的路径」并以退出码 1 结束。这里剥掉前缀，
+/// 还原成普通 `C:\…` 形态。路径在 canonicalize 之后已消解过相对段与 `.`/`..`，
+/// 剥前缀不会重新引入歧义。
+fn display_path_for_external_tool(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    // `\\?\UNC\server\share` 要还原成 `\\server\share`，不能只靠剥前缀。
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    text.into_owned()
 }
 
 #[cfg(windows)]
@@ -1040,36 +1172,138 @@ fn safe_archive_entry_path(
     Ok(Some(relative))
 }
 
+/// 读取提权进程留下的输出并删除日志文件。
+///
+/// 控制台程序在中文 Windows 上按 ANSI/GBK 写盘，先按 UTF-8 试，失败再按 GBK
+/// 宽松解码；两者都失败时保留替换字符，绝不因为解码问题丢掉诊断信息本身。
+#[cfg(windows)]
+fn take_elevated_output_log(path: &Path) -> String {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return String::new(),
+    };
+    let _ = fs::remove_file(path);
+    if bytes.is_empty() {
+        return String::new();
+    }
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
+            decoded.into_owned()
+        }
+    }
+}
+
 #[cfg(windows)]
 fn run_elevated_process(command: ProcessCommand) -> Result<ProcessOutput, DomainError> {
+    let mut outputs = run_elevated_processes(&[command])?;
+    outputs
+        .pop()
+        .ok_or_else(|| DomainError::ExternalTool("提权进程未返回结果。".to_string()))
+}
+
+/// 在**一次**提权会话里顺序执行多条命令。
+///
+/// `ShellExecuteExW` + `runas` 每次调用都会弹一次 UAC，而驱动包装了 8 个 INF、
+/// 每个都要单独一条 pnputil 命令，逐条提权会让用户连点 8 次。这里把全部命令
+/// 交给同一个提权 `cmd` 会话顺序执行，用户只授权一次。
+///
+/// 每条命令的输出写进各自的临时文件，退出码写进一个状态文件 —— `ShellExecuteExW`
+/// 不给管道，这是唯一能把结果带回来的方式。
+#[cfg(windows)]
+fn run_elevated_processes(commands: &[ProcessCommand]) -> Result<Vec<ProcessOutput>, DomainError> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
-        System::Threading::{GetExitCodeProcess, WaitForSingleObject},
+        System::Threading::WaitForSingleObject,
         UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW},
     };
 
-    crate::process::validate_command(&command.program)?;
-    crate::process::validate_args(&command.args)?;
-    if command.working_directory.is_some() || !command.environment.is_empty() {
-        return Err(DomainError::InvalidInput(
-            "驱动安装命令不支持工作目录或环境变量。".to_string(),
-        ));
+    if commands.is_empty() {
+        return Err(DomainError::InvalidInput("提权批次不能为空。".to_string()));
+    }
+    for command in commands {
+        crate::process::validate_command(&command.program)?;
+        crate::process::validate_args(&command.args)?;
+        if command.working_directory.is_some() || !command.environment.is_empty() {
+            return Err(DomainError::InvalidInput(
+                "驱动安装命令不支持工作目录或环境变量。".to_string(),
+            ));
+        }
     }
 
+    let scratch = elevated_scratch_directory();
+    fs::create_dir_all(&scratch)
+        .map_err(|error| DomainError::Internal(format!("创建提权临时目录失败：{error}")))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let log_paths: Vec<PathBuf> = (0..commands.len())
+        .map(|index| scratch.join(format!("install-{nonce:032x}-{index}.log")))
+        .collect();
+    let status_path = scratch.join(format!("install-{nonce:032x}-status.txt"));
+
+    // 每条命令：执行 → 把退出码追加进状态文件 → 输出重定向到各自日志。
+    // 全部用 `&` 串成**一行**，绝不插换行：`/s` 形态下 cmd 只把第一个换行前的
+    // 内容当命令，后面的行会被丢弃（实测 8 条命令只有第 1 条执行，状态文件里
+    // 只有一行）。命令之间不短路，某一条失败后仍继续，用户一次就能看到全部问题。
+    //
+    // `%ERRORLEVEL%` 与 `>>` 之间**必须有空格**：写成 `%ERRORLEVEL%>>` 时 cmd 会把
+    // 重定向符吞进变量名解析里，状态文件根本不生成（实测）。
+    // 变量还必须用 `!ERRORLEVEL!` 配 `/v:on`（延迟展开）：用 `%ERRORLEVEL%` 时
+    // cmd 会在**整条脚本解析时**一次性替换，所有条目都记成同一个值（实测记成 0）。
+    let mut script = String::new();
+    for (index, (command, log)) in commands.iter().zip(&log_paths).enumerate() {
+        let target = quote_windows_argument(&log.to_string_lossy());
+        script.push_str(&format!(
+            "{} {} > {target} 2>&1 & echo {index} !ERRORLEVEL! >> {} & ",
+            quote_windows_argument(&command.program),
+            windows_command_line(&command.args),
+            quote_windows_argument(&status_path.to_string_lossy()),
+        ));
+    }
+    // 去掉尾部的 ` & `，避免 cmd 报「命令语法不正确」。
+    let script = script
+        .trim_end()
+        .trim_end_matches('&')
+        .trim_end()
+        .to_string();
+
+    let batch_program = wide_null(&std::env::var("COMSPEC").unwrap_or_else(|_| {
+        system_directory_path()
+            .map(|directory| directory.join("cmd.exe").to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "cmd.exe".to_string())
+    }));
+    let parameters = wide_null(&format!(
+        "/d /v:on /s /c {}",
+        quote_windows_argument(&script)
+    ));
     let verb = wide_null("runas");
-    let program = wide_null(&command.program);
-    let parameters = wide_null(&windows_command_line(&command.args));
+    // SAFETY: SHELLEXECUTEINFOW 是 POD 结构，全零是它的合法初始状态；
+    // 随后逐字段赋值，cbSize 也在使用前设置为真实大小。
     let mut execute_info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     execute_info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
     execute_info.fMask = SEE_MASK_NOCLOSEPROCESS;
     execute_info.lpVerb = verb.as_ptr();
-    execute_info.lpFile = program.as_ptr();
+    execute_info.lpFile = batch_program.as_ptr();
     execute_info.lpParameters = parameters.as_ptr();
     execute_info.nShow = 0;
 
+    let cleanup = |paths: &[PathBuf]| {
+        for path in paths {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_file(&status_path);
+    };
+
+    // SAFETY: execute_info 已完成初始化且 cbSize/lpFile/lpVerb/lpParameters 都指向
+    // 生命周期覆盖本次调用的 NUL 结尾宽字符串（`verb`/`batch_program`/`parameters`
+    // 在函数结束前不会被移动或释放）。返回 0 表示失败，按 GetLastError 处理。
     let launched = unsafe { ShellExecuteExW(&mut execute_info) };
     if launched == 0 {
         let error = std::io::Error::last_os_error();
+        cleanup(&log_paths);
         if error.raw_os_error() == Some(1223) {
             return Err(DomainError::UserCancelled(
                 "已取消管理员授权，未安装驱动。".to_string(),
@@ -1082,28 +1316,18 @@ fn run_elevated_process(command: ProcessCommand) -> Result<ProcessOutput, Domain
 
     let process = execute_info.hProcess;
     if process.is_null() {
+        cleanup(&log_paths);
         return Err(DomainError::ExternalTool(
             "管理员驱动安装程序未返回进程句柄。".to_string(),
         ));
     }
 
-    let result = loop {
+    let wait_result = loop {
+        // SAFETY: process 是 ShellExecuteExW 成功返回的有效进程句柄，
+        // 直到 CloseHandle 之前都保持有效。
         match unsafe { WaitForSingleObject(process, Duration::from_millis(100).as_millis() as u32) }
         {
-            WAIT_OBJECT_0 => {
-                let mut exit_code = 0_u32;
-                if unsafe { GetExitCodeProcess(process, &mut exit_code) } == 0 {
-                    break Err(DomainError::ExternalTool(format!(
-                        "读取 pnputil 退出码失败：{}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                break Ok(ProcessOutput {
-                    exit_code: exit_code as i32,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-            }
+            WAIT_OBJECT_0 => break Ok(()),
             WAIT_TIMEOUT => continue,
             _ => {
                 break Err(DomainError::ExternalTool(format!(
@@ -1113,14 +1337,63 @@ fn run_elevated_process(command: ProcessCommand) -> Result<ProcessOutput, Domain
             }
         }
     };
+    // SAFETY: process 有效且尚未关闭；关闭后不再使用该句柄。
     unsafe {
         CloseHandle(process);
     }
-    result
+    if let Err(error) = wait_result {
+        cleanup(&log_paths);
+        return Err(error);
+    }
+
+    let status = fs::read_to_string(&status_path).unwrap_or_default();
+    let exit_codes = parse_batch_exit_codes(&status, commands.len());
+    let mut outputs = Vec::with_capacity(commands.len());
+    for (index, log) in log_paths.iter().enumerate() {
+        outputs.push(ProcessOutput {
+            exit_code: exit_codes.get(index).copied().unwrap_or(-1),
+            stdout: take_elevated_output_log(log),
+            stderr: String::new(),
+        });
+    }
+    let _ = fs::remove_file(&status_path);
+    let _ = fs::remove_dir(&scratch);
+    Ok(outputs)
+}
+
+/// 解析状态文件里的 `序号 退出码` 行。
+#[cfg(windows)]
+fn parse_batch_exit_codes(status: &str, expected: usize) -> Vec<i32> {
+    let mut codes = vec![-1; expected];
+    for line in status.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(index), Some(code)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if let (Ok(index), Ok(code)) = (index.parse::<usize>(), code.parse::<i32>()) {
+            if index < expected {
+                codes[index] = code;
+            }
+        }
+    }
+    codes
+}
+
+/// 提权进程可写的临时目录（用户 Temp 下的专用子目录）。
+#[cfg(windows)]
+fn elevated_scratch_directory() -> PathBuf {
+    std::env::temp_dir().join("NWflash").join("elevated")
 }
 
 #[cfg(not(windows))]
 fn run_elevated_process(_command: ProcessCommand) -> Result<ProcessOutput, DomainError> {
+    Err(DomainError::ExternalTool(
+        "USB 驱动安装仅支持 Windows。".to_string(),
+    ))
+}
+
+#[cfg(not(windows))]
+fn run_elevated_processes(_commands: &[ProcessCommand]) -> Result<Vec<ProcessOutput>, DomainError> {
     Err(DomainError::ExternalTool(
         "USB 驱动安装仅支持 Windows。".to_string(),
     ))
