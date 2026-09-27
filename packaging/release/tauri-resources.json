@@ -34,7 +34,7 @@
     {
       "source": "src/Nwflash.Desktop/src-tauri/resources/root-tools/magiskboot.so",
       "destination": "root-tools/magiskboot.so",
-      "sha256": "d7440e2cd89899426e809554bf793baef9804ccbe5a52ce34a8b6242725d3c77"
+      "sha256": "a2b14ec3b5c953ffd519ab6f944de346f564c6a2bcb944c6f056ed10a319a4fb"
     },
     {
       "source": "src/Nwflash.Desktop/src-tauri/resources/apk/KSU.APK",
