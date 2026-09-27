@@ -25,8 +25,10 @@ use nwflash_domain::{
 };
 use nwflash_windows::bundled_platform_tool;
 use nwflash_windows::process::{
-    run_command_with_cancel, run_command_with_cancel_recorded, ProcessCommand,
-    ProcessCommandRecorder, ProcessOutput,
+    run_command_with_cancel, run_command_with_cancel_recorded,
+    run_command_with_cancel_recorded_and_observer, ProcessCommand, ProcessCommandRecorder,
+    ProcessObservation, ProcessObserverError, ProcessOutput, ProcessOutputObserver,
+    ProcessOutputStream,
 };
 
 use crate::{
@@ -112,19 +114,131 @@ async fn run_process_command(
     cancellation: Option<CancellationToken>,
     recorder: Arc<dyn ProcessCommandRecorder>,
 ) -> Result<ProcessOutput, nwflash_domain::DomainError> {
+    run_process_command_with_progress(command, cancellation, recorder, None).await
+}
+
+/// 与 [`run_process_command`] 相同，但可挂一个刷写进度接收端。
+///
+/// fastboot 刷写时控制台会按行打印实时进度与速度（`Sending sparse 'system_b'
+/// 1/20 (262140 KB)`、`system_b: 1.0 MB/256.0 MB (0.4%) [sparse] 9.53 MB/s`）。
+/// 进程层的输出本来就是 16KB 分片流式到达的，这里把分片同时交给进度解析器，
+/// 刷写期间 UI 就能拿到真实字节进度；留痕行为与不挂进度时完全一致。
+async fn run_process_command_with_progress(
+    command: ProcessCommand,
+    cancellation: Option<CancellationToken>,
+    recorder: Arc<dyn ProcessCommandRecorder>,
+    progress: Option<Arc<FlashProgressSink>>,
+) -> Result<ProcessOutput, nwflash_domain::DomainError> {
     let cancellation = cancellation.unwrap_or_default();
     let timeout = crate::command_timeout::for_command(&command, crate::command_timeout::CONTROL);
     let cancellation_for_command = cancellation.clone();
-    task::spawn_blocking(move || {
-        run_command_with_cancel_recorded(
+    task::spawn_blocking(move || match progress {
+        Some(sink) => {
+            let image_bytes = flash_image_bytes(&command);
+            let observer: Arc<dyn ProcessOutputObserver> = Arc::new(FlashProgressObserver {
+                parser: Mutex::new(nwflash_application::FastbootProgressParser::new(
+                    image_bytes,
+                )),
+                sink,
+            });
+            run_command_with_cancel_recorded_and_observer(
+                command,
+                Some(timeout),
+                move || cancellation_for_command.is_cancelled(),
+                recorder,
+                observer,
+            )
+        }
+        None => run_command_with_cancel_recorded(
             command,
             Some(timeout),
             move || cancellation_for_command.is_cancelled(),
             recorder,
-        )
+        ),
     })
     .await
     .map_err(|error| nwflash_domain::DomainError::Internal(format!("命令执行调度失败：{error}")))?
+}
+
+/// 刷写命令的目标镜像大小（进度分母）；无法取得时按未知处理。
+fn flash_image_bytes(command: &ProcessCommand) -> u64 {
+    command
+        .args
+        .last()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+/// 刷写进度接收端：`(分区名, 已写入字节, 分区总字节)`。
+pub(crate) type FlashProgressSink = dyn Fn(&str, u64, u64) + Send + Sync;
+
+/// 判断命令是否为 fastboot 刷写（`flash <partition> <image>`）。
+fn is_fastboot_flash_command(command: &CommandSpec) -> bool {
+    let is_fastboot = command
+        .program
+        .to_ascii_lowercase()
+        .ends_with("fastboot.exe");
+    is_fastboot && command.args.iter().any(|argument| argument == "flash")
+}
+
+/// 解析 fastboot 的流式输出分片，把实时字节进度推给接收端。
+///
+/// 进度行是累计值，天然容忍观测队列的丢块（丢块只让进度采样变稀，
+/// 不会让数值回退）。解析逻辑与线刷（safe_flash）通道共用同一个
+/// `FastbootProgressParser`，两通道进度语义一致。
+struct FlashProgressObserver {
+    parser: Mutex<nwflash_application::FastbootProgressParser>,
+    sink: Arc<FlashProgressSink>,
+}
+
+impl ProcessOutputObserver for FlashProgressObserver {
+    fn observe(&self, observation: ProcessObservation<'_>) -> Result<(), ProcessObserverError> {
+        let ProcessObservation::Output { stream, bytes, .. } = observation else {
+            return Ok(());
+        };
+        if stream != ProcessOutputStream::Stdout {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let Ok(mut parser) = self.parser.lock() else {
+            return Ok(());
+        };
+        let mut reported: Option<u64> = None;
+        let mut partition = String::new();
+        for line in text.lines() {
+            let line = line.trim_end();
+            if let Some(name) = transferring_partition(line) {
+                if partition.is_empty() {
+                    partition = name;
+                }
+            }
+            if let Some(bytes) = parser.observe_line(line) {
+                reported = Some(bytes);
+            }
+        }
+        drop(parser);
+        if let Some(written) = reported {
+            (self.sink)(&partition, written, 0);
+        }
+        Ok(())
+    }
+}
+
+/// 从 fastboot 输出行提取当前正在传输的分区名。
+///
+/// 进度行的两种形态：`Sending 'x' (N KB)...` / `Writing 'x'...`；
+/// 块内累计行 `x: A KB/B KB (p%)` 也以分区名开头。
+fn transferring_partition(line: &str) -> Option<String> {
+    let line = line.trim();
+    for prefix in ["Sending sparse '", "Sending '", "Writing '"] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            if let Some(end) = rest.find('\'') {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
 }
 
 /// fastboot 协议错误（`FAILED (…)` / `remote error`）可能以退出码 0 伴随
@@ -1712,10 +1826,40 @@ where
                                 command_index + 1,
                                 task_commands.commands.len()
                             ));
-                            let output = run_process_command(
+                            // fastboot 刷写命令挂实时进度：解析其流式输出里的
+                            // `Sending/Writing` 进度行（含百分比与速度），按
+                            // 本命令镜像大小折算比例上报。进度行是累计值，
+                            // 观测队列丢块只让采样变稀、不会让数值回退。
+                            let flash_progress =
+                                is_fastboot_flash_command(command).then(|| {
+                                    let context_for_progress = context.clone();
+                                    let image_bytes = flash_image_bytes(&command_process(command));
+                                    Arc::new(
+                                        move |partition: &str, written: u64, _total: u64| {
+                                            if image_bytes == 0 {
+                                                // 拿不到镜像大小就没有刻度，如实上报，
+                                                // 不把 0% 冒充成进度。
+                                                context_for_progress
+                                                    .report_now_partition_task(
+                                                        partition, 0.0, false,
+                                                    );
+                                                return;
+                                            }
+                                            let fraction =
+                                                (written as f64 / image_bytes as f64)
+                                                    .clamp(0.0, 1.0);
+                                            context_for_progress
+                                                .report_now_partition_task(
+                                                    partition, fraction, true,
+                                                );
+                                        },
+                                    ) as Arc<FlashProgressSink>
+                                });
+                            let output = run_process_command_with_progress(
                                 command_process(command),
                                 Some(cancellation.clone()),
                                 command_recorder.clone(),
+                                flash_progress,
                             )
                             .await;
                             match output {
@@ -3652,5 +3796,141 @@ mod tests {
             adb_root_resolution_tasks(&plan),
             vec![Some(("super".to_string(), "/dev/block/sda70".to_string()))]
         );
+    }
+}
+
+#[cfg(test)]
+mod flash_progress_tests {
+    use super::*;
+    use std::{fs, io::Write};
+
+    fn observation(bytes: &[u8]) -> ProcessObservation<'_> {
+        ProcessObservation::Output {
+            stream: ProcessOutputStream::Stdout,
+            sequence: 0,
+            bytes,
+        }
+    }
+
+    /// 真实 fastboot 35.0.2 的进度行形态（docs/2026-09-20 审计日志实录）。
+    #[test]
+    fn observer_reports_progress_from_real_fastboot_lines() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let sink_reports = Arc::clone(&reports);
+        let observer = FlashProgressObserver {
+            parser: Mutex::new(nwflash_application::FastbootProgressParser::new(
+                256 * 1024 * 1024,
+            )),
+            sink: Arc::new(move |partition: &str, written: u64, _total: u64| {
+                sink_reports
+                    .lock()
+                    .unwrap()
+                    .push((partition.to_string(), written));
+            }),
+        };
+
+        let script = b"Sending sparse 'system_b' 1/20 (262140 KB)...\r\n\
+system_b: 1.0 MB/256.0 MB (0.4%) [sparse] 9.53 MB/s\r\n\
+system_b: 64.0 MB/256.0 MB (25.0%) [sparse] 10.1 MB/s\r\n";
+        observer.observe(observation(script)).expect("观察不应失败");
+
+        let reports = reports.lock().unwrap();
+        assert!(!reports.is_empty(), "真实进度行必须产生上报");
+        let (partition, written) = reports.last().unwrap();
+        assert_eq!(partition, "system_b");
+        // 解析器把累计行钳在 `Sending` 自报的本块大小（262140 KB）内；
+        // 64.0 MB 正是最后一条累计行的值。
+        assert_eq!(*written, 64 * 1024 * 1024, "最后一条累计行为 64.0 MB");
+    }
+
+    /// stderr 分片不进解析器（fastboot 的进度行走 stdout）。
+    #[test]
+    fn observer_ignores_stderr() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let sink_reports = Arc::clone(&reports);
+        let observer = FlashProgressObserver {
+            parser: Mutex::new(nwflash_application::FastbootProgressParser::new(4096)),
+            sink: Arc::new(move |_: &str, _, _| {
+                sink_reports.lock().unwrap().push(0);
+            }),
+        };
+        let stderr = ProcessObservation::Output {
+            stream: ProcessOutputStream::Stderr,
+            sequence: 0,
+            bytes: b"Sending 'boot' (512 KB)...\r\n",
+        };
+        observer.observe(stderr).expect("观察不应失败");
+        assert!(reports.lock().unwrap().is_empty());
+    }
+
+    /// `is_fastboot_flash_command` 只认 fastboot.exe 的 flash 命令。
+    #[test]
+    fn flash_detection_matches_only_fastboot_flash() {
+        let flash = CommandSpec {
+            program: r"C:\x\platform-tools\fastboot.exe".into(),
+            args: vec![
+                "-s".into(),
+                "SER".into(),
+                "flash".into(),
+                "boot".into(),
+                "boot.img".into(),
+            ],
+            working_directory: None,
+            environment: Vec::new(),
+        };
+        assert!(is_fastboot_flash_command(&flash));
+
+        let erase = CommandSpec {
+            args: vec!["-s".into(), "SER".into(), "erase".into(), "misc".into()],
+            ..flash.clone()
+        };
+        assert!(!is_fastboot_flash_command(&erase));
+
+        let adb = CommandSpec {
+            program: r"C:\x\platform-tools\adb.exe".into(),
+            ..flash.clone()
+        };
+        assert!(!is_fastboot_flash_command(&adb));
+    }
+
+    /// 进度接收端拿到的分区名来自 `Sending/Writing` 行。
+    #[test]
+    fn transferring_partition_extracts_names() {
+        assert_eq!(
+            transferring_partition("Sending sparse 'system_b' 1/20 (262140 KB)..."),
+            Some("system_b".to_string())
+        );
+        assert_eq!(
+            transferring_partition("Writing 'vendor_boot'"),
+            Some("vendor_boot".to_string())
+        );
+        assert_eq!(transferring_partition("OKAY [ 0.204s]"), None);
+    }
+
+    /// 进度写入不破坏文件（fixture 确认 flash_image_bytes 读的是最后一个参数）。
+    #[test]
+    fn flash_image_bytes_reads_last_argument() {
+        let dir = std::env::temp_dir().join(format!("nwflash-flash-bytes-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("临时目录");
+        let image = dir.join("boot.img");
+        fs::File::create(&image)
+            .unwrap()
+            .write_all(&[0u8; 1024])
+            .expect("写入镜像");
+
+        let command = ProcessCommand {
+            program: "fastboot.exe".into(),
+            args: vec![
+                "-s".into(),
+                "SER".into(),
+                "flash".into(),
+                "boot".into(),
+                image.to_string_lossy().into_owned(),
+            ],
+            working_directory: None,
+            environment: Vec::new(),
+        };
+        assert_eq!(flash_image_bytes(&command), 1024);
+        fs::remove_dir_all(dir).expect("清理");
     }
 }

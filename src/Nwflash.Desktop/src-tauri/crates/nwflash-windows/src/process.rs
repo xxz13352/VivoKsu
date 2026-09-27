@@ -779,6 +779,64 @@ where
     outcome.into_legacy_result()
 }
 
+/// 在留痕之外再挂一个旁路观察者地执行命令。
+///
+/// quick_flash 的 fastboot 刷写需要它：输出分片要同时喂给留痕收集器
+/// （命令审计）与实时进度解析器（刷写进度条）。两个观察者收到的都是
+/// **同一份**分片序列，互不影响；任一旁路出错都按既有语义只记损失、
+/// 不改变命令结果。
+pub fn run_command_with_cancel_recorded_and_observer<F>(
+    spec: ProcessCommand,
+    timeout: Option<Duration>,
+    should_cancel: F,
+    recorder: Arc<dyn ProcessCommandRecorder>,
+    extra: Arc<dyn ProcessOutputObserver>,
+) -> Result<ProcessOutput, DomainError>
+where
+    F: FnMut() -> bool,
+{
+    let recorder_observer = Arc::new(RecordingProcessObserver::new(
+        recorder,
+        RecordingProcessExecutor::DEFAULT_OUTPUT_LIMIT_BYTES,
+    ));
+    let fan_out = Arc::new(FanOutObserver::new(
+        Arc::clone(&recorder_observer) as Arc<dyn ProcessOutputObserver>,
+        extra,
+    ));
+    let observer_trait: Arc<dyn ProcessOutputObserver> = Arc::clone(&fan_out) as Arc<_>;
+    let outcome = run_command_with_cancel_observed(spec, timeout, should_cancel, observer_trait);
+    // 同 run_recorded：Finished 分片丢失时补一条留痕，保证命令一定有记录。
+    recorder_observer
+        .record_if_unfinished(outcome.result.as_ref().ok().map(|output| output.exit_code));
+    outcome.into_legacy_result()
+}
+
+/// 把同一份观测序列按序转发给两个下游观察者。
+///
+/// 转发是同步串行的：先留痕、后进度，与「留痕出错不影响命令结果」的既有
+/// 语义一致——任何一方报错都视为该次观测损失，不中断另一方。
+struct FanOutObserver {
+    first: Arc<dyn ProcessOutputObserver>,
+    second: Arc<dyn ProcessOutputObserver>,
+}
+
+impl FanOutObserver {
+    fn new(first: Arc<dyn ProcessOutputObserver>, second: Arc<dyn ProcessOutputObserver>) -> Self {
+        Self { first, second }
+    }
+}
+
+impl ProcessOutputObserver for FanOutObserver {
+    fn observe(&self, observation: ProcessObservation<'_>) -> Result<(), ProcessObserverError> {
+        // 先转发给第一观察者（留痕），失败不影响第二观察者（进度）。
+        // 各自的失败都在本层吞掉并返回错误——调用方（观测 worker）把它当
+        // 一次观测损失记录，这与单观察者路径的行为一致。
+        let first = self.first.observe(observation);
+        let second = self.second.observe(observation);
+        first.and(second)
+    }
+}
+
 /// 在真实进程执行器之上附加逐命令留痕的执行器。
 ///
 /// 语义与 [`SystemCancellableProcessExecutor`] 完全一致（同一个
