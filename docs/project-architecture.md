@@ -216,7 +216,7 @@ sequenceDiagram
 - 固件工件、prepared dual-slot、ROOT 和 Safe Flash 使用 Rust-owned runtime/capability 保存准备产物，确认执行时按各自契约重新解析或一次性消费。
 - 公开 `quick_flash_prepare_boot_image`/`quick_flash_prepare_preset_image` 仍返回 `QuickFlashPlanDto`，其中含 serial 和 Rust 生成的 `ProcessCommandDto` 程序/参数预览。这是当前/遗留 API 限制，不能据此声称原始命令或 flash plan 从不跨入浏览器；浏览器仍不能把任意程序、命令数组或 shell 文本提交为执行计划。
 - ROOT 的服务器 OTA 来源由 `root_ota_check` 在 Rust 内使用当前 ADB 设备的 PD/版本和内存 token 解析；私有 `RootOtaRuntime` 保存来源元数据和 session epoch，不把手机 serial 作为绑定字段。`root_ota_extract_images` 不接收浏览器 serial，只在需要当前 ADB 命令时临时取得目标，不做提取前后 serial 等值比较；产物以 session epoch 和不透明 ID 约束。该流程使用 HTTP Range 处理 payload OTA 或直接镜像 ZIP，仅取得 `init_boot`（或 `boot` 回退）和 `vendor_boot`；实际 boot 分区名贯穿 Vivo KSU 修补和刷写。ROOT OTA 的 URL、PD、版本和 staging 不进入 React；独立 `DeviceSnapshot` 中的 serial 仍只用于界面显示。
-- platform-tools、驱动、root-tools、完整 scrcpy、ROOT 管理器 APK 和 payload_dumper 都作为 release resources 随包，并由 `packaging/release/tauri-resources.json` 的精确白名单和 SHA-256 固定。固定工具资源只从 bundle 校验和使用；ROM/OTA 内容仍按请求读取，页面不接触资源路径。
+- platform-tools、驱动、root-tools、完整 scrcpy 和 ROOT 管理器 APK 都作为 release resources 随包，并由 `packaging/release/tauri-resources.json` 的精确白名单和 SHA-256 固定。固定工具资源只从 bundle 校验和使用；ROM/OTA 内容仍按请求读取，页面不接触资源路径。payload（CrAU）提取由 `nwflash-infrastructure/src/payload/` 内建实现完成（含 ZSTD 操作与远程 Range 直读），进度直接来自解压循环内部，不再依赖外部 payload_dumper。
 
 ### 近期实现约定
 

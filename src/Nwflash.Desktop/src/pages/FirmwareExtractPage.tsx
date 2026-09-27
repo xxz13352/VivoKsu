@@ -286,7 +286,7 @@ export const FirmwareExtractPage: FC = () => {
         <div>
           <h1>固件提取</h1>
         </div>
-        <span className="nw-firmware-tool-chip"><i />payload_dumper 就绪</span>
+        <span className="nw-firmware-tool-chip"><i />payload 内建提取就绪</span>
       </header>
 
       <section className="nw-firmware-extract-workbench">

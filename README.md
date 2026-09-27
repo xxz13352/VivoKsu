@@ -59,7 +59,7 @@ pwsh -NoLogo -NoProfile -NonInteractive -File scripts/Verify-TauriRelease.ps1 -R
 
 正式发布由 `scripts/Publish-TauriRelease.ps1` 的 `PrepareManual` 与 `FinalizeManual` 两阶段完成：先生成并校验受保护构建的 EXE/PDB/MAP 手工交接，operator 使用 VMProtect Lite GUI 产生独立输出并形成 `accepted.json`，随后才签名 EXE、基于签名 EXE 生成并签名每用户 NSIS、验证安装/卸载并生成最终 SHA-256 清单。`-DevelopmentUnsigned` 只生成非发布开发暂存，不能作为正式发布物。完整边界见 [VMP/签名运行手册](docs/release/tauri-vmp-signing-runbook.md) 与 [发布门禁审计](docs/2026-09-04-release-gate-audit.md)。
 
-ROOT 管理器 APK、payload_dumper、platform-tools、驱动、root-tools 和完整 scrcpy 的发布输入均在 `src/Nwflash.Desktop/src-tauri/resources/`，并受 `packaging/release/tauri-resources.json` 精确 allowlist 约束，不依赖 C# 目录。
+ROOT 管理器 APK、platform-tools、驱动、root-tools 和完整 scrcpy 的发布输入均在 `src/Nwflash.Desktop/src-tauri/resources/`，并受 `packaging/release/tauri-resources.json` 精确 allowlist 约束，不依赖 C# 目录。payload（CrAU）提取由内建 Rust 解析器完成，不再依赖外部可执行文件。
 
 ## 文档
 
