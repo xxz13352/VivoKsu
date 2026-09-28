@@ -9,8 +9,20 @@ use std::io::Write;
 use nwflash_infrastructure::payload::remote::{locate_payload_in_zip, RemoteRead, RemoteReader};
 use std::io::{Read, Seek, SeekFrom};
 
+/// ZIP64 中央目录项的形态（决定 extra 里出现哪些真值字段）。
+#[derive(Clone, Copy, PartialEq)]
+enum Zip64Shape {
+    /// 非 ZIP64：全部基字段都是真值。
+    None,
+    /// usize/csize/lho 全是占位符，extra 按规范顺序带三个真值。
+    AllPlaceholders,
+    /// 仅 lho 是占位符（成员本体 <4GB、却位于 zip 内 4GB 之后），
+    /// extra 只带一个头偏移真值。
+    OffsetPlaceholderOnly,
+}
+
 /// 构造一个最小 ZIP：单个 `payload.bin` 成员，可选 ZIP64 extra。
-fn build_zip(payload: &[u8], zip64: bool, include_local_header: bool) -> Vec<u8> {
+fn build_zip(payload: &[u8], shape: Zip64Shape, include_local_header: bool) -> Vec<u8> {
     let name = b"payload.bin";
     let mut out = Vec::new();
 
@@ -43,40 +55,67 @@ fn build_zip(payload: &[u8], zip64: bool, include_local_header: bool) -> Vec<u8>
     out.extend_from_slice(&0u16.to_le_bytes()); // time
     out.extend_from_slice(&0u16.to_le_bytes()); // date
     out.extend_from_slice(&0u32.to_le_bytes()); // crc32
-    if zip64 {
-        out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // csize 占位
-        out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // usize 占位
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&20u16.to_le_bytes()); // extra len
-        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
-        out.extend_from_slice(&0u16.to_le_bytes()); // disk start
-        out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
-        out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
-        out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // lho 占位
-    } else {
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
-        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
-        out.extend_from_slice(&0u16.to_le_bytes()); // disk start
-        out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
-        out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
-        out.extend_from_slice(&(local_header_offset as u32).to_le_bytes());
+    match shape {
+        Zip64Shape::None => {
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // csize
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // usize
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            out.extend_from_slice(&0u16.to_le_bytes()); // disk start
+            out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            out.extend_from_slice(&(local_header_offset as u32).to_le_bytes()); // lho
+        }
+        Zip64Shape::AllPlaceholders => {
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // csize 占位
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // usize 占位
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&28u16.to_le_bytes()); // extra len
+            out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            out.extend_from_slice(&0u16.to_le_bytes()); // disk start
+            out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // lho 占位
+        }
+        Zip64Shape::OffsetPlaceholderOnly => {
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // csize
+            out.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // usize
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&12u16.to_le_bytes()); // extra len
+            out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            out.extend_from_slice(&0u16.to_le_bytes()); // disk start
+            out.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            out.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            out.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // lho 占位
+        }
     }
     out.extend_from_slice(name);
 
-    if zip64 {
-        // ZIP64 extra: id=1, size=16, usize, csize（lho 占位符之外的真值顺序）
-        out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&16u16.to_le_bytes());
-        out.extend_from_slice(&(payload.len() as u64).to_le_bytes()); // usize
-        out.extend_from_slice(&(payload.len() as u64).to_le_bytes()); // csize
+    match shape {
+        Zip64Shape::None => {}
+        Zip64Shape::AllPlaceholders => {
+            // ZIP64 extra（id=1）：按 APPNOTE 规范，中央目录里的字段顺序
+            // 固定为「原始大小 → 压缩大小 → 头偏移」，且只有基字段是
+            // 0xFFFFFFFF 的字段才出现。三个基字段全是占位符，三个真值
+            // 就必须都在——缺任何一个都是非规范 zip（读取方会拿错字段）。
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&24u16.to_le_bytes());
+            out.extend_from_slice(&(payload.len() as u64).to_le_bytes()); // usize
+            out.extend_from_slice(&(payload.len() as u64).to_le_bytes()); // csize
+            out.extend_from_slice(&local_header_offset.to_le_bytes()); // lho
+        }
+        Zip64Shape::OffsetPlaceholderOnly => {
+            // 只有头偏移是占位符：extra 里就只有头偏移一个真值。
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&8u16.to_le_bytes());
+            out.extend_from_slice(&local_header_offset.to_le_bytes()); // lho
+        }
     }
 
     let central_size = out.len() as u64 - central_offset;
 
-    if zip64 {
+    if shape != Zip64Shape::None {
         let zip64_eocd_offset = out.len() as u64;
         out.extend_from_slice(b"PK\x06\x06");
         out.extend_from_slice(&44u64.to_le_bytes()); // size of record
@@ -106,7 +145,7 @@ fn build_zip(payload: &[u8], zip64: bool, include_local_header: bool) -> Vec<u8>
 #[test]
 fn locates_payload_bin_in_a_plain_zip() {
     let payload = b"CrAU-test-payload-bytes";
-    let zip = build_zip(payload, false, true);
+    let zip = build_zip(payload, Zip64Shape::None, true);
 
     let location = locate_payload_in_zip(&zip, 0).expect("定位");
     assert_eq!(location.length, payload.len() as u64);
@@ -124,7 +163,7 @@ fn reads_the_true_size_from_the_zip64_extra_field() {
     // 真实固件（9.3 GB）就是这种形态：中央目录里的 size 是 0xFFFFFFFF，
     // 只有 ZIP64 extra 里才是真值。读占位符会把长度算成 4 GB，后续解析全错。
     let large = vec![0x41u8; 4096];
-    let zip = build_zip(&large, true, true);
+    let zip = build_zip(&large, Zip64Shape::AllPlaceholders, true);
 
     let location = locate_payload_in_zip(&zip, 0).expect("定位");
     assert_eq!(
@@ -132,13 +171,40 @@ fn reads_the_true_size_from_the_zip64_extra_field() {
         large.len() as u64,
         "必须用 ZIP64 extra 里的真值，而不是 0xFFFFFFFF 占位符"
     );
+    // extra 字段顺序是「原始大小 → 压缩大小 → 头偏移」：把压缩大小读成
+    // 头偏移会让后续 seek 落到完全错误的位置（payload.bin 落在 zip 内
+    // 4 GB 之后时基字段双双占位，恰好踩中这个顺序）。
+    assert_eq!(
+        location.local_header_offset, 0,
+        "ZIP64 头偏移必须按规范顺序从 extra 里读，而不是拿压缩大小凑数"
+    );
+}
+
+#[test]
+fn zip64_offset_placeholder_only_still_resolves() {
+    // payload.bin 位于 zip 内 4 GB 之后、本体又小于 4GB 的形态：只有头偏移
+    // 是占位符，extra 里就只有头偏移一个真值——顺序解析不得把压缩大小
+    // 错当头偏移。
+    let payload = b"CrAU-test-payload-bytes";
+    let zip = build_zip(payload, Zip64Shape::OffsetPlaceholderOnly, true);
+
+    let location = locate_payload_in_zip(&zip, 0).expect("定位");
+    assert_eq!(
+        location.length,
+        payload.len() as u64,
+        "压缩大小取基字段真值"
+    );
+    assert_eq!(
+        location.local_header_offset, 0,
+        "头偏移必须从 extra 里按规范顺序取出"
+    );
 }
 
 #[test]
 fn skips_the_local_header_extra_when_computing_the_data_offset() {
     // 本地头的 extra 长度只能从本地头本身读；用中央目录那份会算错偏移。
     // 这里构造本地头 extra 长度与中央目录 extra 长度**不同**的 zip 来钉死这点。
-    let zip = build_zip(b"CrAU", false, true);
+    let zip = build_zip(b"CrAU", Zip64Shape::None, true);
 
     let location = locate_payload_in_zip(&zip, 0).expect("定位");
     let local_header = &zip[location.local_header_offset as usize..];
@@ -180,7 +246,7 @@ fn reports_missing_payload_bin_rather_than_guessing() {
 #[test]
 fn rejects_a_buffer_that_does_not_cover_the_central_directory() {
     // 尾部窗口没抓全时，不能拿半个中央目录去解析，必须明确报错。
-    let zip = build_zip(b"CrAU", false, true);
+    let zip = build_zip(b"CrAU", Zip64Shape::None, true);
     let truncated = &zip[..zip.len() / 2];
 
     assert!(locate_payload_in_zip(truncated, 0).is_err());
@@ -256,14 +322,17 @@ fn parses_and_extracts_from_a_remote_reader() {
     payload_bytes.extend_from_slice(&0u64.to_be_bytes()); // 空 manifest
     payload_bytes.extend_from_slice(&0u32.to_be_bytes());
 
-    let zip = build_zip(&payload_bytes, false, true);
+    let zip = build_zip(&payload_bytes, Zip64Shape::None, true);
     let location = locate_payload_in_zip(&zip, 0).expect("定位");
     let data_offset = location
         .data_offset(&zip[location.local_header_offset as usize..])
         .expect("偏移");
 
+    let zip_len = zip.len() as u64;
     let reader = RemoteReader::new(MemoryRemote { data: zip });
-    let parsed = Payload::from_reader_at(reader, location.length, data_offset).expect("解析");
+    // `source_len` 是**整个源**的长度（与生产路径 `span.total_len` 一致），
+    // `base` 是源内的绝对偏移——manifest 越界检查依赖这两者的正确关系。
+    let parsed = Payload::from_reader_at(reader, zip_len, data_offset).expect("解析");
     // 空 manifest 也应能解析出 0 个分区，而不是报错。
     assert_eq!(parsed.manifest.partitions.len(), 0);
 

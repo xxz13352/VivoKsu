@@ -1204,7 +1204,7 @@ async fn extract_remote_firmware_operation(
                             .collect::<Vec<_>>()
                     }
                     RemoteFirmwareKind::PayloadZip | RemoteFirmwareKind::PayloadRaw => {
-                        context.report_stage("正在准备 payload 提取工具");
+                        // payload 由进程内解析器处理，不再有「准备提取工具」这一步。
                         context.report_stage("正在按需提取远程 payload 分区");
                         let source_path = selection.source.clone();
                         let entries = selection.entries.clone();
@@ -2133,7 +2133,6 @@ fn unique_firmware_suffix() -> u128 {
         .unwrap_or(0)
 }
 
-
 fn application_error_to_domain(
     error: FirmwareExtractApplicationError,
 ) -> nwflash_domain::DomainError {
@@ -2172,7 +2171,6 @@ mod tests {
         remote_firmware::{RemoteFirmwareKind, ZipMember},
         FirmwareFormat,
     };
-    use sha2::{Digest, Sha256};
     use zip4::{write::SimpleFileOptions, ZipWriter};
 
     fn temp_root(label: &str) -> PathBuf {
@@ -2270,7 +2268,9 @@ mod tests {
                 SimpleFileOptions::default().compression_method(zip4::CompressionMethod::Stored),
             )
             .expect("payload.bin should be added");
-        archive.write_all(payload).expect("payload should be written");
+        archive
+            .write_all(payload)
+            .expect("payload should be written");
         archive.finish().expect("zip fixture should be finalized");
     }
 
@@ -2284,16 +2284,6 @@ mod tests {
             archive.write_all(data).expect("image should be written");
         }
         archive.finish().expect("zip fixture should be finalized");
-    }
-
-    fn write_metadata_tool(root: &Path) -> PathBuf {
-        let executable = root.join("payload_dumper.cmd");
-        fs::write(
-            &executable,
-            "@echo off\r\nset output=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\n>\"%output%\\metadata.json\" echo {\"partitions\":[{\"partition_name\":\"boot\",\"size_in_bytes\":4,\"compression_type\":\"none\"}]}\r\nexit /b 0\r\n",
-        )
-        .expect("payload tool script should be written");
-        executable
     }
 
     fn spawn_remote_payload_server(body: Vec<u8>) -> String {
@@ -2366,19 +2356,6 @@ mod tests {
             }
         }
         Ok(())
-    }
-
-    fn write_recording_metadata_tool(root: &Path, record: &Path) -> PathBuf {
-        let executable = root.join("payload_dumper.cmd");
-        fs::write(
-            &executable,
-            format!(
-                "@echo off\r\n>\"{}\" echo %~1\r\nset output=\r\n:next\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"-o\" set output=%~2\r\nshift\r\ngoto next\r\n:done\r\n>\"%output%\\metadata.json\" echo {{\"partitions\":[{{\"partition_name\":\"boot\",\"size_in_bytes\":9,\"compression_type\":\"none\"}}]}}\r\nexit /b 0\r\n",
-                record.display()
-            ),
-        )
-        .expect("recording payload tool should be written");
-        executable
     }
 
     fn write_recording_extraction_tool(root: &Path, record: &Path) -> PathBuf {
@@ -3264,13 +3241,10 @@ mod tests {
         fs::write(source.join("boot.img"), b"boot").expect("image fixture should be written");
 
         let (coordinator, reporter) = capturing_coordinator();
-        let inspection = inspect_local_or_payload(
-            coordinator,
-            PayloadInspectionRuntime::new(),
-            source,
-        )
-        .await
-        .expect("image directory source should be inspected");
+        let inspection =
+            inspect_local_or_payload(coordinator, PayloadInspectionRuntime::new(), source)
+                .await
+                .expect("image directory source should be inspected");
 
         assert_eq!(inspection.format, "imageDirectory");
         let entries = reporter

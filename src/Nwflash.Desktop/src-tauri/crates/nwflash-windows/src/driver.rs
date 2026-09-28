@@ -60,11 +60,22 @@ pub struct SystemElevatedProcessExecutor;
 /// 一次驱动安装的结果，连同 pnputil 的原始输出。
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
-    /// 全部 INF 都成功时为 0；否则是**第一条失败命令**的退出码。
+    /// 全部 INF 都成功（含「已存在」的 5）时为 0；否则是**第一条失败命令**
+    /// 的退出码。
     pub exit_code: i32,
     /// 各条 pnputil 输出的合并文本（已从本地代码页解码）。
     /// 提权路径下为空表示未能回收输出，不代表 pnputil 没打印东西。
     pub output: String,
+}
+
+/// pnputil 退出码：命令成功处理了 INF，但没有任何包是新增的（例如全部已存在）。
+/// 「已存在」对重装场景是成功而非失败——不归一它，重装已装好的驱动会被误报。
+const PNPUTIL_EXIT_ALREADY_PRESENT: i32 = 5;
+
+/// 把一条 pnputil 命令的退出码归一成「成功 / 失败」两态里的成功。
+/// 目前只有「已存在」（5）算成功；0 本来就是成功。
+fn pnputil_command_succeeded(exit_code: i32) -> bool {
+    exit_code == 0 || exit_code == PNPUTIL_EXIT_ALREADY_PRESENT
 }
 
 /// pnputil 的退出码语义（实测）：
@@ -73,7 +84,8 @@ pub struct InstallOutcome {
 /// * `2`  目标 INF 缺失或非法；
 /// * `1`  用法错误——最常见的原因是 `/add-driver` 收到了不止一个 INF。
 ///
-/// 只按 `!= 0` 判定会把退出码 5（驱动早就装好了）误报成安装失败。
+/// 只按 `!= 0` 判定会把退出码 5（驱动早就装好了）误报成安装失败——所以
+/// [`merge_install_outcomes`] 先把 5 归一成成功，再取第一条失败码。
 pub fn driver_install_succeeded(outcome: &InstallOutcome) -> bool {
     outcome.exit_code == 0
 }
@@ -90,13 +102,13 @@ pub fn driver_install_failure_detail(outcome: &InstallOutcome) -> String {
 
 /// 把多条命令的结果合成一个结论。
 ///
-/// 退出码取第一条失败命令的；只要有一条失败，整体就是失败。输出全部保留，
-/// 便于定位到底是哪个 INF 出的问题。
+/// 「已存在」（5）按成功处理；其余退出码取第一条失败命令的，只要有一条
+/// 真失败，整体就是失败。输出全部保留，便于定位到底是哪个 INF 出的问题。
 fn merge_install_outcomes(outputs: &[ProcessOutput]) -> InstallOutcome {
     let mut exit_code = 0;
     let mut sections = Vec::new();
     for output in outputs {
-        if output.exit_code != 0 && exit_code == 0 {
+        if !pnputil_command_succeeded(output.exit_code) && exit_code == 0 {
             exit_code = output.exit_code;
         }
         let text = driver_tool_output(output);
@@ -1174,8 +1186,10 @@ fn safe_archive_entry_path(
 
 /// 读取提权进程留下的输出并删除日志文件。
 ///
-/// 控制台程序在中文 Windows 上按 ANSI/GBK 写盘，先按 UTF-8 试，失败再按 GBK
-/// 宽松解码；两者都失败时保留替换字符，绝不因为解码问题丢掉诊断信息本身。
+/// 提权子进程把输出写进文件时按其控制台代码页编码（中文系统 GBK/936，
+/// 英文系统 1252/437），先按 UTF-8 试（65001 系统），失败再按系统 ANSI
+/// 代码页宽松解码；解码不了的字节保留替换字符，绝不因为解码问题丢掉
+/// 诊断信息本身。
 #[cfg(windows)]
 fn take_elevated_output_log(path: &Path) -> String {
     let bytes = match fs::read(path) {
@@ -1183,16 +1197,30 @@ fn take_elevated_output_log(path: &Path) -> String {
         Err(_) => return String::new(),
     };
     let _ = fs::remove_file(path);
+    decode_elevated_output(&bytes)
+}
+
+/// 按系统 ANSI 代码页解码提权输出。固定 GBK 会把英文系统（1252）下的
+/// 输出解成乱码，只保得住 ASCII 骨架；这里按真实代码页选解码器。
+#[cfg(windows)]
+fn decode_elevated_output(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    match std::str::from_utf8(&bytes) {
-        Ok(text) => text.to_string(),
-        Err(_) => {
-            let (decoded, _, _) = encoding_rs::GBK.decode(&bytes);
-            decoded.into_owned()
-        }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
     }
+    // SAFETY: `GetACP` 无参数、无失败路径，任意时刻可调用。
+    let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
+    let encoding = match code_page {
+        936 => encoding_rs::GBK,
+        950 => encoding_rs::BIG5,
+        932 => encoding_rs::SHIFT_JIS,
+        949 => encoding_rs::EUC_KR,
+        _ => encoding_rs::WINDOWS_1252,
+    };
+    let (decoded, _, _) = encoding.decode(bytes);
+    decoded.into_owned()
 }
 
 #[cfg(windows)]
@@ -1438,4 +1466,36 @@ fn quote_windows_argument(argument: &str) -> String {
     quoted.push_str(&"\\".repeat(backslashes * 2));
     quoted.push('"');
     quoted
+}
+
+#[cfg(test)]
+mod merge_outcome_tests {
+    use super::*;
+
+    fn output(exit_code: i32) -> ProcessOutput {
+        ProcessOutput {
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    /// pnputil 退出码 5（「已存在」）是重装场景的正常结果，必须按成功处理；
+    /// 只有真实失败码（如用法错误 1）才让整体失败。此前 `== 0` 判定与
+    /// 旧的 `!= 0` 判定对 5 的结论相同——重装已装好的驱动会被误报失败。
+    #[test]
+    fn already_present_exit_code_is_not_a_failure() {
+        let all_present = merge_install_outcomes(&[output(5), output(5), output(0)]);
+        assert!(
+            driver_install_succeeded(&all_present),
+            "全部「已存在」必须算安装成功：{all_present:?}"
+        );
+
+        let mixed = merge_install_outcomes(&[output(5), output(1), output(5)]);
+        assert!(
+            !driver_install_succeeded(&mixed),
+            "混入真实失败码必须整体失败：{mixed:?}"
+        );
+        assert_eq!(mixed.exit_code, 1, "整体退出码取第一条真实失败命令的");
+    }
 }

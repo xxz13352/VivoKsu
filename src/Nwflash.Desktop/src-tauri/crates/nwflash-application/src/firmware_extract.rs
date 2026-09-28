@@ -481,10 +481,11 @@ impl FirmwareExtractService {
                     scale_progress(overall, total_bytes, 0, extraction_span),
                 );
             };
-            match opened.inner.extract_partitions(
+            match opened.inner.extract_partitions_with_cancel(
                 &partition_refs,
                 &staging_directory,
                 |name, written, total| on_progress(name, written, total),
+                || should_cancel(),
             ) {
                 Ok(results) => results,
                 Err(error) => {
@@ -549,6 +550,7 @@ fn payload_error_to_application(
         Source::MissingPartition(name) => {
             FirmwareExtractApplicationError::Format(format!("固件中不存在分区 {name}。"))
         }
+        Source::Canceled => FirmwareExtractApplicationError::Canceled,
         Source::DifferentialUnsupported => FirmwareExtractApplicationError::Format(
             "该固件是差分包，需要基础版本镜像才能提取。".to_string(),
         ),
@@ -583,6 +585,10 @@ where
     let mut pending = Vec::with_capacity(results.len());
     let mut partial_paths = Vec::with_capacity(results.len());
     let mut promoted: Vec<PathBuf> = Vec::with_capacity(results.len());
+    // rename 时被顶掉的旧文件的备份：`(备份路径, 原目标路径)`。
+    // 失败回滚时原样放回，成功发布后才清除。
+    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(results.len());
+    let mut backups_to_clean: Vec<PathBuf> = Vec::with_capacity(results.len());
     let mut completed_bytes = 0u64;
     let publication = (|| {
         for result in results {
@@ -644,17 +650,48 @@ where
         // 已 rename 的文件要记账：取消或失败发生在 rename 中途时，必须把这些
         // 已经露在用户目录里的文件删掉。否则用户会拿到「一半新、一半没动」的
         // 镜像集合，比彻底失败更危险（刷机时可能新旧镜像混用）。
+        //
+        // 旧文件不能直接删：`fs::rename` 在 Windows 上不允许覆盖已存在目标，
+        // 所以先把旧文件挪成备份，失败时**原样放回**——「失败 = 什么都没变」
+        // 对用户已有的镜像同样成立，删除顶掉的旧文件是不可逆的破坏。
         for (partial, destination, _, _) in &pending {
             ensure_not_canceled(is_canceled)?;
+            let mut backup: Option<PathBuf> = None;
             if destination.exists() {
-                fs::remove_file(destination).map_err(|error| {
-                    FirmwareExtractApplicationError::Directory(error.to_string())
+                let backup_path = output_directory.join(format!(
+                    ".{}.previous-{}",
+                    destination
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    unique_suffix()
+                ));
+                fs::rename(destination, &backup_path).map_err(|error| {
+                    FirmwareExtractApplicationError::Directory(format!(
+                        "备份已存在的镜像失败：{error}"
+                    ))
                 })?;
+                backup = Some(backup_path);
             }
-            fs::rename(partial, destination)
-                .map_err(|error| FirmwareExtractApplicationError::Directory(error.to_string()))?;
-            promoted.push(destination.clone());
+            match fs::rename(partial, destination) {
+                Ok(()) => {
+                    if let Some(backup_path) = backup {
+                        backups.push((backup_path, destination.clone()));
+                    }
+                    promoted.push(destination.clone());
+                }
+                Err(error) => {
+                    if let Some(backup_path) = backup {
+                        let _ = fs::rename(&backup_path, destination);
+                    }
+                    return Err(FirmwareExtractApplicationError::Directory(
+                        error.to_string(),
+                    ));
+                }
+            }
         }
+        // 发布成功后备份才真正清除；在此之前它们是失败回滚的依据。
+        backups_to_clean = backups.iter().map(|(backup, _)| backup.clone()).collect();
         Ok(())
     })();
 
@@ -666,7 +703,15 @@ where
         for path in &promoted {
             let _ = fs::remove_file(path);
         }
+        // 被顶掉的旧文件原样放回。
+        for (backup, destination) in &backups {
+            let _ = fs::rename(backup, destination);
+        }
         return Err(error);
+    }
+
+    for path in &backups_to_clean {
+        let _ = fs::remove_file(path);
     }
 
     Ok(pending
@@ -1098,6 +1143,60 @@ mod tests {
         fs::remove_dir_all(root).expect("清理");
     }
 
+    /// 用户目录里**已有**同名镜像时，发布中途取消必须把旧镜像原样放回——
+    /// 删除顶掉的旧文件是不可逆的破坏，「失败 = 什么都没变」对旧文件同样成立。
+    #[test]
+    fn publication_restores_previous_images_when_promotion_is_canceled() {
+        let root = std::env::temp_dir().join(format!(
+            "nwflash-payload-restore-cancel-{}",
+            unique_suffix()
+        ));
+        let staging = root.join("staging");
+        let output = root.join("output");
+        fs::create_dir_all(&staging).expect("staging 目录");
+        fs::create_dir_all(&output).expect("output 目录");
+        fs::write(staging.join("boot.img"), [7u8]).expect("写入暂存 boot");
+        fs::write(staging.join("vendor_boot.img"), [9u8]).expect("写入暂存 vendor_boot");
+        // 用户已有的旧镜像（只存在于 output，不在 staging）。
+        fs::write(output.join("boot.img"), b"old-boot").expect("写入旧 boot");
+
+        let results = vec![staged("boot", 1), staged("vendor_boot", 1)];
+        let mut checks = 0usize;
+
+        let error = publish_extracted_partitions(
+            &results,
+            &staging,
+            &output,
+            &mut || {
+                checks += 1;
+                // 两次拷贝（各 2 次检查）之后，第 1 次发布迭代已完成、
+                // 第 2 次迭代开始时取消——boot 已被顶掉，vendor_boot 未动。
+                checks >= 6
+            },
+            &mut |_, _| {},
+            0,
+            2,
+        )
+        .expect_err("发布阶段取消应当报错");
+
+        assert!(matches!(error, FirmwareExtractApplicationError::Canceled));
+        assert_eq!(
+            fs::read(output.join("boot.img")).expect("旧 boot 必须被原样放回"),
+            b"old-boot",
+            "发布中途取消不得丢失用户已有的镜像"
+        );
+        assert!(!output.join("vendor_boot.img").exists());
+        assert!(
+            fs::read_dir(&output).expect("output 可读").all(|entry| {
+                let name = entry.expect("entry 可读").file_name();
+                !name.to_string_lossy().contains("partial")
+                    && !name.to_string_lossy().contains("previous")
+            }),
+            "不得留下 .partial- / .previous- 残骸"
+        );
+        fs::remove_dir_all(root).expect("清理");
+    }
+
     /// 全部成功时应当发布完整镜像，且进度终值等于总字节数。
     #[test]
     fn publication_promotes_every_image_on_success() {
@@ -1139,6 +1238,46 @@ mod tests {
         assert!(
             progress.windows(2).all(|w| w[0] <= w[1]),
             "进度必须单调不减: {progress:?}"
+        );
+        assert!(
+            fs::read_dir(&output).expect("output 可读").all(|entry| {
+                let name = entry.expect("entry 可读").file_name();
+                !name.to_string_lossy().contains("previous")
+            }),
+            "成功发布后不得留下 .previous- 备份"
+        );
+        fs::remove_dir_all(root).expect("清理");
+    }
+
+    /// 已有同名镜像时成功发布：新内容生效，旧内容作为备份被清理。
+    #[test]
+    fn publication_overwrites_previous_images_on_success() {
+        let root =
+            std::env::temp_dir().join(format!("nwflash-payload-overwrite-ok-{}", unique_suffix()));
+        let staging = root.join("staging");
+        let output = root.join("output");
+        fs::create_dir_all(&staging).expect("staging 目录");
+        fs::create_dir_all(&output).expect("output 目录");
+        fs::write(staging.join("boot.img"), b"new-boot").expect("写入暂存 boot");
+        fs::write(output.join("boot.img"), b"old-boot").expect("写入旧 boot");
+
+        let results = vec![staged("boot", 8)];
+        let images = publish_extracted_partitions(
+            &results,
+            &staging,
+            &output,
+            &mut || false,
+            &mut |_, _| {},
+            0,
+            8,
+        )
+        .expect("发布应当成功");
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            fs::read(output.join("boot.img")).expect("读取 boot"),
+            b"new-boot",
+            "成功发布必须用新镜像覆盖旧镜像"
         );
         fs::remove_dir_all(root).expect("清理");
     }

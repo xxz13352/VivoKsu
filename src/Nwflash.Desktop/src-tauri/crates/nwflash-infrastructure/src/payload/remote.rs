@@ -164,12 +164,18 @@ pub fn locate_payload_in_zip(zip_tail: &[u8], zip_base_offset: u64) -> io::Resul
         let name = &central[name_start..name_start + name_len];
 
         let mut compressed_size = read_u32(central, cursor + 20)? as u64;
+        let uncompressed_size = read_u32(central, cursor + 24)? as u64;
         let mut local_header_offset = read_u32(central, cursor + 42)? as u64;
         let extra_start = name_start + name_len;
         let extra = &central[extra_start..extra_start + extra_len];
 
-        // ZIP64 extra（id=0x0001）：按「哪些字段是占位符」的顺序出现。
-        if compressed_size == 0xFFFF_FFFF || local_header_offset == 0xFFFF_FFFF {
+        // ZIP64 extra（id=0x0001）：字段**顺序固定**为「原始大小 → 压缩大小 →
+        // 头偏移 → 磁盘号」，且只有对应基字段是 0xFFFFFFFF 占位符的字段才
+        // 出现。必须按占位符序列逐个消费，不能跳过前面的字段直接读后面的。
+        if compressed_size == 0xFFFF_FFFF
+            || uncompressed_size == 0xFFFF_FFFF
+            || local_header_offset == 0xFFFF_FFFF
+        {
             let mut pos = 0usize;
             while pos + 4 <= extra.len() {
                 let id = read_u16(extra, pos)?;
@@ -177,6 +183,12 @@ pub fn locate_payload_in_zip(zip_tail: &[u8], zip_base_offset: u64) -> io::Resul
                 let body_start = pos + 4;
                 if id == 0x0001 {
                     let mut field = body_start;
+                    if uncompressed_size == 0xFFFF_FFFF {
+                        // 原始大小在最前。解析器用不到它的值，但必须按规范
+                        // 消费掉这 8 字节，否则后面字段的读取位置全错。
+                        let _original_size = read_u64(extra, field)?;
+                        field += 8;
+                    }
                     if compressed_size == 0xFFFF_FFFF {
                         compressed_size = read_u64(extra, field)?;
                         field += 8;
@@ -315,9 +327,11 @@ impl RemotePayloadReader {
             .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
             .send()
             .map_err(|error| io::Error::other(error.to_string()))?;
-        if !response.status().is_success() {
+        // 只接受 206：服务器忽略 Range 返回 200 时，body 是**整个**固件
+        // （GB 级），读进内存等于自我瘫痪，宁可立刻失败。
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             return Err(io::Error::other(format!(
-                "远程读取失败：HTTP {}。",
+                "远程读取失败：HTTP {}（服务器未按 Range 返回分片）。",
                 response.status()
             )));
         }

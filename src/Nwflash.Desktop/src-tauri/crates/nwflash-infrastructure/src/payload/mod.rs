@@ -38,6 +38,8 @@ pub enum PayloadError {
     UnsupportedOperation(u64),
     #[error("payload 中不存在分区 {0}。")]
     MissingPartition(String),
+    #[error("payload 提取已取消。")]
+    Canceled,
     #[error("读取或写入 payload 时发生 I/O 错误：{0}")]
     Io(#[from] io::Error),
 }
@@ -147,11 +149,15 @@ impl<'a> ProtoReader<'a> {
 
     fn read_length_delimited(&mut self) -> io::Result<&'a [u8]> {
         let len = self.read_varint()? as usize;
-        if self.pos + len > self.data.len() {
+        // 长度字段来自文件内容：溢出或越界都按损坏处理，绝不绕过切片边界。
+        let end = self.pos.checked_add(len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "length delimited overflow")
+        })?;
+        if end > self.data.len() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "ld eof"));
         }
-        let out = &self.data[self.pos..self.pos + len];
-        self.pos += len;
+        let out = &self.data[self.pos..end];
+        self.pos = end;
         Ok(out)
     }
 
@@ -221,9 +227,34 @@ impl<R: Read + Seek> Payload<R> {
         let manifest_size = u64::from_be_bytes(head[12..20].try_into().unwrap());
         let signature_size = u32::from_be_bytes(head[20..24].try_into().unwrap());
 
+        // manifest 大小受三重约束：头部长度字段不溢出、不越过源末尾、不超过
+        // 硬上限。这是文件内容可控的字段，直接 `vec![0u8; size]` 会把损坏
+        // 文件的 8 个字节变成一次无界内存分配——分配失败是进程级 abort，
+        // 不像普通错误那样可以恢复。
+        const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+        let manifest_end = 24u64
+            .checked_add(manifest_size)
+            .and_then(|size| size.checked_add(u64::from(signature_size)))
+            .ok_or_else(|| PayloadError::Corrupt("payload 头部长度字段溢出。".to_string()))?;
+        if manifest_size > MAX_MANIFEST_BYTES {
+            return Err(PayloadError::Corrupt(format!(
+                "payload manifest 大小异常（{manifest_size} 字节，超过 {MAX_MANIFEST_BYTES} 上限）。"
+            )));
+        }
+        if base
+            .checked_add(manifest_end)
+            .is_none_or(|end| end > source_len)
+        {
+            return Err(PayloadError::Corrupt(
+                "payload 头部声明的 manifest 越出文件范围。".to_string(),
+            ));
+        }
+        let manifest_len = usize::try_from(manifest_size)
+            .map_err(|_| PayloadError::Corrupt("payload manifest 大小异常。".to_string()))?;
+
         // manifest 可能很大（数 MB），但要按 manifest_size 精确读取，
         // 不能一次吞掉整块——远程源每次 Read 都是一次 Range 请求。
-        let manifest_bytes = read_exact_vec(&mut source, manifest_size as usize)?;
+        let manifest_bytes = read_exact_vec(&mut source, manifest_len)?;
         let data_offset = base + 24 + manifest_size + u64::from(signature_size);
         let manifest = parse_manifest(&manifest_bytes)?;
         Ok(Self {
@@ -247,8 +278,12 @@ impl<R: Read + Seek> Payload<R> {
         F: FnMut(u64),
     {
         let dir = output.parent().unwrap_or_else(|| Path::new("."));
-        let results =
-            self.extract_partitions(&[name], dir, |_, written, _| on_progress(written))?;
+        let results = self.extract_partitions_with_cancel(
+            &[name],
+            dir,
+            |_, written, _| on_progress(written),
+            || false,
+        )?;
         Ok(results.into_iter().next().map_or(0, |r| r.bytes_written))
     }
 
@@ -257,18 +292,44 @@ impl<R: Read + Seek> Payload<R> {
     /// 回调参数为 `(分区名, 该分区已写入字节, 该分区总大小)`。总大小来自
     /// manifest 的 `new_partition_info.size`，所以调用方**不需要**事先知道
     /// 分区尺寸——这正是旧实现做不到的（它要把尺寸传进来才能算百分比）。
+    ///
+    /// 不需要取消的调用方用 [`Self::extract_partitions`]；提取可能耗时
+    /// 很长（远程固件解压数 GB），主流程必须能在中途停止。
     pub fn extract_partitions<F>(
         &mut self,
         names: &[&str],
         output_dir: &Path,
-        mut on_progress: F,
+        on_progress: F,
     ) -> Result<Vec<ExtractedPartition>, PayloadError>
     where
         F: FnMut(&str, u64, u64),
     {
+        self.extract_partitions_with_cancel(names, output_dir, on_progress, || false)
+    }
+
+    /// 同 [`Self::extract_partitions`]，但带取消检查点。
+    ///
+    /// 检查点分布在：每个分区开始前、每个 operation 之间、数据拷贝循环的
+    /// 每一块（256 KiB）与写零循环的每一块。命中取消即返回
+    /// [`PayloadError::Canceled`]，已写的临时文件由调用方清理。
+    pub fn extract_partitions_with_cancel<F, C>(
+        &mut self,
+        names: &[&str],
+        output_dir: &Path,
+        mut on_progress: F,
+        mut is_canceled: C,
+    ) -> Result<Vec<ExtractedPartition>, PayloadError>
+    where
+        F: FnMut(&str, u64, u64),
+        C: FnMut() -> bool,
+    {
         fs::create_dir_all(output_dir)?;
         let mut results = Vec::with_capacity(names.len());
         for name in names {
+            if is_canceled() {
+                return Err(PayloadError::Canceled);
+            }
+            ensure_safe_partition_name(name)?;
             let partition = self
                 .manifest
                 .partitions
@@ -285,11 +346,14 @@ impl<R: Read + Seek> Payload<R> {
             let total = partition.new_size;
             let mut written_total: u64 = 0;
             for op in &partition.operations {
+                if is_canceled() {
+                    return Err(PayloadError::Canceled);
+                }
                 let name = partition.name.clone();
                 let mut tick = |written: u64| {
                     on_progress(&name, written_total + written, total);
                 };
-                let written = self.extract_operation(op, &mut out, &mut tick)?;
+                let written = self.extract_operation(op, &mut out, &mut is_canceled, &mut tick)?;
                 written_total += written;
             }
             out.sync_all()?;
@@ -303,13 +367,15 @@ impl<R: Read + Seek> Payload<R> {
         Ok(results)
     }
 
-    fn extract_operation<F>(
+    fn extract_operation<C, F>(
         &mut self,
         op: &Operation,
         out: &mut File,
+        is_canceled: &mut C,
         on_progress: &mut F,
     ) -> Result<u64, PayloadError>
     where
+        C: FnMut() -> bool,
         F: FnMut(u64),
     {
         // op_type: 0=REPLACE, 1=REPLACE_BZ, 6=ZERO, 8=REPLACE_XZ, 14=ZSTD
@@ -317,31 +383,56 @@ impl<R: Read + Seek> Payload<R> {
             .seek(SeekFrom::Start(self.data_offset + op.data_offset))?;
         let mut reader = (&mut self.source).take(op.data_length);
 
-        let mut sink = ExtentWriter::new(out, &op.dst_extents, self.manifest.block_size);
+        let block_size = self.manifest.block_size;
+        let mut sink = ExtentWriter::new(out, &op.dst_extents, block_size);
         let written = match op.op_type {
-            0 => copy_with_progress(&mut reader, &mut sink, on_progress)?,
+            0 => copy_with_progress(&mut reader, &mut sink, is_canceled, on_progress)
+                .map_err(map_copy_failure)?,
             8 => {
                 let mut decoder = liblzma::read::XzDecoder::new(reader);
-                copy_with_progress(&mut decoder, &mut sink, on_progress)?
+                copy_with_progress(&mut decoder, &mut sink, is_canceled, on_progress)
+                    .map_err(map_copy_failure)?
             }
             1 => {
                 let mut decoder = bzip2::read::BzDecoder::new(reader);
-                copy_with_progress(&mut decoder, &mut sink, on_progress)?
+                copy_with_progress(&mut decoder, &mut sink, is_canceled, on_progress)
+                    .map_err(map_copy_failure)?
             }
             14 => {
                 // ZSTD（Android 12+ 的 OTA 大量使用）——本项目的真实固件就是这种。
                 let mut decoder = zstd::stream::read::Decoder::new(reader)?;
-                copy_with_progress(&mut decoder, &mut sink, on_progress)?
+                copy_with_progress(&mut decoder, &mut sink, is_canceled, on_progress)
+                    .map_err(map_copy_failure)?
             }
             6 => {
+                // AOSP 的 ZERO 操作没有数据负载（data_length 通常为 0），
+                // 输出长度由 dst_extents 决定；个别生成器会把长度写进
+                // data_length。优先用 extents 总量，退化才用 data_length——
+                // 按 extents 写零还能借 ExtentWriter 的容量校验发现清单
+                // 与声明不一致。
+                let extent_total: u64 = op
+                    .dst_extents
+                    .iter()
+                    .map(|extent| extent.num_blocks * u64::from(block_size))
+                    .sum();
+                let mut remaining = if extent_total > 0 {
+                    extent_total
+                } else {
+                    op.data_length
+                };
                 let zeros = vec![0u8; 64 * 1024];
-                let mut remaining = op.data_length;
+                let mut written_zero: u64 = 0;
                 while remaining > 0 {
+                    if is_canceled() {
+                        return Err(PayloadError::Canceled);
+                    }
                     let chunk = remaining.min(zeros.len() as u64) as usize;
                     sink.write_all(&zeros[..chunk])?;
                     remaining -= chunk as u64;
+                    written_zero += chunk as u64;
+                    on_progress(written_zero);
                 }
-                op.data_length
+                written_zero
             }
             other => {
                 return Err(PayloadError::UnsupportedOperation(other));
@@ -374,28 +465,62 @@ fn read_exact_vec<R: Read>(reader: &mut R, len: usize) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
-fn copy_with_progress<R, W, F>(
+/// 数据拷贝循环的失败：取消与 I/O 是两种不同性质的结果，不能共用
+/// `io::Error`（`ErrorKind::Interrupted` 在标准库里是 EINTR 的正常重试
+/// 信号，挪用它表达「用户取消」会把真实的系统中断误报成取消）。
+enum CopyFailure {
+    Canceled,
+    Io(io::Error),
+}
+
+fn map_copy_failure(failure: CopyFailure) -> PayloadError {
+    match failure {
+        CopyFailure::Canceled => PayloadError::Canceled,
+        CopyFailure::Io(error) => PayloadError::Io(error),
+    }
+}
+
+fn copy_with_progress<R, W, C, F>(
     reader: &mut R,
     writer: &mut W,
+    is_canceled: &mut C,
     on_progress: &mut F,
-) -> io::Result<u64>
+) -> Result<u64, CopyFailure>
 where
     R: Read,
     W: Write,
+    C: FnMut() -> bool,
     F: FnMut(u64),
 {
     let mut buffer = vec![0u8; 256 * 1024];
     let mut total: u64 = 0;
     loop {
-        let read = reader.read(&mut buffer)?;
+        if is_canceled() {
+            return Err(CopyFailure::Canceled);
+        }
+        let read = reader.read(&mut buffer).map_err(CopyFailure::Io)?;
         if read == 0 {
             break;
         }
-        writer.write_all(&buffer[..read])?;
+        writer.write_all(&buffer[..read]).map_err(CopyFailure::Io)?;
         total += read as u64;
         on_progress(total);
     }
     Ok(total)
+}
+
+/// 分区名要拼成 `{name}.img` 落盘。名字来自 manifest——即固件文件本身的
+/// 内容——带路径语义的名字会把写盘位置移出输出目录，一律拒绝。
+fn ensure_safe_partition_name(name: &str) -> Result<(), PayloadError> {
+    let dangerous =
+        name.is_empty() || name.contains(['/', '\\', ':', '\0']) || name == "." || name == "..";
+    if dangerous {
+        Err(PayloadError::Corrupt(format!(
+            "分区名 {name:?} 含路径语义，拒绝写盘。"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 /// 按 extent 列表把连续字节流写到文件的不同偏移。

@@ -136,6 +136,10 @@ async fn run_process_command_with_progress(
         Some(sink) => {
             let image_bytes = flash_image_bytes(&command);
             let observer: Arc<dyn ProcessOutputObserver> = Arc::new(FlashProgressObserver {
+                // 分区名取自命令参数本身（`flash <分区> <镜像>`），不解析输出：
+                // 输出分片是流式的，绝大多数分片只有累计行、没有 `Sending` 行，
+                // 按分片提取会让进度上报带着空分区名（前端标签随之闪烁为空）。
+                partition: flash_partition_from_args(&command.args).unwrap_or_default(),
                 parser: Mutex::new(nwflash_application::FastbootProgressParser::new(
                     image_bytes,
                 )),
@@ -188,12 +192,30 @@ fn is_fastboot_flash_command(command: &CommandSpec) -> bool {
 /// 不会让数值回退）。解析逻辑与线刷（safe_flash）通道共用同一个
 /// `FastbootProgressParser`，两通道进度语义一致。
 struct FlashProgressObserver {
+    /// 本命令的目标分区名（来自命令参数，整个命令生命周期不变）。
+    partition: String,
     parser: Mutex<nwflash_application::FastbootProgressParser>,
     sink: Arc<FlashProgressSink>,
 }
 
 impl ProcessOutputObserver for FlashProgressObserver {
     fn observe(&self, observation: ProcessObservation<'_>) -> Result<(), ProcessObserverError> {
+        // 命令收尾：只有真正成功才把最后一块未报满的余量补满（与线刷通道的
+        // `FastbootProgressObserver` 同款语义）。取消、超时、输出超限都以
+        // 非 0 退出码或非 Completed 收尾，补满会把被打断的刷写谎报成 100%。
+        if let ProcessObservation::Finished(metadata) = observation {
+            let succeeded = metadata.exit_code == Some(0)
+                && matches!(
+                    metadata.termination,
+                    nwflash_windows::process::ProcessTermination::Completed
+                );
+            if succeeded {
+                if let Some(written) = self.parser.lock().ok().and_then(|parser| parser.finish()) {
+                    (self.sink)(&self.partition, written, 0);
+                }
+            }
+            return Ok(());
+        }
         let ProcessObservation::Output { stream, bytes, .. } = observation else {
             return Ok(());
         };
@@ -205,40 +227,28 @@ impl ProcessOutputObserver for FlashProgressObserver {
             return Ok(());
         };
         let mut reported: Option<u64> = None;
-        let mut partition = String::new();
         for line in text.lines() {
-            let line = line.trim_end();
-            if let Some(name) = transferring_partition(line) {
-                if partition.is_empty() {
-                    partition = name;
-                }
-            }
-            if let Some(bytes) = parser.observe_line(line) {
+            if let Some(bytes) = parser.observe_line(line.trim_end()) {
                 reported = Some(bytes);
             }
         }
         drop(parser);
         if let Some(written) = reported {
-            (self.sink)(&partition, written, 0);
+            (self.sink)(&self.partition, written, 0);
         }
         Ok(())
     }
 }
 
-/// 从 fastboot 输出行提取当前正在传输的分区名。
-///
-/// 进度行的两种形态：`Sending 'x' (N KB)...` / `Writing 'x'...`；
-/// 块内累计行 `x: A KB/B KB (p%)` 也以分区名开头。
-fn transferring_partition(line: &str) -> Option<String> {
-    let line = line.trim();
-    for prefix in ["Sending sparse '", "Sending '", "Writing '"] {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            if let Some(end) = rest.find('\'') {
-                return Some(rest[..end].to_string());
-            }
-        }
+/// `fastboot flash <分区> <镜像>` 的目标分区名（命令参数里的静态事实）。
+fn flash_partition_from_args(args: &[String]) -> Option<String> {
+    let index = args.iter().position(|argument| argument == "flash")?;
+    let name = args.get(index + 1)?;
+    // 防御：绝不把另一个选项当成分区名。
+    if name.is_empty() || name.starts_with('-') {
+        return None;
     }
-    None
+    Some(name.clone())
 }
 
 /// fastboot 协议错误（`FAILED (…)` / `remote error`）可能以退出码 0 伴随
@@ -3812,14 +3822,23 @@ mod flash_progress_tests {
         }
     }
 
-    /// 真实 fastboot 35.0.2 的进度行形态（docs/2026-09-20 审计日志实录）。
-    #[test]
-    fn observer_reports_progress_from_real_fastboot_lines() {
-        let reports = Arc::new(Mutex::new(Vec::new()));
-        let sink_reports = Arc::clone(&reports);
-        let observer = FlashProgressObserver {
+    fn finished(exit_code: i32) -> ProcessObservation<'static> {
+        ProcessObservation::Finished(nwflash_windows::process::ProcessFinishMetadata {
+            exit_code: Some(exit_code),
+            termination: nwflash_windows::process::ProcessTermination::Completed,
+            process_tree_termination_requested: false,
+        })
+    }
+
+    fn observer_with_image_bytes(
+        image_bytes: u64,
+        reports: &Arc<Mutex<Vec<(String, u64)>>>,
+    ) -> FlashProgressObserver {
+        let sink_reports = Arc::clone(reports);
+        FlashProgressObserver {
+            partition: "boot".to_string(),
             parser: Mutex::new(nwflash_application::FastbootProgressParser::new(
-                256 * 1024 * 1024,
+                image_bytes,
             )),
             sink: Arc::new(move |partition: &str, written: u64, _total: u64| {
                 sink_reports
@@ -3827,7 +3846,14 @@ mod flash_progress_tests {
                     .unwrap()
                     .push((partition.to_string(), written));
             }),
-        };
+        }
+    }
+
+    /// 真实 fastboot 35.0.2 的进度行形态（docs/2026-09-20 审计日志实录）。
+    #[test]
+    fn observer_reports_progress_from_real_fastboot_lines() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let observer = observer_with_image_bytes(256 * 1024 * 1024, &reports);
 
         let script = b"Sending sparse 'system_b' 1/20 (262140 KB)...\r\n\
 system_b: 1.0 MB/256.0 MB (0.4%) [sparse] 9.53 MB/s\r\n\
@@ -3837,23 +3863,79 @@ system_b: 64.0 MB/256.0 MB (25.0%) [sparse] 10.1 MB/s\r\n";
         let reports = reports.lock().unwrap();
         assert!(!reports.is_empty(), "真实进度行必须产生上报");
         let (partition, written) = reports.last().unwrap();
-        assert_eq!(partition, "system_b");
+        // 分区名是命令参数里的静态事实：即使分片里没有任何 Sending/Writing 行，
+        // 上报也必须带着正确的名字（旧行为是按分片提取，空名闪烁）。
+        assert_eq!(partition, "boot");
         // 解析器把累计行钳在 `Sending` 自报的本块大小（262140 KB）内；
         // 64.0 MB 正是最后一条累计行的值。
         assert_eq!(*written, 64 * 1024 * 1024, "最后一条累计行为 64.0 MB");
+    }
+
+    /// 只有累计行、没有 Sending/Writing 行的分片，也必须带着命令参数里的
+    /// 分区名上报——这正是按分片提取分区的旧行为漏掉的常态分片。
+    #[test]
+    fn observer_reports_cumulative_only_chunk_with_static_partition_name() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let observer = observer_with_image_bytes(256 * 1024 * 1024, &reports);
+
+        observer
+            .observe(observation(
+                b"system_b: 128.0 MB/256.0 MB (50.0%) [sparse] 10.1 MB/s\r\n",
+            ))
+            .expect("观察不应失败");
+
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.len(), 1, "累计行必须产生上报");
+        assert_eq!(reports[0].0, "boot", "分区名必须来自命令参数而非输出");
+    }
+
+    /// 命令真成功收尾时，把最后一块未报满的余量补满（与线刷通道同款契约）。
+    #[test]
+    fn observer_tops_up_remaining_bytes_on_successful_finish() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let observer = observer_with_image_bytes(4 * 1024 * 1024, &reports);
+
+        observer
+            .observe(observation(b"Sending 'boot' (4096 KB)...\r\n"))
+            .expect("观察不应失败");
+        observer
+            .observe(observation(b"boot: 1024 KB/4096 KB\r\n"))
+            .expect("观察不应失败");
+        observer.observe(finished(0)).expect("观察不应失败");
+
+        let reports = reports.lock().unwrap();
+        let (_, last) = reports.last().expect("收尾必须补满");
+        assert_eq!(*last, 4 * 1024 * 1024, "成功收尾必须补到镜像全长");
+    }
+
+    /// 非 0 退出码收尾不补满：被打断的刷写不能谎报 100%。
+    #[test]
+    fn observer_does_not_top_up_on_failed_finish() {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let observer = observer_with_image_bytes(4 * 1024 * 1024, &reports);
+
+        observer
+            .observe(observation(b"Sending 'boot' (4096 KB)...\r\n"))
+            .expect("观察不应失败");
+        observer
+            .observe(observation(b"boot: 1024 KB/4096 KB\r\n"))
+            .expect("观察不应失败");
+        observer.observe(finished(1)).expect("观察不应失败");
+
+        let reports = reports.lock().unwrap();
+        assert!(
+            reports
+                .iter()
+                .all(|(_, written)| *written < 4 * 1024 * 1024),
+            "失败收尾不得补满：{reports:?}"
+        );
     }
 
     /// stderr 分片不进解析器（fastboot 的进度行走 stdout）。
     #[test]
     fn observer_ignores_stderr() {
         let reports = Arc::new(Mutex::new(Vec::new()));
-        let sink_reports = Arc::clone(&reports);
-        let observer = FlashProgressObserver {
-            parser: Mutex::new(nwflash_application::FastbootProgressParser::new(4096)),
-            sink: Arc::new(move |_: &str, _, _| {
-                sink_reports.lock().unwrap().push(0);
-            }),
-        };
+        let observer = observer_with_image_bytes(4096, &reports);
         let stderr = ProcessObservation::Output {
             stream: ProcessOutputStream::Stderr,
             sequence: 0,
@@ -3893,18 +3975,21 @@ system_b: 64.0 MB/256.0 MB (25.0%) [sparse] 10.1 MB/s\r\n";
         assert!(!is_fastboot_flash_command(&adb));
     }
 
-    /// 进度接收端拿到的分区名来自 `Sending/Writing` 行。
+    /// 分区名来自命令参数（`flash <分区> <镜像>`），不解析输出。
     #[test]
-    fn transferring_partition_extracts_names() {
+    fn flash_partition_from_args_extracts_partition() {
+        let args = |values: &[&str]| values.iter().map(|v| v.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            transferring_partition("Sending sparse 'system_b' 1/20 (262140 KB)..."),
-            Some("system_b".to_string())
+            flash_partition_from_args(&args(&["-s", "SER", "flash", "boot", "boot.img"])),
+            Some("boot".to_string())
         );
+        // 防御：flash 后面跟的是另一个选项时不把它当分区名。
         assert_eq!(
-            transferring_partition("Writing 'vendor_boot'"),
-            Some("vendor_boot".to_string())
+            flash_partition_from_args(&args(&["flash", "--slot-other"])),
+            None
         );
-        assert_eq!(transferring_partition("OKAY [ 0.204s]"), None);
+        assert_eq!(flash_partition_from_args(&args(&["flash"])), None);
+        assert_eq!(flash_partition_from_args(&args(&["erase", "misc"])), None);
     }
 
     /// 进度写入不破坏文件（fixture 确认 flash_image_bytes 读的是最后一个参数）。

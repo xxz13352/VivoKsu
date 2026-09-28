@@ -512,3 +512,110 @@ fn extracted_partition_reports_written_and_declared_sizes() {
     assert_eq!(*total_bytes, raw.len() as u64);
     assert_eq!(*bytes_written, raw.len() as u64);
 }
+
+// ---------- 取消与健壮性 ----------
+
+#[test]
+fn cancellation_stops_extraction_midway() {
+    // 提取可能持续数分钟（远程解压数 GB），取消必须在拷贝循环内部生效，
+    // 而不是等整个 operation 甚至整个分区跑完。
+    let dir = tempfile::tempdir().expect("临时目录");
+    let raw = vec![0x11u8; 4096];
+    let bytes = build_payload(
+        4096,
+        &[PartitionSpec {
+            name: "boot",
+            operations: vec![(0, raw)],
+            new_size: 4096,
+            extents: vec![(0, 1)],
+        }],
+    );
+    let path = write_payload(dir.path(), "cancel.bin", &bytes);
+    let out = dir.path().join("out");
+
+    let mut payload = Payload::parse(&path).expect("解析");
+    let mut checks = 0usize;
+    let error = payload
+        .extract_partitions_with_cancel(
+            &["boot"],
+            &out,
+            |_, _, _| {},
+            || {
+                checks += 1;
+                // 第 1 次检查放行（读入数据块），第 2 次取消。
+                checks > 1
+            },
+        )
+        .expect_err("取消必须中断提取");
+    assert!(matches!(error, PayloadError::Canceled), "实际: {error:?}");
+}
+
+#[test]
+fn rejects_a_manifest_size_beyond_the_source_length() {
+    // manifest 大小来自文件头（内容可控）：越过源末尾的声明必须在分配
+    // 内存**之前**被拒绝，否则损坏文件的一个头字段就是一次进程级 abort。
+    let dir = tempfile::tempdir().expect("临时目录");
+    let mut bytes = build_payload(4096, &[]);
+    bytes[12..20].copy_from_slice(&(1u64 << 40).to_be_bytes());
+    let path = write_payload(dir.path(), "huge-manifest.bin", &bytes);
+
+    let error = Payload::parse(&path).expect_err("越界 manifest 必须失败");
+    assert!(matches!(error, PayloadError::Corrupt(_)), "实际: {error:?}");
+}
+
+#[test]
+fn rejects_partition_names_with_path_semantics() {
+    // 分区名来自 manifest（文件内容可控），带路径语义的名字拼进 `{name}.img`
+    // 会把写盘位置移出输出目录。
+    let dir = tempfile::tempdir().expect("临时目录");
+    let raw = vec![0x22u8; 4096];
+    let bytes = build_payload(
+        4096,
+        &[PartitionSpec {
+            name: "../evil",
+            operations: vec![(0, raw)],
+            new_size: 4096,
+            extents: vec![(0, 1)],
+        }],
+    );
+    let path = write_payload(dir.path(), "traversal.bin", &bytes);
+    let out = dir.path().join("out");
+
+    let mut payload = Payload::parse(&path).expect("解析");
+    let error = payload
+        .extract_partitions(&["../evil"], &out, |_, _, _| {})
+        .expect_err("路径语义分区名必须被拒绝");
+    assert!(matches!(error, PayloadError::Corrupt(_)), "实际: {error:?}");
+}
+
+#[test]
+fn zero_operation_progresses_by_extent_total() {
+    // AOSP 的 ZERO 操作没有数据负载（data_length=0），输出长度由 dst_extents
+    // 决定。此前按 data_length 计零（=0），进度与 bytes_written 都少计。
+    let dir = tempfile::tempdir().expect("临时目录");
+    let bytes = build_payload(
+        4096,
+        &[PartitionSpec {
+            name: "boot",
+            operations: vec![(6, Vec::new())],
+            new_size: 4096,
+            extents: vec![(0, 1)],
+        }],
+    );
+    let path = write_payload(dir.path(), "zero.bin", &bytes);
+    let out = dir.path().join("out");
+
+    let mut payload = Payload::parse(&path).expect("解析");
+    let mut seen = Vec::new();
+    let results = payload
+        .extract_partitions(&["boot"], &out, |_, written, _| seen.push(written))
+        .expect("提取");
+
+    assert_eq!(results[0].bytes_written, 4096, "ZERO 必须按 extents 总量计");
+    assert_eq!(seen.last(), Some(&4096), "进度必须走到满");
+    assert_eq!(
+        std::fs::read(&results[0].output_path).expect("读取产物"),
+        vec![0u8; 4096],
+        "extent 覆盖区必须全零"
+    );
+}

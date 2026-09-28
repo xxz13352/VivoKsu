@@ -375,8 +375,11 @@ fn driver_installer_runs_elevated_pnputil_then_writes_adb_ids_and_cleans_staging
 }
 
 #[test]
-fn driver_installer_skips_adb_ids_when_pnputil_returns_nonzero() {
-    let root = temporary_directory("driver-install-failure");
+fn driver_installer_treats_already_present_as_success() {
+    // pnputil 退出码 5 =「INF 处理成功但无新增（已存在）」。重装已装好的
+    // 驱动必须算成功：整体退出码归一为 0，adb_usb.ini 照常补写——此前
+    // `== 0` 判定与旧的 `!= 0` 判定对 5 的结论相同，重装必报失败。
+    let root = temporary_directory("driver-install-already-present");
     let executor = RecordingElevatedExecutor::with_exit_code(5);
     let adb_ini = root.join(".android").join("adb_usb.ini");
     let installer = DriverInstaller::with_dependencies(
@@ -389,8 +392,32 @@ fn driver_installer_skips_adb_ids_when_pnputil_returns_nonzero() {
     assert_eq!(
         installer
             .install()
+            .expect("already-present install should succeed"),
+        0
+    );
+    let adb_ids = fs::read_to_string(adb_ini).expect("adb ids should be written after success");
+    assert!(adb_ids.contains("0x2D95"));
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[test]
+fn driver_installer_skips_adb_ids_when_pnputil_fails() {
+    // 真实失败码（1 = 用法错误 / INF 被拒）才算失败：不写 adb_usb.ini。
+    let root = temporary_directory("driver-install-failure");
+    let executor = RecordingElevatedExecutor::with_exit_code(1);
+    let adb_ini = root.join(".android").join("adb_usb.ini");
+    let installer = DriverInstaller::with_dependencies(
+        fixture_archive(&root),
+        root.join("staging"),
+        adb_ini.clone(),
+        executor,
+    );
+
+    assert_eq!(
+        installer
+            .install()
             .expect("nonzero exit should be returned"),
-        5
+        1
     );
     assert!(
         !adb_ini.exists(),

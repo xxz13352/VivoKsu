@@ -1532,7 +1532,9 @@ fn partition_image_bytes(
     command: &ProcessCommand,
     prepared_image_sizes: &std::collections::HashMap<String, u64>,
 ) -> Option<u64> {
-    if let Some(bytes) = simulated_flash_bytes {
+    // 0 字节按未知处理：Some(0) 会让下游拿 0 当分母折算比例（0/0 的 NaN
+    // 进度），与文件系统分支和映射分支的 `> 0` 守卫保持同一语义。
+    if let Some(bytes) = simulated_flash_bytes.filter(|bytes| *bytes > 0) {
         return Some(bytes);
     }
     // `fastboot flash <分区> <镜像>`：镜像恒为最后一个参数。
