@@ -7,6 +7,7 @@
 | 文档 | 用途 |
 | --- | --- |
 | [项目进展](../PROJECT_PROGRESS.md) | 简洁的当前状态、已合入成果、未完成项和主要证据 |
+| [会话接力（2026-09-29）](2026-09-29-session-handoff.md) | **最新交接点**：驱动安装根因修复、VMP 交接链状态、换机复现清单 |
 | [接力迭代总计划](2026-09-04-iteration-plan.md) | 当前执行顺序、进行中 owner、停止条件和发布前门禁 |
 | [发布门禁审计](2026-09-04-release-gate-audit.md) | 当前 release readiness、外部授权边界和最终 evidence chain |
 | [客户端纵深加固（P0–P3）](2026-09-21-client-defense-in-depth.md) | IPC 边界、两段式反调试、固件包验签、FFI lint 门禁的实施记录与取舍理由 |
