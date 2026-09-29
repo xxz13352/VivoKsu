@@ -6,8 +6,8 @@ use std::{
 use nwflash_application::result_to_domain_error;
 use nwflash_domain::DomainError;
 use nwflash_windows::{
-    detect_drivers, driver_install_failure_detail, locate_bundled_driver_archive,
-    DriverDetectionPaths, DriverInstaller,
+    detect_drivers, driver_install_failure_detail, driver_install_succeeded,
+    locate_bundled_driver_archive, DriverDetectionPaths, DriverInstaller,
 };
 use serde::Serialize;
 use tauri::State;
@@ -47,9 +47,12 @@ pub async fn driver_reinstall(
                 .await
                 .map_err(|error| DomainError::Internal(format!("驱动安装任务异常：{error}")))??;
 
-                if outcome.exit_code != 0 {
+                if !driver_install_succeeded(&outcome) {
                     // 保留 pnputil 的原始输出：退出码 1 可能是用法错误、签名失败
                     // 或某个 INF 被拒，只说“退出码 1”用户和我们都无法定位。
+                    // 也可能退出码是 0/5 但输出里有 Failed to add driver package
+                    // （实测个别 INF 失败时整体退出码仍为 5），所以判定要走
+                    // driver_install_succeeded 而不是只看 exit_code。
                     return Err(DomainError::ExternalTool(driver_install_failure_detail(
                         &outcome,
                     )));

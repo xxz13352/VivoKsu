@@ -119,14 +119,22 @@ fn bundled_driver_digest_is_compiled_in_and_matches_release_manifest_and_resourc
         .command()
         .expect("only the verified archive may supply an INF to pnputil");
     assert_eq!(command.args[0], "/add-driver");
-    // 单条 pnputil 安装全部 INF(只提权一次);INF 段全部来自解包
-    // 校验后的绝对路径,无通配符、无 /subdirs,尾部固定 /install。
-    assert!(command.args[1..command.args.len() - 1]
-        .iter()
-        .all(|argument| argument.ends_with(".inf")));
+    // 单条 pnputil 安装全部 INF(只提权一次)：通配符 + `/subdirs` 递归。
+    // 逐条喂单个 INF 会在设备绑定阶段以 CONFIGRET 0xE000024B 失败，
+    // 所以这里必须是通配符形态。通配符根是解包目录(全部 INF 的公共祖先)，
+    // 它位于本次运行的 staging 目录内。
+    assert_eq!(command.args[2], "/subdirs");
     assert_eq!(command.args.last(), Some(&"/install".to_string()));
-    assert!(!command.args.iter().any(|argument| argument.contains('*')));
-    assert!(!command.args.iter().any(|argument| argument == "/subdirs"));
+    assert_eq!(command.args.len(), 4);
+    let pattern = &command.args[1];
+    assert!(
+        pattern.ends_with(r"\extracted\*.inf"),
+        "unexpected pattern: {pattern}"
+    );
+    assert!(
+        pattern.starts_with(&root.join("staging").to_string_lossy().to_string()),
+        "pattern must stay inside this run's staging root: {pattern}"
+    );
     assert_eq!(
         fs::metadata(&archive)
             .expect("shipped archive metadata should be readable")
@@ -238,18 +246,9 @@ fn verified_driver_tree_stays_locked_and_uses_exact_inf_during_elevation_window(
         .all(|result| result.inf_cat_sys_replace_blocked));
     assert!(results.iter().all(|result| result.parent_rename_blocked));
     assert!(results.iter().all(|result| {
-        !result
-            .command
-            .args
-            .iter()
-            .any(|argument| argument.contains('*'))
-            && !result
-                .command
-                .args
-                .iter()
-                .any(|argument| argument == "/subdirs")
-            && result.command.args[1].ends_with(".inf")
-            && !result.command.args[1].contains("malicious.inf")
+        // 通配符形态：模式由解包根拼出，绝不会把注入的 malicious.inf 显式列进去。
+        let pattern = &result.command.args[1];
+        pattern.ends_with(r"\extracted\*.inf") && !pattern.contains("malicious")
     }));
     fs::remove_dir_all(root).expect("temporary directory should be removed");
 }
@@ -356,10 +355,13 @@ fn driver_installer_runs_elevated_pnputil_then_writes_adb_ids_and_cleans_staging
         .expect("pnputil command should be captured");
     assert!(command.program.ends_with("pnputil.exe"));
     assert_eq!(command.args[0], "/add-driver");
-    // 每个 INF 都是绝对路径、以 .inf 结尾,最后固定 /install。
-    assert!(command.args[1..command.args.len() - 1]
-        .iter()
-        .all(|argument| argument.ends_with(".inf")));
+    // 一条通配符命令递归装完整棵树，尾部固定 `/install`。
+    assert!(
+        command.args[1].ends_with(".inf"),
+        "wildcard must target .inf: {}",
+        command.args[1]
+    );
+    assert_eq!(command.args[2], "/subdirs");
     assert_eq!(command.args.last(), Some(&"/install".to_string()));
     let adb_ids = fs::read_to_string(adb_ini).expect("adb ids should be written after success");
     assert!(adb_ids.contains("0x2D95"));
@@ -423,6 +425,68 @@ fn driver_installer_skips_adb_ids_when_pnputil_fails() {
         !adb_ini.exists(),
         "failed installation must not write adb_usb.ini"
     );
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[test]
+fn driver_installer_rejects_output_reported_failure_even_when_exit_code_is_5() {
+    // 2026-09-28 实测：某条 INF 报 `Failed to add driver package: Access is denied`
+    // 时，pnputil 整体退出码**仍然是 5**（提权下为 0）。只按退出码判定会把这个
+    // 真实失败报成成功。这里钉死：输出里有失败行就算失败，不写 adb_usb.ini。
+    let root = temporary_directory("driver-install-hidden-failure");
+    let adb_ini = root.join(".android").join("adb_usb.ini");
+    let executor = RecordingElevatedExecutor::with_exit_code_and_output(
+        5,
+        "Adding driver package:  android_usb.inf\nFailed to add driver package: Access is denied.\n\nTotal driver packages:  1\nAdded driver packages:  0\n",
+    );
+    let installer = DriverInstaller::with_dependencies(
+        fixture_archive(&root),
+        root.join("staging"),
+        adb_ini.clone(),
+        executor,
+    );
+
+    let outcome = installer
+        .install_with_cancel_detailed(|| false)
+        .expect("install should return an outcome");
+    assert!(
+        outcome.reported_failure,
+        "output-reported failure must be surfaced"
+    );
+    assert!(
+        !nwflash_windows::driver_install_succeeded(&outcome),
+        "exit code 5 with a Failed line must not count as success"
+    );
+    assert_eq!(outcome.added_packages, Some(0));
+    assert!(
+        !adb_ini.exists(),
+        "failed installation must not write adb_usb.ini"
+    );
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[test]
+fn driver_installer_reports_added_package_count_from_pnputil_summary() {
+    // `Added driver packages:` 是比退出码可靠的计数：逐条形态下 8 次调用
+    // 全部返回 5，只有汇总行反映真实结果。
+    let root = temporary_directory("driver-install-added-count");
+    let executor = RecordingElevatedExecutor::with_exit_code_and_output(
+        0,
+        "Adding driver package:  android_winusb.inf\nDriver package added successfully.\n\nTotal driver packages:  8\nAdded driver packages:  7\n",
+    );
+    let installer = DriverInstaller::with_dependencies(
+        fixture_archive(&root),
+        root.join("staging"),
+        root.join(".android").join("adb_usb.ini"),
+        executor,
+    );
+
+    let outcome = installer
+        .install_with_cancel_detailed(|| false)
+        .expect("install should return an outcome");
+    assert!(nwflash_windows::driver_install_succeeded(&outcome));
+    assert_eq!(outcome.added_packages, Some(7));
+    assert!(!outcome.reported_failure);
     fs::remove_dir_all(root).expect("temporary directory should be removed");
 }
 
@@ -515,14 +579,20 @@ impl ElevatedProcessExecutor for LockCheckingElevatedExecutor {
             }
         }
 
-        let inf = PathBuf::from(&command.args[1]);
-        let parent = inf.parent().expect("INF should have a parent");
-        let extracted = inf
-            .ancestors()
-            .find(|path| path.file_name().is_some_and(|name| name == "extracted"))
-            .expect("command should remain below extracted root");
+        // 通配符形态：args[1] 是 `<extracted>\*.inf`，取它的父目录即解包根。
+        let pattern = PathBuf::from(&command.args[1]);
+        let extracted = pattern
+            .parent()
+            .expect("wildcard pattern should have a parent")
+            .to_path_buf();
+        assert!(
+            extracted
+                .file_name()
+                .is_some_and(|name| name == "extracted"),
+            "wildcard root must be the extracted directory: {pattern:?}"
+        );
         let mut files = std::collections::BTreeMap::new();
-        collect_sensitive_files(extracted, &mut files);
+        collect_sensitive_files(&extracted, &mut files);
         let files = ["inf", "cat", "sys"]
             .iter()
             .map(|extension| {
@@ -532,6 +602,16 @@ impl ElevatedProcessExecutor for LockCheckingElevatedExecutor {
                     .unwrap_or_else(|| panic!("fixture must exercise {extension} locking"))
             })
             .collect::<Vec<_>>();
+        // 承载这些受保护文件的子目录（INF 所在的驱动子目录）也必须锁住改名。
+        let inf_parent = files
+            .iter()
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("inf"))
+            })
+            .and_then(|path| path.parent())
+            .expect("fixture INF must have a parent directory")
+            .to_path_buf();
         let write_blocked = |path: &Path| fs::OpenOptions::new().write(true).open(path).is_err();
         let replace_blocked = |path: &Path| {
             let replacement = path.with_extension("replacement");
@@ -546,7 +626,8 @@ impl ElevatedProcessExecutor for LockCheckingElevatedExecutor {
                 .iter()
                 .all(|path| fs::rename(path, path.with_extension("swapped")).is_err()),
             inf_cat_sys_replace_blocked: files.iter().all(|path| replace_blocked(path)),
-            parent_rename_blocked: fs::rename(parent, parent.with_extension("swapped")).is_err(),
+            parent_rename_blocked: fs::rename(&inf_parent, inf_parent.with_extension("swapped"))
+                .is_err(),
         };
         self.results
             .lock()
@@ -563,6 +644,7 @@ impl ElevatedProcessExecutor for LockCheckingElevatedExecutor {
 #[derive(Clone)]
 struct RecordingElevatedExecutor {
     exit_code: i32,
+    stdout: String,
     command: Arc<Mutex<Option<ProcessCommand>>>,
 }
 
@@ -570,6 +652,16 @@ impl RecordingElevatedExecutor {
     fn with_exit_code(exit_code: i32) -> Self {
         Self {
             exit_code,
+            stdout: String::new(),
+            command: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// 同时带 stdout 的构造器：用于验证「退出码说成功、输出里却有失败行」的场景。
+    fn with_exit_code_and_output(exit_code: i32, stdout: &str) -> Self {
+        Self {
+            exit_code,
+            stdout: stdout.to_string(),
             command: Arc::new(Mutex::new(None)),
         }
     }
@@ -593,7 +685,7 @@ impl ElevatedProcessExecutor for RecordingElevatedExecutor {
             .expect("command lock should not be poisoned") = Some(command);
         Ok(ProcessOutput {
             exit_code: self.exit_code,
-            stdout: String::new(),
+            stdout: self.stdout.clone(),
             stderr: String::new(),
         })
     }
@@ -649,13 +741,17 @@ impl ElevatedProcessExecutor for BatchRecordingExecutor {
     }
 }
 
-/// `pnputil /add-driver` 只接受**一个** INF：传两个及以上会打印用法并以退出码 1
-/// 结束（实测）。这条约束曾导致安装必然失败——驱动包有 8 个 INF，旧实现把它们
-/// 塞进同一条命令，pnputil 整体拒绝。这里把「一条命令一个 INF」「全部命令在
-/// 同一次提权里」钉死，避免回归。
+/// 安装必须是**一条**通配符 + `/subdirs` 命令，与 C# 版（实测能装成功的那版）
+/// 形态一致。
+///
+/// 2026-09-28 实测推翻了旧的「一条命令一个 INF」结论：
+/// * 逐条喂**单个 INF 绝对路径**会在设备绑定阶段以 CONFIGRET `0xE000024B`
+///   失败——单独喂一个 INF 时 pnputil 找不到配套 `.cat` catalog。
+/// * 一条命令塞**多个显式 INF 路径**才会被整行拒绝（用法错误、退出码 1）。
+/// * 只有通配符 `/subdirs` 能把 staging 当一棵驱动包树、连同 catalog 一起解析。
 #[test]
-fn pnputil_gets_exactly_one_inf_per_command_in_a_single_elevation() {
-    let root = temporary_directory("driver-one-inf-per-command");
+fn pnputil_gets_one_wildcard_subdirs_command_in_a_single_elevation() {
+    let root = temporary_directory("driver-wildcard-subdirs");
     let executor = BatchRecordingExecutor::default();
     let installer = DriverInstaller::with_dependencies(
         fixture_archive(&root),
@@ -670,26 +766,31 @@ fn pnputil_gets_exactly_one_inf_per_command_in_a_single_elevation() {
     );
 
     let batches = executor.batches();
-    assert_eq!(batches.len(), 1, "全部 INF 必须在同一次提权里完成");
+    assert_eq!(batches.len(), 1, "安装必须在同一次提权里完成");
     let commands = &batches[0];
+    assert_eq!(commands.len(), 1, "必须是单条通配符命令，不能拆成逐条 INF");
+
+    let command = &commands[0];
+    assert!(command.program.ends_with("pnputil.exe"));
+    assert_eq!(command.args[0], "/add-driver");
+    assert_eq!(command.args[2], "/subdirs");
+    assert_eq!(command.args.last(), Some(&"/install".to_string()));
+    assert_eq!(command.args.len(), 4);
+
+    let pattern = &command.args[1];
     assert!(
-        commands.len() > 1,
-        "驱动包含多个 INF，应该产生多条命令，而不是压成一条"
+        pattern.ends_with(r"\*.inf"),
+        "通配符必须落在 INF 上：{pattern}"
     );
-    for command in commands {
-        assert!(command.program.ends_with("pnputil.exe"));
-        assert_eq!(command.args[0], "/add-driver");
-        assert_eq!(command.args.last(), Some(&"/install".to_string()));
-        let infs = &command.args[1..command.args.len() - 1];
-        assert_eq!(infs.len(), 1, "每条命令只能带一个 INF：{infs:?}");
-        assert!(infs[0].ends_with(".inf"));
-        assert!(!infs[0].contains('*'));
-        // `\\?\` verbatim 前缀会被 pnputil 拒绝（报「系统找不到指定的路径」）。
-        assert!(
-            !infs[0].starts_with("\\\\?\\"),
-            "不许把 canonicalize 的 verbatim 前缀交给 pnputil：{}",
-            infs[0]
-        );
-    }
+    // `\\?\` verbatim 前缀会被 pnputil 拒绝（报「系统找不到指定的路径」）。
+    assert!(
+        !pattern.starts_with("\\\\?\\"),
+        "不许把 canonicalize 的 verbatim 前缀交给 pnputil：{pattern}"
+    );
+    // 通配符根只能落在本次运行的解包目录内，不能指向别处。
+    assert!(
+        pattern.contains(r"\extracted\"),
+        "通配符根必须是本次解包目录：{pattern}"
+    );
     fs::remove_dir_all(root).expect("temporary directory should be removed");
 }

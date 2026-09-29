@@ -60,12 +60,17 @@ pub struct SystemElevatedProcessExecutor;
 /// 一次驱动安装的结果，连同 pnputil 的原始输出。
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
-    /// 全部 INF 都成功（含「已存在」的 5）时为 0；否则是**第一条失败命令**
-    /// 的退出码。
+    /// pnputil 的退出码（0 或「已存在」的 5 都归一成 0）。
     pub exit_code: i32,
-    /// 各条 pnputil 输出的合并文本（已从本地代码页解码）。
+    /// pnputil 输出的合并文本（已从本地代码页解码）。
     /// 提权路径下为空表示未能回收输出，不代表 pnputil 没打印东西。
     pub output: String,
+    /// `Added driver packages:` 报告的新增包数。`None` 表示输出里没这一行
+    /// （输出未回收，或命令在打印汇总前就死了）。
+    pub added_packages: Option<u32>,
+    /// 输出里是否出现 `Failed to add driver package`。**这是比退出码可靠的
+    /// 失败信号** —— 实测某条 INF 报 `Access is denied` 时整条命令仍然退出 5。
+    pub reported_failure: bool,
 }
 
 /// pnputil 退出码：命令成功处理了 INF，但没有任何包是新增的（例如全部已存在）。
@@ -79,15 +84,19 @@ fn pnputil_command_succeeded(exit_code: i32) -> bool {
 }
 
 /// pnputil 的退出码语义（实测）：
-/// * `0`  有驱动包被新增；
-/// * `5`  命令**成功**处理了 INF，但没有任何包是新增的（例如全部已存在）；
+/// * `0`  命令完成，且至少新增了一个包；
+/// * `5`  命令**完成**，但没有包是新增的（例如全部已存在）；
 /// * `2`  目标 INF 缺失或非法；
-/// * `1`  用法错误——最常见的原因是 `/add-driver` 收到了不止一个 INF。
+/// * `1`  用法错误（例如 `/add-driver` 收到多个显式 INF 路径）。
+/// * `0xE000024B`  **设备绑定阶段**的 CONFIGRET 失败（facility=0、severity=3，
+///   不是 Win32 码）。逐条喂单个 INF 时会命中，见
+///   [`build_pnputil_install_commands`]。
 ///
-/// 只按 `!= 0` 判定会把退出码 5（驱动早就装好了）误报成安装失败——所以
-/// [`merge_install_outcomes`] 先把 5 归一成成功，再取第一条失败码。
+/// **退出码 5 不足以证明成功**：实测 `fastboot_dri_win7` 明确报
+/// `Failed to add driver package: Access is denied` 时，整体退出码仍是 5
+/// （非提权）或 0（提权）。所以这里除了退出码，还要看输出里有没有失败行。
 pub fn driver_install_succeeded(outcome: &InstallOutcome) -> bool {
-    outcome.exit_code == 0
+    outcome.exit_code == 0 && !outcome.reported_failure
 }
 
 /// 从一次安装结果中提取可用于展示给用户的失败原因。
@@ -104,14 +113,26 @@ pub fn driver_install_failure_detail(outcome: &InstallOutcome) -> String {
 ///
 /// 「已存在」（5）按成功处理；其余退出码取第一条失败命令的，只要有一条
 /// 真失败，整体就是失败。输出全部保留，便于定位到底是哪个 INF 出的问题。
+///
+/// 同时扫描输出里的 `Failed to add driver package` 与 `Added driver packages:`
+/// 计数：退出码 5/0 都可能掩盖**个别** INF 的失败，光看退出码会把那种情况
+/// 报成成功。
 fn merge_install_outcomes(outputs: &[ProcessOutput]) -> InstallOutcome {
     let mut exit_code = 0;
     let mut sections = Vec::new();
+    let mut reported_failure = false;
+    let mut added_packages = None;
     for output in outputs {
         if !pnputil_command_succeeded(output.exit_code) && exit_code == 0 {
             exit_code = output.exit_code;
         }
         let text = driver_tool_output(output);
+        if text.contains("Failed to add driver package") {
+            reported_failure = true;
+        }
+        if let Some(count) = parse_added_driver_packages(&text) {
+            added_packages = Some(added_packages.unwrap_or(0) + count);
+        }
         if !text.is_empty() {
             sections.push(text);
         }
@@ -119,7 +140,24 @@ fn merge_install_outcomes(outputs: &[ProcessOutput]) -> InstallOutcome {
     InstallOutcome {
         exit_code,
         output: sections.join("\n"),
+        added_packages,
+        reported_failure,
     }
+}
+
+/// 解析 pnputil 汇总行 `Added driver packages:  N`。
+///
+/// 这是比退出码可靠的「到底装进去几个包」的计数：实测逐条形态下 8 次调用
+/// 全部返回 5（含那次 `Access is denied`），而汇总行才是真实结果。
+fn parse_added_driver_packages(text: &str) -> Option<u32> {
+    text.lines().find_map(|line| {
+        let (label, value) = line.split_once(':')?;
+        label
+            .trim()
+            .eq_ignore_ascii_case("Added driver packages")
+            .then(|| value.trim().parse::<u32>().ok())
+            .flatten()
+    })
 }
 
 /// 合并 stdout/stderr 为一段文本，过滤空串并保持原有顺序。
@@ -234,10 +272,10 @@ where
                 return Err(DomainError::UserCancelled("用户取消驱动安装。".to_string()));
             }
 
-            // pnputil 的 `/add-driver` **只接受一个** INF：传两个及以上会直接打印
-            // 用法并以退出码 1 结束（整体拒绝，不是逐个安装）。驱动包里有 8 个 INF，
-            // 所以必须逐条调用；但 8 次独立提权会连弹 8 次 UAC，因此这里把全部
-            // 命令交给 batch 接口，由同一次提权会话顺序执行。
+            // 一条通配符 + `/subdirs` 命令装完整棵树（含各自的 catalog）。
+            // 逐条喂单个 INF 会在设备绑定阶段以 CONFIGRET 0xE000024B 失败，
+            // 详见 build_pnputil_install_commands 的说明。命令数恒为 1，
+            // batch 接口仍保留：它是提权 + 回收 pnputil 输出的唯一通道。
             frozen.revalidate()?;
             let commands = build_pnputil_install_commands(&frozen.inf_paths)?;
             let outputs = self.executor.run_elevated_batch(&commands)?;
@@ -924,20 +962,34 @@ fn legacy_driver_uninstall_registry_key_exists() -> bool {
     false
 }
 
-/// 为每个 INF 各构造一条 pnputil 命令：`/add-driver <一个 INF> /install`。
+/// 构造安装命令：`/add-driver "<staging>\*.inf" /subdirs /install`——**一条**
+/// 通配符递归命令，和 C# 版（能在这台机器上装成功的那版）完全一致。
 ///
-/// **不能**把多个 INF 塞进同一条命令：实测 `pnputil /add-driver a.inf b.inf /install`
-/// 会整体被拒，打印用法并以退出码 1 结束。调用方负责把这些命令放在同一次提权
-/// 会话里执行，用户仍只授权一次。
+/// 为什么必须是这个形态（2026-09-28 实测，逐条踩过两个坑）：
 ///
-/// 每个目标都要求绝对路径、拒绝通配符、只接受 `.inf`，并逐个做读取守卫，
-/// 全部显式枚举，不依赖 pnputil 自己去展开任何东西。
+/// * 逐条喂**单个 INF 绝对路径**（`/add-driver <path> /install`）×8 条，会在
+///   **设备绑定阶段**炸掉并返回 `0xE000024B`——那是 CONFIGRET 域的码
+///   （severity=3/facility=0），不是 Win32。原因是单独喂一个 INF 时 pnputil
+///   找不到配套的 `.cat` 目录文件，绑设备时 catalog 校验过不去。报错长这样：
+///   `Driver package installed on device: USB\VID_…` 之后返回该码。
+/// * 一条命令里塞**多个显式 INF 路径**（`/add-driver a.inf b.inf`）会被整行
+///   拒绝（打印用法、退出码 1）。所以「多处指定」走不通，只有通配符可以。
+///
+/// `/subdirs` 让 pnputil 把 staging 当**一棵驱动包树**处理，8 个子目录里的 INF
+/// 连同各自的 catalog 一起被正确解析。实测这条命令 `Added driver packages: 7`、
+/// 正常退出；同一次运行里逐条形态则精确复现用户的 `-536870325`。
+///
+/// 通配符是**我们自己拼的固定模式**（`<已校验的 staging 根>\*.inf`），不是外部
+/// 输入：`inf_paths` 来自解包后逐文件哈希校验过的树，这里只用它们确认
+/// 「至少有一个 INF」并定位 common root，绝不把条数交给自己去逐个展开。
 fn build_pnputil_install_commands(infs: &[PathBuf]) -> Result<Vec<ProcessCommand>, DomainError> {
     if infs.is_empty() {
         return Err(DomainError::InvalidInput(
             "驱动安装缺少 INF 目标。".to_string(),
         ));
     }
+    // 每个 INF 都要先过读取守卫与形态校验，保持与逐条形态同等的输入把关；
+    // 随后只取它们的**最深公共祖先**作为通配符根。
     let mut canonical_infs = Vec::with_capacity(infs.len());
     for inf in infs {
         let file_name = inf
@@ -958,8 +1010,10 @@ fn build_pnputil_install_commands(infs: &[PathBuf]) -> Result<Vec<ProcessCommand
         let inf = inf
             .canonicalize()
             .map_err(|_| driver_archive_integrity_error())?;
-        canonical_infs.push(display_path_for_external_tool(&inf));
+        canonical_infs.push(inf);
     }
+    let wildcard_root = common_directory_root(&canonical_infs)?;
+    let pattern = wildcard_root.join("*.inf");
 
     let system_directory = system_directory_path()?;
     let pnputil = system_directory.join("pnputil.exe");
@@ -980,15 +1034,37 @@ fn build_pnputil_install_commands(infs: &[PathBuf]) -> Result<Vec<ProcessCommand
         }
     }
     let program = display_path_for_external_tool(&pnputil);
-    Ok(canonical_infs
-        .into_iter()
-        .map(|inf| {
-            ProcessCommand::new(
-                program.clone(),
-                vec!["/add-driver".to_string(), inf, "/install".to_string()],
-            )
-        })
-        .collect())
+    Ok(vec![ProcessCommand::new(
+        program,
+        vec![
+            "/add-driver".to_string(),
+            display_path_for_external_tool(&pattern),
+            "/subdirs".to_string(),
+            "/install".to_string(),
+        ],
+    )])
+}
+
+/// 取一组已 canonicalize 的 INF 路径的**最深公共祖先目录**。
+///
+/// 驱动包把 INF 放在 `adbinfs_win10/`、`fastboot_dri_win7/` 这类子目录里，
+/// 通配符根因此落在解包根（staging 的 `extracted`）上，配合 `/subdirs`
+/// 覆盖全部子目录。全部同目录时退化成该目录本身。
+fn common_directory_root(paths: &[PathBuf]) -> Result<PathBuf, DomainError> {
+    let mut root = paths[0]
+        .parent()
+        .ok_or_else(driver_archive_integrity_error)?
+        .to_path_buf();
+    for path in &paths[1..] {
+        let parent = path.parent().ok_or_else(driver_archive_integrity_error)?;
+        while !parent.starts_with(&root) {
+            root = match root.parent() {
+                Some(parent_of_root) => parent_of_root.to_path_buf(),
+                None => return Err(driver_archive_integrity_error()),
+            };
+        }
+    }
+    Ok(root)
 }
 
 /// 把路径转成可以交给外部工具（pnputil / cmd）的文本形态。
