@@ -60,7 +60,8 @@ pub struct SystemElevatedProcessExecutor;
 /// 一次驱动安装的结果，连同 pnputil 的原始输出。
 #[derive(Debug, Clone)]
 pub struct InstallOutcome {
-    /// pnputil 的退出码（0 或「已存在」的 5 都归一成 0）。
+    /// pnputil 的原始退出码，**仅作诊断展示**，不参与成功判定（见
+    /// [`Self::succeeded`]）。
     pub exit_code: i32,
     /// pnputil 输出的合并文本（已从本地代码页解码）。
     /// 提权路径下为空表示未能回收输出，不代表 pnputil 没打印东西。
@@ -68,9 +69,65 @@ pub struct InstallOutcome {
     /// `Added driver packages:` 报告的新增包数。`None` 表示输出里没这一行
     /// （输出未回收，或命令在打印汇总前就死了）。
     pub added_packages: Option<u32>,
-    /// 输出里是否出现 `Failed to add driver package`。**这是比退出码可靠的
-    /// 失败信号** —— 实测某条 INF 报 `Access is denied` 时整条命令仍然退出 5。
-    pub reported_failure: bool,
+    /// 逐个 INF 的处理结果，按输出里 `Adding driver package: <相对路径>` 的顺序。
+    pub entries: Vec<DriverPackageEntry>,
+}
+
+/// 单个 INF（驱动包）在一次 pnputil 运行里的处理结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverPackageEntry {
+    /// pnputil 打印的包名，形如 `adbinfs_win10\android_winusb.inf`
+    /// （通配符 `/subdirs` 形态下是**相对 staging 根**的路径）。
+    pub package: String,
+    /// 该包是否失败。对应紧随其后的 `Failed to add driver package` 行。
+    pub failed: bool,
+}
+
+impl InstallOutcome {
+    /// 安装是否算成功。判定规则（用户 2026-09-29 定稿）：
+    ///
+    /// * **分系统的遗留包**（目录名带 `win7`/`win10`，即 `adbinfs_*`、
+    ///   `fastboot_dri_*`、`mtk_cdc_*`）——同一驱动的多系统版本，**装上一个
+    ///   就算成功**，另一个失败不影响结论。
+    /// * **其余驱动**（不区分系统的，如 `mtk_FTDI-Driver`）——**必须全部成功**。
+    ///
+    /// 输出未回收（拿不到任何条目）时**不能**判成功：没有证据不等于成功。
+    pub fn succeeded(&self) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
+        let mut os_specific_ok = false;
+        for entry in &self.entries {
+            if entry.is_os_specific() {
+                // 任一系统版本装上即可（含「已存在」——那说明早就装好了）。
+                os_specific_ok |= !entry.failed;
+            } else if entry.failed {
+                // 不分系统的驱动必须全部成功。
+                return false;
+            }
+        }
+        os_specific_ok
+    }
+
+    /// 失败条目，供诊断展示。
+    pub fn failed_entries(&self) -> impl Iterator<Item = &DriverPackageEntry> {
+        self.entries.iter().filter(|entry| entry.failed)
+    }
+}
+
+impl DriverPackageEntry {
+    /// 是否是「按 Windows 版本分支」的遗留驱动包。
+    ///
+    /// 驱动包里同一驱动有多份系统分支目录：`adbinfs_win10`/`adbinfs_win7`、
+    /// `fastboot_dri_win10`/`fastboot_dri_win7`、`mtk_cdc_win10`/`mtk_cdc_win7`。
+    /// 这些目录名都带 `win7`/`win10` 段。按目录段（而非整串包含）判断，
+    /// 避免被文件名里的偶然子串误命中。
+    fn is_os_specific(&self) -> bool {
+        self.package.split(['\\', '/']).any(|segment| {
+            let lower = segment.to_ascii_lowercase();
+            lower.ends_with("win7") || lower.ends_with("win10")
+        })
+    }
 }
 
 /// pnputil 退出码：命令成功处理了 INF，但没有任何包是新增的（例如全部已存在）。
@@ -83,53 +140,55 @@ fn pnputil_command_succeeded(exit_code: i32) -> bool {
     exit_code == 0 || exit_code == PNPUTIL_EXIT_ALREADY_PRESENT
 }
 
-/// pnputil 的退出码语义（实测）：
-/// * `0`  命令完成，且至少新增了一个包；
-/// * `5`  命令**完成**，但没有包是新增的（例如全部已存在）；
-/// * `2`  目标 INF 缺失或非法；
-/// * `1`  用法错误（例如 `/add-driver` 收到多个显式 INF 路径）。
-/// * `0xE000024B`  **设备绑定阶段**的 CONFIGRET 失败（facility=0、severity=3，
-///   不是 Win32 码）。逐条喂单个 INF 时会命中，见
-///   [`build_pnputil_install_commands`]。
+/// pnputil 的退出码语义（实测，**仅作诊断参考**）：
+/// * `0`     命令完成，且至少新增了一个包；
+/// * `5`     命令完成，但没有包是新增的（例如全部已存在）；
+/// * `2`     目标 INF 缺失或非法；
+/// * `1`     用法错误（例如 `/add-driver` 收到多个显式 INF 路径）；
+/// * `0xE000024B` **不是失败**：8 个包逐个处理完、其中有包「已存在」或个别包
+///   被拒时的正常汇总码。实测 `Added driver packages: 7` 时它就是 `-536870325`。
 ///
-/// **退出码 5 不足以证明成功**：实测 `fastboot_dri_win7` 明确报
-/// `Failed to add driver package: Access is denied` 时，整体退出码仍是 5
-/// （非提权）或 0（提权）。所以这里除了退出码，还要看输出里有没有失败行。
+/// 退出码**不能**作为成功判据——`5` 和 `0xE000024B` 都可能在有真实失败时出现。
+/// 成功判定一律走 [`InstallOutcome::succeeded`]（按逐包结果分类）。
 pub fn driver_install_succeeded(outcome: &InstallOutcome) -> bool {
-    outcome.exit_code == 0 && !outcome.reported_failure
+    outcome.succeeded()
 }
 
 /// 从一次安装结果中提取可用于展示给用户的失败原因。
 pub fn driver_install_failure_detail(outcome: &InstallOutcome) -> String {
-    let text = outcome.output.trim();
-    if text.is_empty() {
+    let failed: Vec<&str> = outcome
+        .failed_entries()
+        .map(|entry| entry.package.as_str())
+        .collect();
+    let summary = if failed.is_empty() {
+        // 没有逐包证据（输出未回收）时退回退出码，避免给出空洞的文案。
         format!("pnputil 退出码 {}。", outcome.exit_code)
     } else {
-        format!("pnputil 退出码 {}：{text}", outcome.exit_code)
+        format!("以下驱动包安装失败：{}。", failed.join("、"))
+    };
+    let text = outcome.output.trim();
+    if text.is_empty() {
+        summary
+    } else {
+        format!("{summary}\n{text}")
     }
 }
 
 /// 把多条命令的结果合成一个结论。
 ///
-/// 「已存在」（5）按成功处理；其余退出码取第一条失败命令的，只要有一条
-/// 真失败，整体就是失败。输出全部保留，便于定位到底是哪个 INF 出的问题。
-///
-/// 同时扫描输出里的 `Failed to add driver package` 与 `Added driver packages:`
-/// 计数：退出码 5/0 都可能掩盖**个别** INF 的失败，光看退出码会把那种情况
-/// 报成成功。
+/// 提权批次恒为一条命令（见 [`build_pnputil_install_commands`]），但接口保留
+/// 多条能力：逐条合并时把每条的条目与输出顺次拼接。
 fn merge_install_outcomes(outputs: &[ProcessOutput]) -> InstallOutcome {
     let mut exit_code = 0;
     let mut sections = Vec::new();
-    let mut reported_failure = false;
     let mut added_packages = None;
+    let mut entries = Vec::new();
     for output in outputs {
         if !pnputil_command_succeeded(output.exit_code) && exit_code == 0 {
             exit_code = output.exit_code;
         }
         let text = driver_tool_output(output);
-        if text.contains("Failed to add driver package") {
-            reported_failure = true;
-        }
+        entries.extend(parse_driver_package_entries(&text));
         if let Some(count) = parse_added_driver_packages(&text) {
             added_packages = Some(added_packages.unwrap_or(0) + count);
         }
@@ -141,8 +200,39 @@ fn merge_install_outcomes(outputs: &[ProcessOutput]) -> InstallOutcome {
         exit_code,
         output: sections.join("\n"),
         added_packages,
-        reported_failure,
+        entries,
     }
+}
+
+/// 解析 pnputil 输出里的逐包结果。
+///
+/// 形态（实测，通配符 `/subdirs` 下包名是相对 staging 根的路径）：
+/// ```text
+/// Adding driver package:  fastboot_dri_win7\android_usb.inf
+/// Failed to add driver package: The hash for the file is not present ...
+/// ```
+/// 成功时第二行是 `Driver package added successfully.`。
+///
+/// **失败行不带包名**——必须靠「紧随其后的 Failed 行」与前一行的 `Adding`
+/// 配对归属，所以这里维护一个「当前正在处理的包」游标。
+fn parse_driver_package_entries(text: &str) -> Vec<DriverPackageEntry> {
+    let mut entries: Vec<DriverPackageEntry> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Adding driver package:") {
+            entries.push(DriverPackageEntry {
+                package: rest.trim().to_string(),
+                failed: false,
+            });
+            continue;
+        }
+        if trimmed.starts_with("Failed to add driver package") {
+            if let Some(current) = entries.last_mut() {
+                current.failed = true;
+            }
+        }
+    }
+    entries
 }
 
 /// 解析 pnputil 汇总行 `Added driver packages:  N`。
@@ -963,25 +1053,26 @@ fn legacy_driver_uninstall_registry_key_exists() -> bool {
 }
 
 /// 构造安装命令：`/add-driver "<staging>\*.inf" /subdirs /install`——**一条**
-/// 通配符递归命令，和 C# 版（能在这台机器上装成功的那版）完全一致。
+/// 通配符递归命令，与 C# 版一致。
 ///
-/// 为什么必须是这个形态（2026-09-28 实测，逐条踩过两个坑）：
+/// 形态取舍（2026-09-28/29 实测）：
 ///
-/// * 逐条喂**单个 INF 绝对路径**（`/add-driver <path> /install`）×8 条，会在
-///   **设备绑定阶段**炸掉并返回 `0xE000024B`——那是 CONFIGRET 域的码
-///   （severity=3/facility=0），不是 Win32。原因是单独喂一个 INF 时 pnputil
-///   找不到配套的 `.cat` 目录文件，绑设备时 catalog 校验过不去。报错长这样：
-///   `Driver package installed on device: USB\VID_…` 之后返回该码。
 /// * 一条命令里塞**多个显式 INF 路径**（`/add-driver a.inf b.inf`）会被整行
-///   拒绝（打印用法、退出码 1）。所以「多处指定」走不通，只有通配符可以。
+///   拒绝（打印用法、退出码 1）——「多处指定」走不通。
+/// * 逐条喂**单个 INF 绝对路径**虽然可行，但 8 个包要 8 次调用，且输出里
+///   包名是完整绝对路径、不如通配符形态的相对路径好读。
+/// * `/subdirs` + 通配符把 staging 当**一棵驱动包树**一次处理完，包名以
+///   **相对 staging 根**的形式打印（`adbinfs_win10\android_winusb.inf`），
+///   这正是 [`parse_driver_package_entries`] 解析逐包结果所依赖的形态。
 ///
-/// `/subdirs` 让 pnputil 把 staging 当**一棵驱动包树**处理，8 个子目录里的 INF
-/// 连同各自的 catalog 一起被正确解析。实测这条命令 `Added driver packages: 7`、
-/// 正常退出；同一次运行里逐条形态则精确复现用户的 `-536870325`。
+/// **注意**：早期版本曾把 `0xE000024B` 归因于「逐条形态的设备绑定失败」并据此
+/// 认定逐条必失败——该归因**已被实测推翻**：通配符形态同样会返回该码，它只是
+/// 「有包已存在或个别包被拒」时的正常汇总码，不是失败信号。真正的成功判定见
+/// [`InstallOutcome::succeeded`]。
 ///
 /// 通配符是**我们自己拼的固定模式**（`<已校验的 staging 根>\*.inf`），不是外部
 /// 输入：`inf_paths` 来自解包后逐文件哈希校验过的树，这里只用它们确认
-/// 「至少有一个 INF」并定位 common root，绝不把条数交给自己去逐个展开。
+/// 「至少有一个 INF」并定位 common root。
 fn build_pnputil_install_commands(infs: &[PathBuf]) -> Result<Vec<ProcessCommand>, DomainError> {
     if infs.is_empty() {
         return Err(DomainError::InvalidInput(
@@ -1556,22 +1647,132 @@ mod merge_outcome_tests {
         }
     }
 
-    /// pnputil 退出码 5（「已存在」）是重装场景的正常结果，必须按成功处理；
-    /// 只有真实失败码（如用法错误 1）才让整体失败。此前 `== 0` 判定与
-    /// 旧的 `!= 0` 判定对 5 的结论相同——重装已装好的驱动会被误报失败。
+    /// 带 pnputil 逐包输出的构造器（成功判定依赖逐包结果，不看退出码）。
+    fn output_with(exit_code: i32, stdout: &str) -> ProcessOutput {
+        ProcessOutput {
+            exit_code,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    /// 真实现场：退出码 `-536870325`（0xE000024B）+ 8 个包里
+    /// `fastboot_dri_win7` 被拒。这是正常汇总码、**不是失败**——成功判定
+    /// 必须完全绕开退出码。
+    #[test]
+    fn configret_exit_code_does_not_override_per_package_verdict() {
+        let outcome = merge_install_outcomes(&[output_with(
+            -536_870_325,
+            concat!(
+                "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+                "Driver package added successfully. (Already exists in the system)\n",
+                "Adding driver package:  fastboot_dri_win7\\android_usb.inf\n",
+                "Failed to add driver package: The hash for the file is not present ",
+                "in the specified catalog file.\n",
+                "Adding driver package:  mtk_FTDI-Driver\\ftdibus.inf\n",
+                "Driver package added successfully.\n",
+            ),
+        )]);
+        assert!(
+            driver_install_succeeded(&outcome),
+            "分系统包失败一个、其余成功 → 成功（用户 2026-09-29 定稿规则）：{outcome:?}"
+        );
+    }
+
+    /// 退出码 5（「已存在」）本身不是失败，但仍需逐包证据支撑成功结论。
     #[test]
     fn already_present_exit_code_is_not_a_failure() {
-        let all_present = merge_install_outcomes(&[output(5), output(5), output(0)]);
+        let all_present = merge_install_outcomes(&[output_with(
+            5,
+            concat!(
+                "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+                "Driver package added successfully. (Already exists in the system)\n",
+            ),
+        )]);
         assert!(
             driver_install_succeeded(&all_present),
-            "全部「已存在」必须算安装成功：{all_present:?}"
+            "「已存在」必须算安装成功：{all_present:?}"
+        );
+        // 5 被归一成成功，故合并后的 exit_code 是 0（不再是 5）。
+        assert_eq!(
+            all_present.exit_code, 0,
+            "「已存在」归一为成功，合并退出码为 0"
         );
 
+        // 多命令合并：真实失败码仍取第一条，用于诊断展示。
         let mixed = merge_install_outcomes(&[output(5), output(1), output(5)]);
-        assert!(
-            !driver_install_succeeded(&mixed),
-            "混入真实失败码必须整体失败：{mixed:?}"
-        );
         assert_eq!(mixed.exit_code, 1, "整体退出码取第一条真实失败命令的");
+    }
+
+    /// **不分系统**的驱动失败 → 整体失败，即使退出码是 0、即使别的包成功。
+    #[test]
+    fn non_os_specific_failure_fails_the_whole_install() {
+        let outcome = merge_install_outcomes(&[output_with(
+            0,
+            concat!(
+                "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+                "Driver package added successfully.\n",
+                "Adding driver package:  mtk_FTDI-Driver\\ftdibus.inf\n",
+                "Failed to add driver package: Access is denied.\n",
+            ),
+        )]);
+        assert!(
+            !driver_install_succeeded(&outcome),
+            "不分系统的驱动必须全成：{outcome:?}"
+        );
+        let detail = driver_install_failure_detail(&outcome);
+        assert!(
+            detail.contains("mtk_FTDI-Driver\\ftdibus.inf"),
+            "失败文案必须点名具体包：{detail}"
+        );
+    }
+
+    /// 分系统的包**全挂** = ADB 驱动没装上，不得放行。
+    #[test]
+    fn all_os_specific_failures_fail_the_whole_install() {
+        let outcome = merge_install_outcomes(&[output_with(
+            5,
+            concat!(
+                "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+                "Failed to add driver package: Access is denied.\n",
+                "Adding driver package:  adbinfs_win7\\android_winusb.inf\n",
+                "Failed to add driver package: Access is denied.\n",
+            ),
+        )]);
+        assert!(
+            !driver_install_succeeded(&outcome),
+            "分系统包全挂必须判失败：{outcome:?}"
+        );
+    }
+
+    /// 输出未回收 = 无证据，不得判成功（提权路径下输出回收失败是真实可能的）。
+    #[test]
+    fn missing_output_is_not_evidence_of_success() {
+        let outcome = merge_install_outcomes(&[output(0)]);
+        assert!(outcome.entries.is_empty());
+        assert!(
+            !driver_install_succeeded(&outcome),
+            "没有逐包证据时不得判定成功"
+        );
+    }
+
+    /// 目录段判定：`win7`/`win10` 必须是**独立目录段**才算分系统包，
+    /// 文件名里的偶然子串不算。
+    #[test]
+    fn os_specific_detection_uses_directory_segments() {
+        let segment = |package: &str| {
+            DriverPackageEntry {
+                package: package.to_string(),
+                failed: false,
+            }
+            .is_os_specific()
+        };
+        assert!(segment(r"adbinfs_win10\android_winusb.inf"));
+        assert!(segment(r"mtk_cdc_win7\cdc-acm.inf"));
+        assert!(segment("fastboot_dri_win10/android_usb.inf"));
+        assert!(!segment(r"mtk_FTDI-Driver\ftdibus.inf"));
+        assert!(!segment(r"mtk_FTDI-Driver\ftdiport.inf"));
+        // 文件名里带 win10 但目录不是系统分支 → 不算分系统包。
+        assert!(!segment(r"some_driver\win10_helper.inf"));
     }
 }

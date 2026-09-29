@@ -48,11 +48,10 @@ pub async fn driver_reinstall(
                 .map_err(|error| DomainError::Internal(format!("驱动安装任务异常：{error}")))??;
 
                 if !driver_install_succeeded(&outcome) {
-                    // 保留 pnputil 的原始输出：退出码 1 可能是用法错误、签名失败
-                    // 或某个 INF 被拒，只说“退出码 1”用户和我们都无法定位。
-                    // 也可能退出码是 0/5 但输出里有 Failed to add driver package
-                    // （实测个别 INF 失败时整体退出码仍为 5），所以判定要走
-                    // driver_install_succeeded 而不是只看 exit_code。
+                    // 成功判定按逐包结果分类（分系统的 win7/win10 包装上一个即可，
+                    // 其余驱动必须全成），不看退出码——退出码既可能是 0/5，也可能
+                    // 是 0xE000024B，都出现在有真实失败的情况下。
+                    // 失败文案带上具体是哪些包挂了，并附完整 pnputil 输出。
                     return Err(DomainError::ExternalTool(driver_install_failure_detail(
                         &outcome,
                     )));

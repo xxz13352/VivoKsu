@@ -337,7 +337,15 @@ fn driver_installer_runs_elevated_pnputil_then_writes_adb_ids_and_cleans_staging
     let root = temporary_directory("driver-install-success");
     let staging_root = root.join("staging");
     let adb_ini = root.join(".android").join("adb_usb.ini");
-    let executor = RecordingElevatedExecutor::with_exit_code(0);
+    // 成功判定按逐包结果分类，所以假执行器必须给出真实的逐包输出
+    // （空输出 = 无证据 = 判失败，见 driver_installer_rejects_success_without_recovered_output）。
+    let executor = RecordingElevatedExecutor::with_exit_code_and_output(
+        0,
+        concat!(
+            "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+        ),
+    );
     let installer = DriverInstaller::with_dependencies(
         fixture_archive(&root),
         staging_root.clone(),
@@ -378,11 +386,20 @@ fn driver_installer_runs_elevated_pnputil_then_writes_adb_ids_and_cleans_staging
 
 #[test]
 fn driver_installer_treats_already_present_as_success() {
-    // pnputil 退出码 5 =「INF 处理成功但无新增（已存在）」。重装已装好的
-    // 驱动必须算成功：整体退出码归一为 0，adb_usb.ini 照常补写——此前
-    // `== 0` 判定与旧的 `!= 0` 判定对 5 的结论相同，重装必报失败。
+    // pnputil 退出码 5 =「包处理成功但无新增（已存在）」。重装已装好的驱动
+    // 必须算成功：adb_usb.ini 照常补写——旧 `!= 0` 判定会把重装误报成失败。
+    // 逐包条目为「成功」（未出现 Failed 行），故整体判成功。
     let root = temporary_directory("driver-install-already-present");
-    let executor = RecordingElevatedExecutor::with_exit_code(5);
+    let executor = RecordingElevatedExecutor::with_exit_code_and_output(
+        5,
+        concat!(
+            "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem19.inf\n\n",
+            "Total driver packages:  1\n",
+            "Added driver packages:  0\n",
+        ),
+    );
     let adb_ini = root.join(".android").join("adb_usb.ini");
     let installer = DriverInstaller::with_dependencies(
         fixture_archive(&root),
@@ -404,7 +421,8 @@ fn driver_installer_treats_already_present_as_success() {
 
 #[test]
 fn driver_installer_skips_adb_ids_when_pnputil_fails() {
-    // 真实失败码（1 = 用法错误 / INF 被拒）才算失败：不写 adb_usb.ini。
+    // 用法错误（`/add-driver` 被整行拒）时 pnputil 不打印任何逐包行，
+    // 拿不到逐包证据 → 不得判成功：不写 adb_usb.ini，原退出码透传出去。
     let root = temporary_directory("driver-install-failure");
     let executor = RecordingElevatedExecutor::with_exit_code(1);
     let adb_ini = root.join(".android").join("adb_usb.ini");
@@ -428,17 +446,97 @@ fn driver_installer_skips_adb_ids_when_pnputil_fails() {
     fs::remove_dir_all(root).expect("temporary directory should be removed");
 }
 
+/// 用户 2026-09-29 现场日志的逐字复刻（本机实跑 pnputil 得到）：退出码
+/// `-536870325`（`0xE000024B`）**不是失败**——8 个包处理完、其中
+/// `fastboot_dri_win7` 因 Win7 catalog 校验被拒、其余 7 个成功。
+///
+/// 这是本次修复的核心用例：退出码完全不可用，成功与否只能按逐包结果分类。
 #[test]
-fn driver_installer_rejects_output_reported_failure_even_when_exit_code_is_5() {
-    // 2026-09-28 实测：某条 INF 报 `Failed to add driver package: Access is denied`
-    // 时，pnputil 整体退出码**仍然是 5**（提权下为 0）。只按退出码判定会把这个
-    // 真实失败报成成功。这里钉死：输出里有失败行就算失败，不写 adb_usb.ini。
-    let root = temporary_directory("driver-install-hidden-failure");
-    let adb_ini = root.join(".android").join("adb_usb.ini");
+fn driver_installer_accepts_os_specific_partial_failure_with_pnputil_configret_code() {
+    let root = temporary_directory("driver-os-specific-partial");
     let executor = RecordingElevatedExecutor::with_exit_code_and_output(
-        5,
-        "Adding driver package:  android_usb.inf\nFailed to add driver package: Access is denied.\n\nTotal driver packages:  1\nAdded driver packages:  0\n",
+        -536_870_325,
+        concat!(
+            "Microsoft PnP Utility\n\n",
+            "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem19.inf\n",
+            "Driver package installed on device: USB\\VID_2D95&PID_6013&MI_02\\2&1614c516&0&0002\n\n",
+            "Adding driver package:  adbinfs_win7\\android_winusb.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem96.inf\n\n",
+            "Adding driver package:  fastboot_dri_win10\\android_usb.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem36.inf\n\n",
+            "Adding driver package:  fastboot_dri_win7\\android_usb.inf\n",
+            "Failed to add driver package: The hash for the file is not present ",
+            "in the specified catalog file. The file is likely corrupt or the victim of tampering.\n\n",
+            "Adding driver package:  mtk_cdc_win10\\cdc-acm.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem45.inf\n\n",
+            "Adding driver package:  mtk_cdc_win7\\cdc-acm.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem21.inf\n\n",
+            "Adding driver package:  mtk_FTDI-Driver\\ftdibus.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem46.inf\n\n",
+            "Adding driver package:  mtk_FTDI-Driver\\ftdiport.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n",
+            "Published Name:         oem47.inf\n\n",
+            "Total driver packages:  8\n",
+            "Added driver packages:  7\n",
+        ),
     );
+    let adb_ini = root.join(".android").join("adb_usb.ini");
+    let installer = DriverInstaller::with_dependencies(
+        fixture_archive(&root),
+        root.join("staging"),
+        adb_ini.clone(),
+        executor,
+    );
+
+    let outcome = installer
+        .install_with_cancel_detailed(|| false)
+        .expect("install should return an outcome");
+
+    assert_eq!(outcome.entries.len(), 8, "8 个包都要被解析出来");
+    let failed: Vec<&str> = outcome
+        .failed_entries()
+        .map(|entry| entry.package.as_str())
+        .collect();
+    assert_eq!(
+        failed,
+        vec!["fastboot_dri_win7\\android_usb.inf"],
+        "失败行必须精确归属到它前面那个包"
+    );
+    assert!(
+        nwflash_windows::driver_install_succeeded(&outcome),
+        "分系统的包失败一个、另一个成功 → 整体成功（用户 2026-09-29 定稿规则）"
+    );
+    assert_eq!(outcome.added_packages, Some(7));
+    assert!(adb_ini.exists(), "整体成功时必须补写 adb_usb.ini");
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+/// 反向：**不分系统**的驱动（`mtk_FTDI-Driver`）失败必须整体判失败——
+/// 用户明确要求「别的不分系统的驱动都要成功」。
+#[test]
+fn driver_installer_rejects_failure_in_non_os_specific_driver() {
+    let root = temporary_directory("driver-non-os-specific-failure");
+    let executor = RecordingElevatedExecutor::with_exit_code_and_output(
+        0,
+        concat!(
+            "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n\n",
+            "Adding driver package:  mtk_FTDI-Driver\\ftdibus.inf\n",
+            "Failed to add driver package: Access is denied.\n\n",
+            "Adding driver package:  mtk_FTDI-Driver\\ftdiport.inf\n",
+            "Driver package added successfully. (Already exists in the system)\n\n",
+            "Total driver packages:  3\n",
+            "Added driver packages:  2\n",
+        ),
+    );
+    let adb_ini = root.join(".android").join("adb_usb.ini");
     let installer = DriverInstaller::with_dependencies(
         fixture_archive(&root),
         root.join("staging"),
@@ -450,29 +548,33 @@ fn driver_installer_rejects_output_reported_failure_even_when_exit_code_is_5() {
         .install_with_cancel_detailed(|| false)
         .expect("install should return an outcome");
     assert!(
-        outcome.reported_failure,
-        "output-reported failure must be surfaced"
-    );
-    assert!(
         !nwflash_windows::driver_install_succeeded(&outcome),
-        "exit code 5 with a Failed line must not count as success"
+        "不分系统的驱动失败必须整体判失败，即使退出码是 0"
     );
-    assert_eq!(outcome.added_packages, Some(0));
+    assert!(!adb_ini.exists(), "失败时不得写 adb_usb.ini");
+    let detail = nwflash_windows::driver_install_failure_detail(&outcome);
     assert!(
-        !adb_ini.exists(),
-        "failed installation must not write adb_usb.ini"
+        detail.contains("mtk_FTDI-Driver\\ftdibus.inf"),
+        "失败文案必须点名是哪个包：{detail}"
     );
     fs::remove_dir_all(root).expect("temporary directory should be removed");
 }
 
+/// 反向：分系统的包**全部**失败时必须判失败——「装上一个就算成功」不成立时
+/// 不能放行。
 #[test]
-fn driver_installer_reports_added_package_count_from_pnputil_summary() {
-    // `Added driver packages:` 是比退出码可靠的计数：逐条形态下 8 次调用
-    // 全部返回 5，只有汇总行反映真实结果。
-    let root = temporary_directory("driver-install-added-count");
+fn driver_installer_rejects_all_os_specific_failures() {
+    let root = temporary_directory("driver-all-os-specific-failed");
     let executor = RecordingElevatedExecutor::with_exit_code_and_output(
-        0,
-        "Adding driver package:  android_winusb.inf\nDriver package added successfully.\n\nTotal driver packages:  8\nAdded driver packages:  7\n",
+        5,
+        concat!(
+            "Adding driver package:  adbinfs_win10\\android_winusb.inf\n",
+            "Failed to add driver package: Access is denied.\n\n",
+            "Adding driver package:  adbinfs_win7\\android_winusb.inf\n",
+            "Failed to add driver package: Access is denied.\n\n",
+            "Total driver packages:  2\n",
+            "Added driver packages:  0\n",
+        ),
     );
     let installer = DriverInstaller::with_dependencies(
         fixture_archive(&root),
@@ -484,9 +586,59 @@ fn driver_installer_reports_added_package_count_from_pnputil_summary() {
     let outcome = installer
         .install_with_cancel_detailed(|| false)
         .expect("install should return an outcome");
-    assert!(nwflash_windows::driver_install_succeeded(&outcome));
+    assert!(
+        !nwflash_windows::driver_install_succeeded(&outcome),
+        "分系统包全挂 = ADB 驱动没装上，必须判失败"
+    );
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+/// 输出未回收（拿不到任何逐包条目）时**不能**判成功——没有证据不等于成功。
+#[test]
+fn driver_installer_rejects_success_without_recovered_output() {
+    let root = temporary_directory("driver-no-output");
+    // 提权路径下输出回收失败是真实可能（ShellExecuteExW 不给管道），
+    // 此时退出码看着是 0，但我们对结果一无所知。
+    let executor = RecordingElevatedExecutor::with_exit_code(0);
+    let installer = DriverInstaller::with_dependencies(
+        fixture_archive(&root),
+        root.join("staging"),
+        root.join(".android").join("adb_usb.ini"),
+        executor,
+    );
+
+    let outcome = installer
+        .install_with_cancel_detailed(|| false)
+        .expect("install should return an outcome");
+    assert!(outcome.entries.is_empty());
+    assert!(
+        !nwflash_windows::driver_install_succeeded(&outcome),
+        "没有逐包证据时不得判定成功"
+    );
+    fs::remove_dir_all(root).expect("temporary directory should be removed");
+}
+
+#[test]
+fn driver_installer_reports_added_package_count_from_pnputil_summary() {
+    // `Added driver packages:` 计数用于诊断展示（不参与成功判定）。
+    let root = temporary_directory("driver-install-added-count");
+    let executor = RecordingElevatedExecutor::with_exit_code_and_output(
+        0,
+        "Adding driver package:  adbinfs_win10\\android_winusb.inf\nDriver package added successfully.\n\nTotal driver packages:  8\nAdded driver packages:  7\n",
+    );
+    let installer = DriverInstaller::with_dependencies(
+        fixture_archive(&root),
+        root.join("staging"),
+        root.join(".android").join("adb_usb.ini"),
+        executor,
+    );
+
+    let outcome = installer
+        .install_with_cancel_detailed(|| false)
+        .expect("install should return an outcome");
     assert_eq!(outcome.added_packages, Some(7));
-    assert!(!outcome.reported_failure);
+    assert!(outcome.entries.iter().all(|entry| !entry.failed));
+    assert!(nwflash_windows::driver_install_succeeded(&outcome));
     fs::remove_dir_all(root).expect("temporary directory should be removed");
 }
 
