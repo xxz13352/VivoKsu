@@ -8,9 +8,9 @@
 .DESCRIPTION
 产出一个 zip，拿到另一台机器上可以不做任何前置阅读直接开工。内容与理由：
 
-* `source/`            —— 当前 HEAD 的**已跟踪源码快照**（`git archive`，只含已提交内容）。
-                          用 git archive 而非裸拷贝，保证不含 target/node_modules/.git，
-                          且带得上 `git describe` 身份。
+* `source/`            —— `git archive` 出的**整个仓库**已跟踪快照（沿用仓库内相对路径，
+                          如 `source/src/Nwflash.Desktop/src-tauri/…`）。用 git archive
+                          而非裸拷贝：不含 target/node_modules/.git，且带得上 commit 身份。
 * `handoff/`           —— 当前有效的 VMP handoff 目录（EXE/MAP/PDB + evidence）。
 * `docs/`              —— 本仓库 docs/ 下的交接与发布类文档（含会话接力）。
 * `environment.env`    —— 复现用的环境变量清单（含编译期 option_env! 的值）。
@@ -266,7 +266,9 @@ pwsh -NoProfile -File scripts/vmp/test-contracts.ps1 -SdkRoot "`$NWFLASH_VMP_SDK
             'PREREQUISITES.md',
             'BUILD_INFO.txt',
             'MANIFEST.json',
-            'source/src-tauri/Cargo.toml',
+            'source/src/Nwflash.Desktop/src-tauri/Cargo.toml',
+            'source/src/Nwflash.Desktop/src/app/App.tsx',
+            'source/src/Nwflash.Desktop/src-tauri/resources/drivers/vivo-usb-driver.7z',
             "handoff/evidence/prepared.json"
         )
         $missing = @($requiredEntries | Where-Object { $_ -notin $entryNames })
