@@ -30,57 +30,88 @@
 **结论**：发布/交接一律走 `Publish-TauriRelease.ps1 -PrepareManual`，**不要**裸
 `cargo build --release` 污染 `target/release`。
 
-### 1.2 驱动安装失败的真根因（已修，提交 93482a1）
+### 1.2 驱动安装失败的真根因（已修，提交 93482a1 + a1e17fd）
 
-报错：`pnputil 退出码 -536870325`，且失败发生在 `Published Name: oem19.inf` 之后、
-`Driver package installed on device: USB\VID_2D95&PID_6013&MI_…` 那一行。用户给出
-决定性线索：**同一台机器、同一个驱动包，C# 版能装成功**。
+报错：`pnputil 退出码 -536870325`。用户给出决定性线索：**同一台机器、同一个驱动包，
+C# 版能装成功**。
 
-**根因是两条命令形态不同**（已在本机用同一份 vivo 驱动包逐一复现）：
+> **本节结论被本会话内推翻并重写过一次**（09-29 上午先误判、下午修正）。
+> 阅读时以本版为准；`93482a1` 里的注释与测试已由 `a1e17fd` 更正。
 
-| | 命令 | 结果 |
-|---|---|---|
-| C#（成功） | `pnputil /add-driver "<staging>\*.inf" /subdirs /install` | `Added driver packages: 7`，正常退出 |
-| Rust（失败） | 8 条逐条 `pnputil /add-driver <单个绝对INF> /install` | `0xE000024B` |
+#### 最终结论：`0xE000024B` 不是失败
 
-- 单独喂**一个 INF 绝对路径**时 pnputil 找不到配套的 `.cat` catalog，在**设备绑定阶段**
-  返回 `0xE000024B`（severity=3 / facility=0，是 **CONFIGRET 域**不是 Win32；
-  `certutil -error` 无文本映射）。报错形态即用户看到的那种：驱动包早已入库
-  （`Already exists`）、挂的是「绑到设备」这一步。
-- **多显式 INF 路径**（`/add-driver a.inf b.inf`）仍会被整行拒绝（用法错误、退出码 1）
-  ——所以「多处指定」走不通，**只有通配符可以**。
-- `/subdirs` 让 pnputil 把 staging 当**一棵驱动包树**，8 个子目录的 INF 连同各自 catalog
-  一起解析。
+用户 09-29 第二次贴出现场日志后，逐字比对发现**该日志本身就是通配符 `/subdirs`
+形态的输出**（决定性证据：包名是相对路径 `adbinfs_win10\android_winusb.inf`，
+逐条形态会打印完整绝对路径）。即 09-29 上午的形态修复**已经生效**，而它**照样**
+返回同一退出码。
 
-**顺带修掉的第二个缺陷**：实测某条 INF 明确报
-`Failed to add driver package: Access is denied`（非提权）/ `The hash for the file is not
-present in the specified catalog file`（提权）时，**整体退出码仍然是 5**
-（提权下为 0）——原来的归一化会把这种真实失败报成成功。
+本机用同一份 vivo 驱动包提权重跑，拿到**逐字一致**的输出与同一退出码：
 
-**落地的改动（3 个文件）**：
+```
+Adding driver package:  adbinfs_win10\android_winusb.inf
+Driver package added successfully. (Already exists in the system)
+Published Name:         oem19.inf
+...
+Adding driver package:  fastboot_dri_win7\android_usb.inf
+Failed to add driver package: The hash for the file is not present
+in the specified catalog file. The file is likely corrupt or the victim of tampering.
+...
+Total driver packages:  8
+Added driver packages:  7        ← 7 个成功
+退出码: -536870325               ← 正常汇总码，不是失败信号
+```
+
+所以 `0xE000024B`（severity=3/facility=0，**CONFIGRET 域**不是 Win32；
+`certutil -error` 查不到文本）只是「8 个包处理完、其中有包已存在或个别包被拒」时的
+正常汇总码。真正的失败是 `fastboot_dri_win7` 的 **Win7 catalog 校验**不过——
+与设备连接、与 vivo 驱动都无关。
+
+**被推翻的错误归因**：上午曾把该码归给「逐条喂单个 INF 缺 catalog、设备绑定失败」，
+并据此认定逐条形态必失败。**通配符形态同样返回该码**，归因不成立。命令形态保留
+通配符 + `/subdirs`（形态本身没问题，且相对包名便于逐包归属），但**它是选择而非必需**。
+
+#### 修正后的成功判定（用户 2026-09-29 定稿规则）
+
+**按逐包结果分类，完全弃用退出码作为判据**：
+
+| 类别 | 规则 |
+|---|---|
+| **分系统的遗留包**（目录段带 `win7`/`win10`：`adbinfs_*` / `fastboot_dri_*` / `mtk_cdc_*`） | 同一驱动的多系统版本，**装上一个就算成功** |
+| **不分系统的驱动**（如 `mtk_FTDI-Driver`） | **必须全部成功** |
+| 输出未回收（拿不到逐包条目） | **不得判成功**——没有证据不等于成功 |
+
+按**目录段**判断而非整串包含，避免文件名里的偶然 `win10` 子串误判。
+
+**解析要点**：`Failed to add driver package: <原因>` 行**不带包名**，必须与它前面那行
+`Adding driver package: <路径>` 配对归属——解析器维护「当前正在处理的包」游标。
+
+#### 落地的改动（3 个文件，两个 commit）
 
 | 文件 | 改动 |
 |---|---|
-| `crates/nwflash-windows/src/driver.rs` | 命令形态改为单条通配符 + `/subdirs`；新增 `common_directory_root()` 定位通配符根（取已 canonicalize 的 INF 的**最深公共祖先**）；`InstallOutcome` 新增 `added_packages` / `reported_failure`；`driver_install_succeeded` 改为 `exit_code == 0 && !reported_failure`；新增 `parse_added_driver_packages()` 解析汇总计数 |
-| `crates/nwflash-tauri/src/commands/drivers.rs` | 失败判定改走 `driver_install_succeeded`，不再只看 `exit_code != 0` |
-| `crates/nwflash-windows/tests/driver_installer.rs` | 替换掉基于**错误结论**的「一条命令一个 INF」契约测试，改为通配符契约；新增 3 用例（通配符形态、输出失败行即使退出码 5 也算失败、新增计数解析） |
+| `crates/nwflash-windows/src/driver.rs` | 命令形态为单条通配符 + `/subdirs`（`common_directory_root()` 定位通配符根）；新增 `DriverPackageEntry` 逐包解析 + `InstallOutcome::succeeded()` 分类判定；`exit_code` 降级为纯诊断字段；`driver_install_failure_detail` 点名具体失败包 |
+| `crates/nwflash-tauri/src/commands/drivers.rs` | 失败判定改走 `driver_install_succeeded`（不再看 `exit_code != 0`） |
+| `crates/nwflash-windows/tests/driver_installer.rs` | 替换基于错误结论的「一条命令一个 INF」契约测试；新增 4 用例：**真实日志逐字复刻**、不分系统包失败、分系统包全挂、输出未回收。`driver.rs` 单测重写为 6 用例覆盖分类规则与目录段判定 |
 
-**保留的设计**：提权 batch 机制**没删**——命令数现在恒为 1，但 batch 仍是
+**保留的设计**：提权 batch 机制**没删**——命令数恒为 1，但 batch 仍是
 「一次 UAC + 回收 pnputil 输出」的唯一通道（`ShellExecuteExW` 不给管道，输出只能经
 状态文件 + 日志文件回收）。通配符是**自己拼的固定模式**（`<已校验解包根>\*.inf`），
 不是外部输入。
+
+**给 C# 版「能装成功」的解释**：C# 侧 `if (exitCode == 0) WriteAdbUsbIni()` 之后把
+退出码回传，UI 未必把非零码弹成错误——所以「C# 成功」很可能只是**它没把这个非零码
+当失败展示**，而不是命令形态更优。这也解释了为什么形态改动没能解决用户看到的现象。
 
 ### 1.3 验证结果（全绿，全部实跑）
 
 | 项 | 命令 | 结果 |
 |---|---|---|
-| 驱动安装用例 | `cargo test -p nwflash-windows --test driver_installer` | **15 passed / 0 failed** |
-| Rust 全量 | `env -u http_proxy … cargo test --workspace` | **1120 passed / 0 failed** |
+| 驱动安装用例 | `cargo test -p nwflash-windows --test driver_installer` | **18 passed / 0 failed** |
+| Rust 全量 | `env -u http_proxy … cargo test --workspace` | **1128 passed / 0 failed**（exit 0） |
 | spawn 门禁 | `cargo test -p nwflash-windows --lib production_process_spawn_sites` | passed |
-| clippy | `cargo clippy -p nwflash-windows -p nwflash-tauri --all-targets` | 0 error（12 warning 全为既有） |
+| clippy | `cargo clippy -p nwflash-windows -p nwflash-tauri --all-targets` | 0 error（warning 全为既有） |
 | 前端类型 | `npx tsc --noEmit` | 零错误 |
 | 前端单测 | `npx vitest run` | **261 passed / 28 files** |
-| protected release | `npm run tauri -- build --features protected --no-sign --no-bundle` | 4m20s 成功 |
 
 **已知的既有噪声（非本次引入，别误判成回归）**：
 - `cargo fmt --all --check` 在 `crates/nwflash-application/src/operation_coordinator.rs`
