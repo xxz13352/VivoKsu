@@ -5,7 +5,7 @@
 [2026-09-11-session-handoff.md](2026-09-11-session-handoff.md)、
 [release/tauri-vmp-signing-runbook.md](release/tauri-vmp-signing-runbook.md)。
 
-**本会话已全部提交并推送**：`93482a1`（`origin/master` 已同步），工作区干净。
+**本会话已全部提交并推送**：`fb27e07`（`origin/master` 已同步），工作区干净。
 
 ## 1. 本次会话做了什么
 
@@ -122,21 +122,21 @@ Added driver packages:  7        ← 7 个成功
 
 ## 2. 当前发布链状态（接续的第一件事）
 
-**新 handoff 已就绪**：`artifacts/vmp-handoff/33c82bf8-3899-4050-9cf8-67ba4c6d026a`
+**新 handoff 已就绪**：`artifacts/vmp-handoff/176027cd-7dfc-4f4b-a82c-cb10eb61cead`
 
 ```
-handoff_id : 33c82bf8-3899-4050-9cf8-67ba4c6d026a
-git_commit : 93482a16eaa1e73c12171ecadccd57525a06e612   ← 含驱动修复
+handoff_id : 176027cd-7dfc-4f4b-a82c-cb10eb61cead
+git_commit : fb27e073de1478580eb496d9ab5531b43869892f   ← 含驱动成败判定修复
 build_id   : 2026.09.28.1
 state      : prepared    （等待 VMProtect Lite GUI 处理）
-input_exe  : FF4221915BB4277B40E179C487886B1B0C2375D06918873C329D0D1E65EBF9AD  (11,766,272 B)
-input_map  : 687C34C25DFBC5AB4644172CD0500472DA33BE75152E4B06A4235F28CA8E04FC  marker_layout_verified=true
+input_exe  : 9FE0F6AD2006961F0E62FAB8C95579142E790BDAF1B8788EB82DC00866278FCF  (11,769,856 B)
+input_map  : C9897ACE9EDB5B3F956970F0C8743FAD6D559C161AD269A87889D4D707C1E29A  marker_layout_verified=true
 input_pdb  : matches_input_exe=true
 输出路径   : artifacts\vmp-handoff\nwflash-desktop.vmp.exe
 编译日志   : artifacts\vmp-handoff\compiler.log
 ```
 
-**产物健康四联判据已核对**（防「编译成功但产物是残废探针」）：大小 11,766,272 B
+**产物健康四联判据已核对**（防「编译成功但产物是残废探针」）：大小 11,769,856 B
 （健康档 ~11.4MB / 残废档 ~1.5MB）、MAP 8/8 保护叶子、前端 bundle `index-DRY8zCgr`
 命中、生产公钥 base64 文本命中、`/subdirs` 命中（证明驱动修复已编入）。
 
@@ -176,7 +176,7 @@ input_pdb  : matches_input_exe=true
 
 ```bash
 pwsh -NoProfile -File scripts/vmp/accept-manual-output.ps1 \
-  -PreparedManifest "artifacts\vmp-handoff\33c82bf8-3899-4050-9cf8-67ba4c6d026a\evidence\prepared.json" \
+  -PreparedManifest "artifacts\vmp-handoff\176027cd-7dfc-4f4b-a82c-cb10eb61cead\evidence\prepared.json" \
   -MarkerReviewPath "<marker-review.json 路径>"
 ```
 
@@ -261,7 +261,7 @@ release 编译**之后**，白等一次全量编译。
 重启 VMProtect GUI 并加载最新 staged EXE：
 
 ```bash
-MSYS_NO_PATHCONV=1 powershell -NoProfile -Command "Start-Process -FilePath 'C:\Users\17254\Downloads\VMProtect Lite v3.10.4 Build 2668 (1)\VMProtect.exe' -ArgumentList '\"C:\Users\17254\Desktop\存档\TOOL\VivoKsu 工具\artifacts\vmp-handoff\33c82bf8-3899-4050-9cf8-67ba4c6d026a\input\nwflash-desktop.exe\"'"
+MSYS_NO_PATHCONV=1 powershell -NoProfile -Command "Start-Process -FilePath 'C:\Users\17254\Downloads\VMProtect Lite v3.10.4 Build 2668 (1)\VMProtect.exe' -ArgumentList '\"C:\Users\17254\Desktop\存档\TOOL\VivoKsu 工具\artifacts\vmp-handoff\176027cd-7dfc-4f4b-a82c-cb10eb61cead\input\nwflash-desktop.exe\"'"
 ```
 
 只验 SDK / 链接契约（不编译，快）：
@@ -284,9 +284,11 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u AL
    `build.rs` 只在 `protected` 下写 `/MAP:`，但裸 `cargo build --release` 会静默把
    EXE/PDB 换成新一代、把 MAP 留在原地 → VMProtect 报时间戳不一致。可在 `build.rs`
    加「release 且已有 MAP 却不带 protected 时给 warning」的守卫。
-2. **旧 handoff 清理**：`artifacts/vmp-handoff/` 下现在有三个——
-   `53630471`（绑 `a0069bc`，最旧）、`130a6e3f`（绑 `fa98ee4`，已被取代）、
-   `33c82bf8`（绑 `93482a1`，**当前有效**）。前两个已过期，确认后可删。
+2. **旧 handoff 清理**：`artifacts/vmp-handoff/` 下现在有四个——
+   `53630471`（绑 `a0069bc`）、`130a6e3f`（绑 `fa98ee4`）、
+   `33c82bf8`（绑 `93482a1`，驱动判定修复**之前**的产物）、
+   `176027cd`（绑 `fb27e07`，**当前有效**）。前三个已过期，确认后可删。
+   注意每次改源码重跑 `-PrepareManual` 都会新增一个目录，不会覆盖旧的。
 3. **`operation_coordinator.rs` 格式漂移**（2 处）——既有问题，未修；要顺手修可单独提 commit。
 4. **7 处既有 `undocumented_unsafe_blocks` clippy error**——既有问题，未修。
 
@@ -299,5 +301,9 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u AL
    是服务端真源；Rust 六层 crate 见 project-architecture.md。
 5. 同一仓库**不要开两个会话同时改**；改码只用 Read+Edit，禁止 `git checkout/restore/stash`
    覆盖工作区。
-6. `-PrepareManual` 要求工作区**干净**（`AssertGitClean`）——先提交再跑。
-7. 打补丁/交接一律走 `-PrepareManual`，**不要**裸 `cargo build --release`。
+6. **提交前不要用 `git add -A` 盲扫**。本会话实测事故：`a1e17fd` 用 `git add -A` 把一个
+   并行会话**正在进行的删除动作**一并扫进提交，导致 `34c597c`/`2a77c68` 新增的
+   `scripts/New-NwflashHandoffBundle.ps1` 从 HEAD 消失（已由 `fb27e07` 恢复）。
+   只 `git add <你自己的文件>`；发现不认识的 commit 先 `git log` 对时间线，视为并行会话。
+7. `-PrepareManual` 要求工作区**干净**（`AssertGitClean`）——先提交再跑。
+8. 打补丁/交接一律走 `-PrepareManual`，**不要**裸 `cargo build --release`。
